@@ -495,3 +495,5 @@ host (a VM or an always-on container), not a scale-to-zero/serverless one.
 - **Tune adaptiveness**: `self_rag.py`'s `initial_floor`/`broadened_floor` control how strict the relevance bar is before a broadened retry kicks in.
 - **More live intents**: add a new `Intent` in `query_router.py`, a matching method in `railway_api.py`, and a branch in `app.py`'s `chat()` handler.
 - **Auth / rate limiting**: not included — add before exposing this publicly, since the railway data provider and Anthropic calls both cost quota per request.
+#   r a i l w a y - r a g - a s s i s t a n t  
+ 
