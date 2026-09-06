@@ -1,0 +1,57 @@
+<svg viewBox="0 0 640 240" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+  <style>
+    .lbl { font-size: 12.5px; fill: #0B2545; font-weight: 600; }
+    .sub { font-size: 10px; fill: #5a6b85; }
+    .box { fill: #F3EEE3; stroke: #16324F; stroke-width: 1.5; }
+    .bar { fill: #16324F; }
+  </style>
+  <text x="10" y="18" font-size="11" fill="#5a6b85">Each quota is a separate, smaller seat pool with its own waitlist:</text>
+
+  <g>
+    <rect class="box" x="10" y="30" width="145" height="60" rx="4"/>
+    <text class="lbl" x="18" y="52">GN — General</text>
+    <text class="sub" x="18" y="68">Main quota, largest pool</text>
+    <rect class="bar" x="18" y="76" width="120" height="6"/>
+  </g>
+  <g>
+    <rect class="box" x="165" y="30" width="145" height="60" rx="4"/>
+    <text class="lbl" x="173" y="52">TQ / PT — Tatkal</text>
+    <text class="sub" x="173" y="68">Opens 1 day before journey</text>
+    <rect class="bar" x="173" y="76" width="60" height="6"/>
+  </g>
+  <g>
+    <rect class="box" x="320" y="30" width="145" height="60" rx="4"/>
+    <text class="lbl" x="328" y="52">PQ — Pooled</text>
+    <text class="sub" x="328" y="68">Shared across the route</text>
+    <rect class="bar" x="328" y="76" width="40" height="6"/>
+  </g>
+  <g>
+    <rect class="box" x="475" y="30" width="150" height="60" rx="4"/>
+    <text class="lbl" x="483" y="52">RLWL — Remote</text>
+    <text class="sub" x="483" y="68">For intermediate stations</text>
+    <rect class="bar" x="483" y="76" width="30" height="6"/>
+  </g>
+
+  <g>
+    <rect class="box" x="10" y="110" width="145" height="55" rx="4"/>
+    <text class="lbl" x="18" y="132">LD — Ladies</text>
+    <text class="sub" x="18" y="148">Small reserved allocation</text>
+  </g>
+  <g>
+    <rect class="box" x="165" y="110" width="145" height="55" rx="4"/>
+    <text class="lbl" x="173" y="132">SS — Senior Citizen</text>
+    <text class="sub" x="173" y="148">Reserved lower berths</text>
+  </g>
+  <g>
+    <rect class="box" x="320" y="110" width="145" height="55" rx="4"/>
+    <text class="lbl" x="328" y="132">HP — Handicapped</text>
+    <text class="sub" x="328" y="148">Accessibility seats</text>
+  </g>
+  <g>
+    <rect class="box" x="475" y="110" width="150" height="55" rx="4"/>
+    <text class="lbl" x="483" y="132">Defence / Duty</text>
+    <text class="sub" x="483" y="148">Armed forces personnel</text>
+  </g>
+
+  <text x="10" y="195" class="sub">Bar length ≈ relative pool size (illustrative, not to exact scale).</text>
+</svg>

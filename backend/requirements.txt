@@ -1,0 +1,44 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+requests==2.32.3
+python-dotenv==1.0.1
+scikit-learn==1.5.2
+anthropic==0.34.2
+google-genai>=2.19.0  # Gemini: primary text-synthesis provider (GPS/live-status/routes/FAQ)
+pydantic==2.9.2
+joblib==1.4.2              # Train Delay Prediction: caches the fitted stacked ensemble model to disk
+shap==0.46.0                # Train Delay Prediction: SHAP KernelExplainer for real per-factor delay attribution
+websockets==13.1           # Real-Time Train Position + Proactive Alerts: WebSocket support for uvicorn
+
+# Push Notifications for Proactive Alerts: background scheduler +
+# Firebase Cloud Messaging send. Both degrade gracefully if missing/
+# unconfigured (see alert_scheduler.py / push_notifications.py) — nothing
+# else in the app depends on these being installed.
+APScheduler==3.10.4
+firebase-admin==6.5.0
+
+# --- Advanced RAG pipeline ---
+rank-bm25==0.2.2          # Hybrid Retrieval: lexical (BM25) half of the fusion
+networkx==3.3             # Graph RAG: entity graph + 1-hop expansion
+numpy==1.26.4             # shared vector math (compression, hybrid fusion)
+
+# Semantic Search Upgrade (optional but recommended): real sentence
+# embeddings instead of the TF-IDF/SVD fallback baked into semantic_engine.py.
+# These are heavy (torch download); if you can't install them, the app
+# degrades automatically to the scikit-learn-only fallback with no code
+# changes needed.
+sentence-transformers==3.0.1
+torch==2.4.1
+
+# Automatic keyword/intent discovery (auto_keyword_discovery.py): replaces
+# hand-typed keyword lists / manual few_shot_intents.teach_intent() calls.
+yake==0.4.8                # keyphrase extraction — pure Python, no torch/GPU needed
+
+# Optional upgrades for auto_keyword_discovery.py / entity_gazetteer.py.
+# Neither is required — both modules degrade automatically (BERTopic ->
+# scikit-learn KMeans over the existing embeddings; GLiNER/spaCy -> the
+# data-file-driven gazetteer already built in) with no code changes needed,
+# same pattern as the sentence-transformers fallback above.
+# bertopic==0.16.3          # richer automatic intent/topic clustering
+# gliner==0.2.13            # zero-shot entity extraction beyond the gazetteer's known stations
+# spacy==3.7.5              # rules-based alternative entity matcher (EntityRuler/PhraseMatcher)

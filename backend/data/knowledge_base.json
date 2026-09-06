@@ -1,0 +1,569 @@
+[
+  {
+    "id": "pnr-status-meaning",
+    "category": "PNR & Booking Status",
+    "text": "PNR (Passenger Name Record) status shows the current booking state of a ticket. CNF means the seat is confirmed with coach and berth number. RAC (Reservation Against Cancellation) means the passenger is allotted a shared berth and will get a full berth if a confirmed passenger cancels. WL (Waiting List) means no berth is currently allotted; the number after WL (e.g. WL/24) shows position in the waiting queue. A ticket only guarantees travel once it reaches CNF or RAC status by chart preparation.",
+    "entities": [
+      "pnr",
+      "cnf",
+      "rac",
+      "wl"
+    ]
+  },
+  {
+    "id": "chart-preparation",
+    "category": "PNR & Booking Status",
+    "text": "The reservation chart is usually prepared 4 hours before the train's scheduled departure from its originating station, though for some trains it may be prepared earlier (up to 24-30 hours) if departure is very early morning. Once the chart is prepared, PNR status freezes and any remaining waitlisted tickets are typically cancelled automatically if they did not clear.",
+    "entities": [
+      "chart_preparation",
+      "wl",
+      "cnf",
+      "rac"
+    ]
+  },
+  {
+    "id": "waitlist-clearing",
+    "category": "PNR & Booking Status",
+    "text": "Waitlisted ticket confirmation chances depend on the quota booked, route, season, and how far in advance the ticket was booked. GNWL (General Waitlist) generally clears better than PQWL (Pooled Quota) or RLWL (Remote Location Waitlist). There is no guaranteed formula; the RAG assistant should present this as a general explanation, not a numeric prediction, and always recommend checking live PNR status for the actual confirmation chance shown by the railway data provider.",
+    "entities": [
+      "wl",
+      "gnwl",
+      "pqwl",
+      "rlwl",
+      "quota"
+    ]
+  },
+  {
+    "id": "tatkal-rules",
+    "category": "Tatkal Booking",
+    "text": "Tatkal booking opens one day before the actual date of journey (excluding the day of journey), from 10:00 AM for AC classes (2A, 3A, CC, EC) and 11:00 AM for non-AC classes (SL, 2S, FC). Tatkal tickets carry an additional Tatkal charge on top of the base fare, vary by class, and are non-refundable on cancellation except in specific cases like train cancellation by Railways.",
+    "entities": [
+      "tatkal",
+      "booking_process",
+      "refund"
+    ]
+  },
+  {
+    "id": "premium-tatkal",
+    "category": "Tatkal Booking",
+    "text": "Premium Tatkal (PT quota) uses dynamic, demand-based pricing that rises as seats are booked, has no refund on cancellation, and does not allow concession fares. It is booked through the same Tatkal booking window timing as regular Tatkal.",
+    "entities": [
+      "premium_tatkal",
+      "tatkal",
+      "quota"
+    ]
+  },
+  {
+    "id": "cancellation-refund-confirmed",
+    "category": "Cancellation & Refunds",
+    "text": "For a confirmed ticket, cancellation charges depend on how far in advance it is cancelled before scheduled departure: cancelling more than 48 hours before departure incurs a flat minimum cancellation charge per class; cancelling between 48 and 12 hours before departure forfeits 25% of the fare; cancelling between 12 hours and 4 hours before departure forfeits 50% of the fare; cancelling within 4 hours of departure generally results in no refund for confirmed tickets.",
+    "entities": [
+      "cancellation",
+      "refund",
+      "cnf"
+    ]
+  },
+  {
+    "id": "cancellation-refund-waitlist",
+    "category": "Cancellation & Refunds",
+    "text": "For a waitlisted ticket that never confirmed, cancelling before chart preparation gives a refund after deducting a small clerkage charge. If a waitlisted e-ticket is not cancelled and remains waitlisted after chart preparation, it is automatically cancelled and refunded by IRCTC, since waitlisted e-tickets are not valid for travel.",
+    "entities": [
+      "cancellation",
+      "refund",
+      "wl",
+      "chart_preparation"
+    ]
+  },
+  {
+    "id": "classes-of-travel",
+    "category": "Classes & Coaches",
+    "text": "Common travel classes on Indian Railways: 1A (First AC, most private, 2/4 berth cabins), 2A (AC Two Tier, 2 berths per bay with curtains), 3A (AC Three Tier, 3 berths per bay), 3E (AC Three Economy), CC (AC Chair Car, seating for day trains), EC (Executive Chair Car, premium seating on Shatabdi/Vande Bharat type trains), SL (Sleeper, non-AC berths), 2S (Second Sitting, non-AC seating), FC (First Class non-AC, rare now).",
+    "entities": [
+      "classes"
+    ],
+    "diagram": "coach_classes.svg"
+  },
+  {
+    "id": "quota-types",
+    "category": "Quotas",
+    "text": "Booking quotas include GN (General), TQ (Tatkal), LD (Ladies), SS (Senior Citizen), PT (Premium Tatkal), HP (Handicapped), PQ (Pooled Quota shared across a route), RLWL (Remote Location Waitlist for intermediate stations), and defence/duty quotas for armed forces personnel. Each quota has a separate, smaller allocation of seats and its own waitlist.",
+    "entities": [
+      "quota",
+      "gnwl",
+      "pqwl",
+      "rlwl",
+      "tatkal",
+      "premium_tatkal",
+      "senior_citizen"
+    ],
+    "diagram": "quota_types.svg"
+  },
+  {
+    "id": "senior-citizen-concession",
+    "category": "Concessions",
+    "text": "Indian Railways previously offered senior citizen fare concessions but these were withdrawn in March 2020 for general classes and have not been broadly reinstated as of the last confirmed policy update; senior citizens can still book under the Senior Citizen (SS) quota for a small number of reserved lower berths without a fare discount. Passengers should always verify current concession policy on the live source since fare rules change over time.",
+    "entities": [
+      "senior_citizen",
+      "quota"
+    ]
+  },
+  {
+    "id": "child-ticket-rules",
+    "category": "Concessions",
+    "text": "Children below 5 years of age travel free without a berth/seat. Children aged 5 to under 12 years can be booked either with a full berth at full fare, or without a berth at approximately half fare (specific percentage set by current IRCTC fare rules) at the time of booking, a choice the passenger must make explicitly.",
+    "entities": [
+      "child_ticket"
+    ]
+  },
+  {
+    "id": "train-types",
+    "category": "Train Types",
+    "text": "Notable Indian Railways train categories: Rajdhani Express (fully AC, connects state capitals to Delhi, priority run), Shatabdi Express (day AC intercity), Duronto Express (long-distance, fewer stops), Vande Bharat Express (semi-high-speed self-propelled AC train sets), Garib Rath (budget AC-only), Jan Shatabdi (budget day intercity), and regular Mail/Express and Passenger trains with mixed classes.",
+    "entities": [
+      "train_types",
+      "rajdhani",
+      "shatabdi",
+      "duronto",
+      "vande_bharat",
+      "garib_rath",
+      "jan_shatabdi"
+    ]
+  },
+  {
+    "id": "irctc-booking-steps",
+    "category": "Booking Process",
+    "text": "To book a ticket on IRCTC: create/verify an IRCTC account, search trains between source and destination for the travel date, choose a train and class, check seat availability, enter passenger details, select payment method, and confirm. Tatkal and Premium Tatkal bookings require extra speed since seats fill within minutes of the booking window opening.",
+    "entities": [
+      "booking_process",
+      "irctc",
+      "tatkal"
+    ]
+  },
+  {
+    "id": "platform-ticket",
+    "category": "Station Access",
+    "text": "A platform ticket allows a non-travelling person to enter the platform to see off or receive passengers, valid for a short duration (commonly around 2 hours) and purchasable at station counters or via the UTS mobile app, separate from a reserved journey ticket.",
+    "entities": [
+      "platform_ticket",
+      "station_code"
+    ]
+  },
+  {
+    "id": "luggage-rules",
+    "category": "Luggage",
+    "text": "Each class has a free luggage allowance (varies by class, e.g. higher for AC First than Sleeper) and a marginally higher limit if excess luggage fare is paid at the parcel office. Luggage beyond the paid limit must be booked separately as registered luggage; carrying excess unbooked luggage can attract a penalty.",
+    "entities": [
+      "luggage",
+      "classes"
+    ]
+  },
+  {
+    "id": "e-ticket-vs-i-ticket",
+    "category": "Booking Process",
+    "text": "An e-ticket is booked online and the passenger travels using an SMS/print copy along with original ID proof; no physical ticket is needed. An i-ticket is booked online but physically couriered to the passenger's address before travel; i-tickets are largely phased out in current IRCTC practice in favor of e-tickets.",
+    "entities": [
+      "e_ticket",
+      "i_ticket",
+      "booking_process",
+      "irctc"
+    ]
+  },
+  {
+    "id": "food-catering",
+    "category": "Onboard Services",
+    "text": "Catering on Indian Railways includes pantry car meals on long-distance trains, e-catering food delivery to seat/berth ordered in advance via IRCTC's e-catering service for select stations, and vendor-sold food/tea at platforms. Rajdhani, Shatabdi, and Duronto fares often include meals bundled into the ticket price.",
+    "entities": [
+      "catering",
+      "train_types"
+    ]
+  },
+  {
+    "id": "helpline-numbers",
+    "category": "Support & Helpline",
+    "text": "Indian Railways operates a national helpline number 139 (Rail Madad / general enquiry, available in multiple languages) for PNR status, train enquiry, security, medical assistance, and complaints. Rail Madad is also available as a web portal and mobile app for lodging complaints and tracking their resolution status. Additional dedicated numbers include 182 for women's safety/security assistance, and RPF (Railway Protection Force) and GRP (Government Railway Police) for crime/security matters at stations and on trains — both can also be reached by informing the TTE, who can relay a request to the next station.",
+    "entities": [
+      "helpline",
+      "women_safety",
+      "rpf",
+      "grp"
+    ]
+  },
+  {
+    "id": "station-codes",
+    "category": "Stations",
+    "text": "Every railway station has a unique alphabetic station code used in bookings and schedules, for example NDLS for New Delhi, CSMT for Mumbai CST, MAS for Chennai Central, HWH for Howrah, SBC for Bengaluru City. Passengers can look up a station's code through the train search tools when booking.",
+    "entities": [
+      "station_code"
+    ]
+  },
+  {
+    "id": "running-status-meaning",
+    "category": "Live Running Status",
+    "text": "Live running status of a train shows its last recorded location, the next station, scheduled versus expected arrival/departure time at upcoming stations, and delay in minutes if any. This information depends on GPS/signal data feeds and can occasionally lag in tunnels, remote sections, or during signal outages.",
+    "entities": [
+      "live_status",
+      "station_code"
+    ]
+  },
+  {
+    "id": "wrong-coach-travel",
+    "category": "Coach & Seating Rules",
+    "text": "Travelling in a coach or class other than the one booked (e.g. sitting in AC with a Sleeper ticket, or in a reserved coach with an unreserved ticket) is not permitted. The TTE can charge the fare difference for the higher class plus a penalty, and can direct the passenger to move to their booked coach if a seat is available there; if no seat is available, they may be asked to detrain at the next station.",
+    "entities": [
+      "coach",
+      "class",
+      "tte",
+      "penalty",
+      "unreserved"
+    ]
+  },
+  {
+    "id": "ladies-coach-rules",
+    "category": "Coach & Seating Rules",
+    "text": "The ladies coach (and reserved ladies compartments on some suburban/local services) is reserved for women passengers and children accompanying them. Men found travelling in it can be fined and asked to move to a general coach; this is a safety and comfort provision, not merely a suggestion.",
+    "entities": [
+      "ladies_coach",
+      "women_safety",
+      "penalty"
+    ]
+  },
+  {
+    "id": "penalty-without-ticket",
+    "category": "Penalties & Violations",
+    "text": "Travelling without a valid ticket, or with a lower class/quota ticket than the class actually travelled in, attracts the fare for the distance travelled (or up to the next stoppage, whichever is more) plus a penalty under the Railways Act. The exact penalty amount is revised periodically, so passengers should check the current RailMadad/IRCTC published penalty schedule rather than assume a fixed figure; repeated or serious offences can lead to prosecution rather than just a fine.",
+    "entities": [
+      "penalty",
+      "without_ticket",
+      "railways_act",
+      "tte"
+    ]
+  },
+  {
+    "id": "delay-causes",
+    "category": "Train Operations",
+    "text": "A train's reported delay is the difference between its scheduled and actual/expected time at a given station. Common causes include signal or track maintenance blocks, weather (especially fog in North India during winter, which forces speed restrictions), technical failures, level-crossing or safety-related halts, congestion at busy junctions, and knock-on delay inherited from a late-running train ahead of it on the same line. Live delay figures from the tracking feed reflect the current real situation and should be trusted over any general explanation of typical causes.",
+    "entities": [
+      "delay",
+      "running_status",
+      "fog",
+      "signal"
+    ]
+  },
+  {
+    "id": "train-cancellation-rules",
+    "category": "Train Operations",
+    "text": "Indian Railways may cancel a scheduled train run due to engineering/maintenance blocks, very low advance bookings on some routes, extreme weather, security concerns, or other operational reasons, and this is announced in advance where possible. A fully cancelled train entitles passengers to a full refund; for e-tickets this is usually processed automatically, while counter-booked tickets typically need a TDR (Ticket Deposit Receipt) filed at the counter or via IRCTC.",
+    "entities": [
+      "cancellation",
+      "refund",
+      "tdr",
+      "train_cancelled"
+    ]
+  },
+  {
+    "id": "train-diversion",
+    "category": "Train Operations",
+    "text": "A train may be diverted onto a different route than scheduled because of flooding, track damage, protests/blockades, or emergency engineering work, which can mean it skips some originally scheduled stops. Passengers booked to board or alight at a station the diverted train no longer serves are entitled to a refund for the unused portion of their journey (via TDR) and, where the railway arranges alternate transport, that arrangement rather than the original train.",
+    "entities": [
+      "diversion",
+      "refund",
+      "tdr",
+      "route_change"
+    ]
+  },
+  {
+    "id": "short-termination",
+    "category": "Train Operations",
+    "text": "A train is 'short-terminated' when it is stopped and ends its run at a station short of its scheduled final destination, usually due to an operational disruption further down the route (track blockage, safety issue, extreme delay cascading). Passengers for the remaining, un-run portion are entitled to a refund for that portion and, where offered, an alternate arrangement to complete their journey.",
+    "entities": [
+      "short_termination",
+      "refund",
+      "diversion"
+    ]
+  },
+  {
+    "id": "train-rescheduling",
+    "category": "Train Operations",
+    "text": "When a train's departure is rescheduled, a delay of more than roughly three hours from the original scheduled departure generally entitles a passenger who no longer wishes to travel to a full refund via TDR, even on an otherwise-confirmed ticket, provided it's filed within the applicable window. Passengers should check the specific rescheduled time shown in live running status rather than assume the original timetable still holds.",
+    "entities": [
+      "rescheduling",
+      "refund",
+      "tdr",
+      "delay"
+    ]
+  },
+  {
+    "id": "speed-restrictions",
+    "category": "Train Operations",
+    "text": "Temporary Speed Restrictions (TSRs) are imposed for track maintenance work, sharp curves, weak bridges under repair, level crossings, and heavy fog or poor visibility, and are a normal, planned part of running the network safely rather than a fault. Multiple TSRs on a route are one of the more common contributors to cumulative delay on longer journeys.",
+    "entities": [
+      "speed_restriction",
+      "delay",
+      "fog",
+      "maintenance"
+    ]
+  },
+  {
+    "id": "train-precedence-crossing",
+    "category": "Train Operations",
+    "text": "At junctions and crossing/overtaking points, higher-priority trains (e.g. Rajdhani/Shatabdi/Vande Bharat/mail-express class services) are generally given precedence over slower passenger or freight trains, which may be held on a loop line to let the higher-priority train pass. This is a general explanation of typical practice, not a guarantee for any specific train — actual precedence decisions are made by the traffic controller in real time based on the overall section situation.",
+    "entities": [
+      "precedence",
+      "overtaking",
+      "signal",
+      "delay"
+    ]
+  },
+  {
+    "id": "station-hierarchy",
+    "category": "Station Operations",
+    "text": "Indian Railways stations are graded into categories — A1, A, B, C, D, E, F, G (naming/thresholds are periodically revised) — mainly based on annual passenger footfall and earnings. Category broadly determines staffing levels and which facilities (retiring rooms, larger waiting halls, more platforms, dedicated enquiry counters) a station is likely to have; smaller halt stations (lower categories) may have minimal staff and facilities.",
+    "entities": [
+      "station_category",
+      "station_facilities"
+    ]
+  },
+  {
+    "id": "station-facilities",
+    "category": "Station Operations",
+    "text": "Major stations (typically A1/A category) commonly offer general and upper-class waiting rooms, retiring rooms or dormitories that can be booked for a short stay by ticket holders, IRCTC food stalls and e-catering delivered to your seat/berth on many trains, a medical/first-aid post, and an enquiry counter. Smaller stations may have only a subset of these, so it's worth checking a specific station's facilities before relying on them.",
+    "entities": [
+      "retiring_room",
+      "waiting_room",
+      "food_catering",
+      "station_facilities"
+    ]
+  },
+  {
+    "id": "pis-announcements",
+    "category": "Station Operations",
+    "text": "The Passenger Information System (PIS) — display boards plus public-address announcements, usually in Hindi, English, and the local regional language — gives arrival/departure times, platform numbers, and delay updates at a station. Because platform assignment can change close to a train's arrival, the PIS display or a fresh announcement is more reliable at that point than whatever platform was mentioned earlier (including in an app).",
+    "entities": [
+      "pis",
+      "announcements",
+      "platform"
+    ]
+  },
+  {
+    "id": "platform-allocation",
+    "category": "Station Operations",
+    "text": "Which platform a train uses can be reassigned shortly before arrival depending on traffic and congestion at that station, even if a different platform was shown earlier. Always confirm the platform from the live station display/announcement (or a live-tracking feed) rather than treating an earlier platform number as final.",
+    "entities": [
+      "platform",
+      "pis",
+      "station_facilities"
+    ]
+  },
+  {
+    "id": "foot-overbridge-safety",
+    "category": "Safety & Security",
+    "text": "Passengers should cross railway lines only via the foot overbridge, underpass/subway, or a designated level crossing at a station — never by walking directly across the tracks. Crossing tracks directly is illegal and one of the most common causes of preventable death and injury at stations.",
+    "entities": [
+      "foot_overbridge",
+      "safety",
+      "track_crossing"
+    ]
+  },
+  {
+    "id": "prohibited-items",
+    "category": "Safety & Security",
+    "text": "Items prohibited on trains and at stations include firearms/ammunition (without valid permit and declaration), explosives, flammable substances (e.g. cooking-gas cylinders, petrol), corrosive chemicals, and other materials classified as dangerous goods under railway safety rules. Carrying such items can lead to confiscation, fines, and prosecution, independent of intent.",
+    "entities": [
+      "prohibited_items",
+      "safety",
+      "security"
+    ]
+  },
+  {
+    "id": "baggage-scanning",
+    "category": "Safety & Security",
+    "text": "Many major stations screen baggage through X-ray scanners and/or frisking at entry as a security measure, particularly at busier terminals and during heightened-alert periods. Passengers should expect this and keep prohibited items out of their luggage entirely rather than assuming casual checking; refusal to allow a security check can itself result in denial of entry.",
+    "entities": [
+      "baggage_scanning",
+      "security",
+      "prohibited_items"
+    ]
+  },
+  {
+    "id": "emergency-procedures",
+    "category": "Safety & Security",
+    "text": "For a genuine onboard emergency (fire, medical emergency, serious safety threat), passengers can pull the alarm chain to stop the train, and should inform the TTE/coach attendant or guard immediately. Coaches carry fire extinguishers; the train can also be stopped at or diverted to the nearest station for medical help or an ambulance to be arranged. Misusing the alarm chain for a non-emergency reason is a punishable offence under the Railways Act.",
+    "entities": [
+      "emergency",
+      "alarm_chain",
+      "fire",
+      "medical_emergency",
+      "tte"
+    ]
+  },
+  {
+    "id": "cctv-coverage",
+    "category": "Safety & Security",
+    "text": "CCTV surveillance is increasingly installed at major stations and, on many newer or upgraded rakes, inside coaches (particularly ladies coaches), as part of ongoing security upgrades. Coverage is not yet universal across every station and every coach, so passengers shouldn't assume it's present everywhere, but footage where available is used for security investigations.",
+    "entities": [
+      "cctv",
+      "security",
+      "women_safety"
+    ]
+  },
+  {
+    "id": "women-safety-measures",
+    "category": "Safety & Security",
+    "text": "Women-safety measures on Indian Railways include the reserved ladies coach, a dedicated women's helpline (182), RPF escort/patrol on some trains and stations under initiatives like 'Meri Saheli', and CCTV in ladies coaches on many upgraded rakes. A passenger facing harassment should inform the TTE/guard immediately and can call 182 (or 139) for assistance.",
+    "entities": [
+      "women_safety",
+      "helpline",
+      "ladies_coach",
+      "harassment"
+    ]
+  },
+  {
+    "id": "compensation-ordinary-delay",
+    "category": "Refunds & Compensation",
+    "text": "Indian Railways does not have a standard, fixed cash-compensation scheme for an ordinary late-running train, unlike airline delay-compensation rules in some other transport modes. If a passenger no longer wants to travel because of a long delay, the practical remedy is a refund via TDR (if the delay crosses the rescheduling threshold) rather than a compensation payout for the inconvenience itself.",
+    "entities": [
+      "compensation",
+      "delay",
+      "refund",
+      "tdr"
+    ]
+  },
+  {
+    "id": "denied-boarding-compensation",
+    "category": "Refunds & Compensation",
+    "text": "Denied boarding for a confirmed-ticket passenger is uncommon and, unlike airlines, Indian Railways does not have a standardized cash-compensation scheme for it. The remedy is to raise a complaint via RailMadad/139 or file a TDR for a refund; any further compensation would typically go through a formal complaint or consumer-forum process rather than an on-the-spot payout.",
+    "entities": [
+      "denied_boarding",
+      "compensation",
+      "refund",
+      "helpline"
+    ]
+  },
+  {
+    "id": "lost-luggage-compensation",
+    "category": "Refunds & Compensation",
+    "text": "Luggage formally booked and handed over as registered/parcel luggage is covered by the Railway Claims Tribunal framework, with liability generally limited by the declared value and weight at booking — so declaring value accurately matters. Personal hand luggage kept with the passenger in their own coach is the passenger's own responsibility; the railway does not insure or automatically compensate for hand luggage lost or stolen in this way.",
+    "entities": [
+      "luggage",
+      "lost_luggage",
+      "compensation",
+      "claims_tribunal"
+    ]
+  },
+  {
+    "id": "tatkal-refund-on-cancellation",
+    "category": "Cancellation & Refunds",
+    "text": "A CONFIRMED Tatkal (or Premium Tatkal) ticket is not refunded if the passenger themself cancels it — the statutory exceptions are if the train is cancelled, terminated short of destination, or rescheduled beyond the usual delay threshold, in which case a refund does apply the same way it would for a regular ticket. A Tatkal ticket that stays WAITLISTED and never confirms by chart preparation is auto-cancelled and refunded (minus standard charges), since it never actually secured travel.",
+    "entities": [
+      "tatkal",
+      "refund",
+      "cancellation",
+      "waitlist"
+    ]
+  },
+  {
+    "id": "booking-payment-failed",
+    "category": "Booking Process",
+    "text": "If a payment appears to fail or the booking status is unclear on IRCTC, the safer step is to check 'Booking History'/'Transaction History' for a few minutes before retrying, since a debited amount for a booking that didn't actually confirm is normally auto-reversed to the original payment method within a matter of days. Repeatedly retrying immediately risks an unnecessary duplicate charge if the first attempt was still processing.",
+    "entities": [
+      "irctc",
+      "payment_failed",
+      "booking",
+      "refund"
+    ]
+  },
+  {
+    "id": "boarding-station-change",
+    "category": "Booking Process",
+    "text": "IRCTC allows changing the boarding point on a confirmed e-ticket once, before the chart is prepared, via the 'Change Boarding Point' option — after chart preparation this is no longer possible, and the passenger must board from the originally booked station (or an earlier one on the route).",
+    "entities": [
+      "boarding_station",
+      "irctc",
+      "chart_preparation"
+    ]
+  },
+  {
+    "id": "partial-refund-break-journey",
+    "category": "Cancellation & Refunds",
+    "text": "A passenger can break their journey partway (subject to distance and count restrictions that apply mainly on longer-distance tickets) and resume later on the same ticket. A refund for an unused portion of a journey — including one shortened by breaking journey or by the passenger simply not travelling part of the route — generally requires filing a TDR; it is not automatic just because part of the journey wasn't used.",
+    "entities": [
+      "break_journey",
+      "refund",
+      "tdr"
+    ]
+  },
+  {
+    "id": "pets-on-train",
+    "category": "Special Travel Rules",
+    "text": "Small pets can generally travel with a passenger only in a first-class AC coupe/cabin, booked in advance with the guard/station superintendent and a fee, and are not permitted loose in general reserved coaches such as Sleeper or regular AC classes. Larger animals must travel booked separately as parcel/brake-van cargo with its own fee and paperwork, not alongside the owner in a passenger coach.",
+    "entities": [
+      "pets",
+      "luggage",
+      "brake_van"
+    ]
+  },
+  {
+    "id": "outside-food-rules",
+    "category": "Onboard Services",
+    "text": "There is no restriction on carrying home-cooked food or food purchased outside the station/train for personal consumption. IRCTC catering and e-catering (food ordered for delivery to your seat/berth) are also available on many trains as an alternative to carrying your own.",
+    "entities": [
+      "food",
+      "catering",
+      "luggage"
+    ]
+  },
+  {
+    "id": "liquor-alcohol-rules",
+    "category": "Safety & Security",
+    "text": "Carrying or consuming alcohol on trains and at railway stations is generally prohibited under the Railways Act; where local/state law permits carrying a sealed, limited quantity with a valid permit this is a narrow exception, not the default rule. Violations can lead to a fine, confiscation, or removal from the train.",
+    "entities": [
+      "alcohol",
+      "liquor",
+      "prohibited_items",
+      "penalty"
+    ]
+  },
+  {
+    "id": "foreign-tourist-quota",
+    "category": "Quotas",
+    "text": "The Foreign Tourist Quota (FTQ) sets aside a small allocation of seats/berths on select popular long-distance trains for foreign passport holders (and, on some trains, NRIs/PIO cardholders), bookable through IRCTC's dedicated foreign-tourist login (with passport details) or an authorized travel agent, separate from the General quota pool.",
+    "entities": [
+      "ftq",
+      "foreign_tourist",
+      "quota"
+    ]
+  },
+  {
+    "id": "differently-abled-facilities",
+    "category": "Station Operations",
+    "text": "Facilities for differently-abled passengers include wheelchair assistance and ramps at major stations, a disabled/PWD quota with reserved lower berths on trains, coaches with wider doors and space for wheelchairs on many rakes, and fare concessions for the passenger (and often an escort/attendant) under current disability-concession rules.",
+    "entities": [
+      "disability",
+      "accessibility",
+      "quota",
+      "concession"
+    ]
+  },
+  {
+    "id": "train-numbering-scheme",
+    "category": "Train Types",
+    "text": "Modern Indian Railways train numbers are five digits, with the leading digit(s) loosely grouping the train type/zone-era classification (for example, numbers in certain ranges are used for Rajdhani/Shatabdi/Duronto/Vande Bharat-type premium services, others for ordinary mail/express or passenger trains). This grouping has been revised over the years and has exceptions, so it's a rough general pattern rather than a reliable way to determine a SPECIFIC train's category — live train info/schedule lookup for that train number is the reliable source.",
+    "entities": [
+      "train_number",
+      "train_types",
+      "rajdhani",
+      "shatabdi"
+    ]
+  },
+  {
+    "id": "punctuality-context",
+    "category": "Train Operations",
+    "text": "Overall network punctuality and average running speeds vary by train category (premium trains like Rajdhani/Shatabdi/Vande Bharat run faster and generally more punctually than ordinary mail/express or passenger trains) and fluctuate year to year and by season (e.g. winter fog materially worsens punctuality in North India). Any specific percentage or average-speed figure should be treated as illustrative background context, not a substitute for that SPECIFIC train's live running status on the day of travel.",
+    "entities": [
+      "punctuality",
+      "delay",
+      "average_speed",
+      "running_status"
+    ]
+  }
+]

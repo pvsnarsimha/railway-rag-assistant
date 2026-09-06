@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Trip Summary</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; max-width: 640px; margin-inline: auto;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f1420; color: #eef1f7; line-height: 1.5;
+  }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  .sub { color: #97a1b8; font-size: 0.85rem; margin-bottom: 16px; }
+  .card { background: #171e2e; border: 1px solid #2a3348; border-radius: 12px; padding: 18px; margin-bottom: 14px; }
+  .route { font-size: 1.15rem; font-weight: 700; margin-bottom: 10px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .route .arrow { color: #556; }
+  .leg { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #232c40; font-size: 0.9rem; }
+  .leg:last-child { border-bottom: none; }
+  .leg .tag { font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; }
+  .tag--ontime { background: #123a1f; color: #7fe0a5; }
+  .tag--late { background: #3a2a12; color: #ffcf8a; }
+  .worst { margin-top: 10px; font-size: 0.85rem; color: #97a1b8; }
+  .per-station { list-style: none; margin: 0; padding: 0; font-size: 0.82rem; max-height: 260px; overflow-y: auto; }
+  .per-station li { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #232c40; }
+  .bar-wrap { flex: 1; margin: 0 10px; background: #232c40; border-radius: 4px; height: 6px; align-self: center; overflow: hidden; }
+  .bar { height: 100%; background: #ffcf8a; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  button, a.btn { background: #223052; color: #eef1f7; border: 1px solid #35406a; border-radius: 8px; padding: 8px 12px; font-size: 0.85rem; cursor: pointer; text-decoration: none; display:inline-block; }
+  .empty { color: #97a1b8; text-align: center; padding: 30px 0; }
+</style>
+</head>
+<body>
+  <h1>🏁 Trip Summary</h1>
+  <p class="sub" id="sub">Loading…</p>
+  <div id="content"></div>
+<script>
+(function () {
+  var pathParts = location.pathname.split("/").filter(Boolean);
+  var shareId = pathParts[pathParts.length - 1] || "";
+  var content = document.getElementById("content");
+  var sub = document.getElementById("sub");
+
+  function tag(delay) {
+    if (delay == null) return '<span class="tag tag--ontime">unknown</span>';
+    if (delay <= 5) return '<span class="tag tag--ontime">on time</span>';
+    return '<span class="tag tag--late">+' + delay + ' min</span>';
+  }
+
+  function render(row) {
+    var s = row.summary || {};
+    document.title = "Trip " + (s.train_number || "") + " — Summary";
+    sub.textContent = "Train " + (s.train_number || row.train_number || "—") + (s.date ? " · " + s.date : "");
+    var html = '<div class="card">';
+    html += '<div class="route">' + (s.source_station || "Origin") + ' <span class="arrow">→</span> ' + (s.destination_station || "Destination") + '</div>';
+    html += '<div class="leg"><span>Departure' + (s.departure && s.departure.scheduled ? " (sched. " + s.departure.scheduled + ")" : "") + '</span>' + tag(s.departure && s.departure.delay_minutes) + '</div>';
+    html += '<div class="leg"><span>Arrival' + (s.arrival && s.arrival.scheduled ? " (sched. " + s.arrival.scheduled + ")" : "") + '</span>' + tag(s.arrival && s.arrival.delay_minutes) + '</div>';
+    if (s.worst_station && s.worst_station.name) {
+      html += '<p class="worst">Worst delay: <strong>' + s.worst_station.name + '</strong> (+' + s.worst_station.delay_minutes + ' min)</p>';
+    }
+    if (s.total_distance_km) {
+      html += '<p class="worst">Distance: ' + s.total_distance_km + ' km' + (s.duration_text ? " · " + s.duration_text : "") + '</p>';
+    }
+    html += '</div>';
+
+    if (Array.isArray(s.per_station) && s.per_station.length) {
+      var maxDelay = Math.max.apply(null, s.per_station.map(function (p) { return p.delay_minutes || 0; }).concat([1]));
+      html += '<div class="card"><h3 style="margin-top:0;font-size:0.95rem;">Per-station delay</h3><ul class="per-station">';
+      s.per_station.forEach(function (p) {
+        var pct = Math.max(2, Math.round(100 * (p.delay_minutes || 0) / maxDelay));
+        html += '<li><span>' + p.name + '</span><span class="bar-wrap"><span class="bar" style="width:' + pct + '%"></span></span><span>' + (p.delay_minutes || 0) + 'm</span></li>';
+      });
+      html += '</ul></div>';
+    }
+
+    html += '<div class="actions"><button type="button" id="copyBtn">🔗 Copy this link</button><a class="btn" href="/">Open full app</a></div>';
+    content.innerHTML = html;
+    document.getElementById("copyBtn").addEventListener("click", function () {
+      navigator.clipboard && navigator.clipboard.writeText(location.href);
+      this.textContent = "Copied!";
+    });
+  }
+
+  if (!shareId) {
+    content.innerHTML = '<p class="empty">No trip id in this link.</p>';
+  } else {
+    fetch("/api/trip-summary/" + encodeURIComponent(shareId))
+      .then(function (r) { return r.json(); })
+      .then(function (row) {
+        if (!row.found) {
+          content.innerHTML = '<p class="empty">This trip summary link isn\'t valid or has expired.</p>';
+          sub.textContent = "";
+          return;
+        }
+        render(row);
+      })
+      .catch(function () {
+        content.innerHTML = '<p class="empty">Couldn\'t load this trip summary right now.</p>';
+      });
+  }
+})();
+</script>
+</body>
+</html>

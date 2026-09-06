@@ -1,0 +1,44 @@
+<svg viewBox="0 0 640 260" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+  <style>
+    .lbl { font-size: 13px; fill: #0B2545; font-weight: 600; }
+    .sub { font-size: 10px; fill: #5a6b85; }
+    .box { fill: #F3EEE3; stroke: #16324F; stroke-width: 1.5; }
+  </style>
+  <rect x="0" y="0" width="640" height="260" fill="none"/>
+  <g>
+    <rect class="box" x="10" y="20" width="130" height="70" rx="4"/>
+    <text class="lbl" x="20" y="45">1A / 2A</text>
+    <text class="sub" x="20" y="62">Enclosed AC cabins,</text>
+    <text class="sub" x="20" y="75">2-4 berths per bay</text>
+  </g>
+  <g>
+    <rect class="box" x="170" y="20" width="130" height="70" rx="4"/>
+    <text class="lbl" x="180" y="45">3A / 3E</text>
+    <text class="sub" x="180" y="62">Open AC bays,</text>
+    <text class="sub" x="180" y="75">3 berths per side</text>
+  </g>
+  <g>
+    <rect class="box" x="330" y="20" width="130" height="70" rx="4"/>
+    <text class="lbl" x="340" y="45">CC / EC</text>
+    <text class="sub" x="340" y="62">AC seating,</text>
+    <text class="sub" x="340" y="75">day-train chair car</text>
+  </g>
+  <g>
+    <rect class="box" x="490" y="20" width="140" height="70" rx="4"/>
+    <text class="lbl" x="500" y="45">SL / 2S / FC</text>
+    <text class="sub" x="500" y="62">Non-AC berths</text>
+    <text class="sub" x="500" y="75">or seating</text>
+  </g>
+  <text x="10" y="130" class="sub">Higher AC classes = more privacy and fewer berths per bay; non-AC classes = open, budget-friendly seating/berths.</text>
+  <rect x="10" y="150" width="620" height="90" rx="4" fill="#0B2545"/>
+  <text x="24" y="175" fill="#FFB300" font-size="11" font-weight="600">TYPICAL 3-TIER (3A/SL) BAY LAYOUT</text>
+  <g stroke="#C9D6E8" stroke-width="1">
+    <rect x="24" y="188" width="60" height="16" fill="none"/>
+    <rect x="24" y="206" width="60" height="16" fill="none"/>
+    <rect x="24" y="224" width="60" height="16" fill="none"/>
+    <text x="30" y="200" fill="#C9D6E8" font-size="9">Upper</text>
+    <text x="30" y="218" fill="#C9D6E8" font-size="9">Middle</text>
+    <text x="30" y="236" fill="#C9D6E8" font-size="9">Lower</text>
+  </g>
+  <text x="100" y="215" fill="#C9D6E8" font-size="10">← bay of 6-8 berths, repeated down the coach →</text>
+</svg>

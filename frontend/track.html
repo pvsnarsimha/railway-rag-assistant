@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Live Train Tracking</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; max-width: 720px; margin-inline: auto;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f1420; color: #eef1f7; line-height: 1.45;
+  }
+  h1 { font-size: 1.15rem; margin: 0 0 4px; }
+  .sub { color: #97a1b8; font-size: 0.85rem; margin-bottom: 14px; }
+  .card { background: #171e2e; border: 1px solid #2a3348; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+  .headline { font-size: 1.3rem; font-weight: 700; margin-bottom: 4px; }
+  .headline small { display: block; font-size: 0.8rem; font-weight: 400; color: #97a1b8; }
+  dl.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin: 10px 0 0; font-size: 0.85rem; }
+  dl.stats dt { color: #97a1b8; }
+  dl.stats dd { margin: 0; font-weight: 600; }
+  .banner { border-radius: 8px; padding: 10px 12px; font-size: 0.85rem; margin-bottom: 10px; }
+  .banner--warn { background: #3a2a12; border: 1px solid #6b4a1a; color: #ffcf8a; }
+  .banner--info { background: #12283a; border: 1px solid #1a4a6b; color: #8ad0ff; }
+  .stop-list { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font-size: 0.82rem; }
+  .stop-list li { padding: 6px 0; border-bottom: 1px solid #232c40; display: flex; justify-content: space-between; gap: 8px; }
+  .stop-list li.is-current { color: #7fe0a5; font-weight: 700; }
+  .stop-list li.is-passed { color: #6b7488; }
+  button, .btn {
+    background: #223052; color: #eef1f7; border: 1px solid #35406a; border-radius: 8px;
+    padding: 8px 12px; font-size: 0.85rem; cursor: pointer;
+  }
+  button:active { transform: translateY(1px); }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  #map { height: 260px; border-radius: 8px; margin-top: 10px; display: none; }
+  .status { font-size: 0.82rem; color: #97a1b8; margin-top: 8px; }
+  .lite-badge { display: inline-block; background: #223052; border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; color: #97a1b8; margin-left: 6px; }
+  a { color: #8ad0ff; }
+</style>
+</head>
+<body>
+  <h1 id="title">📡 Live Train Tracking</h1>
+  <p class="sub">Read-only view — shared link, no sign-in needed. <span class="lite-badge" id="liteBadge">Lite mode</span></p>
+
+  <div id="deviationBanner" class="banner banner--warn" hidden></div>
+  <div id="rerouteBanner" class="banner banner--info" hidden></div>
+
+  <div class="card">
+    <div class="headline" id="headline">Connecting…<small id="headlineSub"></small></div>
+    <dl class="stats" id="stats" hidden>
+      <dt>Next station</dt><dd id="stNext">—</dd>
+      <dt>Reported delay</dt><dd id="stDelay">—</dd>
+      <dt>Predicted delay</dt><dd id="stPredicted">—</dd>
+      <dt>Next station ETA</dt><dd id="stEta">—</dd>
+      <dt>Distance remaining</dt><dd id="stDistance">—</dd>
+      <dt>Last update</dt><dd id="stUpdated">—</dd>
+    </dl>
+    <div class="actions">
+      <button type="button" id="mapToggleBtn">🗺️ Show map (uses more data)</button>
+      <button type="button" id="copyLinkBtn">🔗 Copy this link</button>
+      <a class="btn" id="fullAppLink" href="/">Open full app</a>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0;font-size:0.95rem;">Every stop</h3>
+    <ul class="stop-list" id="stopList"><li>Waiting for live data…</li></ul>
+  </div>
+
+  <p class="status" id="connStatus">Connecting…</p>
+
+<script>
+(function () {
+  var pathParts = location.pathname.split("/").filter(Boolean);
+  var trainNumber = pathParts[pathParts.length - 1] || "";
+  var params = new URLSearchParams(location.search);
+  var date = params.get("date") || "";
+
+  document.title = "Train " + trainNumber + " — Live Tracking";
+  document.getElementById("title").textContent = "📡 Train " + trainNumber;
+  document.getElementById("fullAppLink").href = "/?track=" + encodeURIComponent(trainNumber);
+
+  var wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+  var wsUrl = wsProto + "//" + location.host + "/ws/track/" + encodeURIComponent(trainNumber) +
+    (date ? "?date=" + encodeURIComponent(date) : "");
+
+  var map = null, marker = null, mapShown = false;
+
+  function fmtTime(iso) {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+    catch (e) { return iso; }
+  }
+
+  function render(data) {
+    if (data.error) {
+      document.getElementById("headline").textContent = "Couldn't fetch live status right now";
+      document.getElementById("headlineSub").textContent = data.error;
+      document.getElementById("connStatus").textContent = "Retrying automatically…";
+      return;
+    }
+    document.getElementById("headline").innerHTML =
+      (data.current_station || "Position unknown") + "<small>Heading to " + (data.next_station || "—") + "</small>";
+    document.getElementById("stats").hidden = false;
+    document.getElementById("stNext").textContent = data.next_station || "—";
+    document.getElementById("stDelay").textContent = data.delay_minutes != null ? (data.delay_minutes + " min") : "On time / unknown";
+    document.getElementById("stPredicted").textContent = data.predicted_delay_minutes != null ? ("~" + data.predicted_delay_minutes + " min") : "—";
+    document.getElementById("stEta").textContent = data.next_station_live_eta || data.next_station_expected_arrival || "—";
+    document.getElementById("stDistance").textContent = data.distance_remaining_to_next_km != null ? (data.distance_remaining_to_next_km + " km") : "—";
+    document.getElementById("stUpdated").textContent = new Date().toLocaleTimeString();
+    document.getElementById("connStatus").textContent = "Live — updates automatically every few seconds.";
+
+    var dev = data.route_deviation;
+    var devBanner = document.getElementById("deviationBanner");
+    if (dev && dev.likely_diversion) {
+      devBanner.hidden = false;
+      devBanner.textContent = "⚠️ " + dev.note;
+    } else {
+      devBanner.hidden = true;
+    }
+
+    var reroute = data.reroute_suggestion;
+    var reBanner = document.getElementById("rerouteBanner");
+    if (reroute && reroute.triggered) {
+      reBanner.hidden = false;
+      reBanner.textContent = "ℹ️ " + (reroute.note || "This train is running significantly late.");
+    } else {
+      reBanner.hidden = true;
+    }
+
+    if (Array.isArray(data.timeline) && data.timeline.length) {
+      var ul = document.getElementById("stopList");
+      ul.innerHTML = "";
+      data.timeline.forEach(function (s) {
+        if (s.kind === "intermediate") return;
+        var li = document.createElement("li");
+        li.className = s.status === "current" ? "is-current" : (s.status === "passed" ? "is-passed" : "");
+        var timeText = (s.arrival && (s.arrival.actual || s.arrival.expected || s.arrival.scheduled)) || "";
+        li.innerHTML = "<span>" + (s.status === "current" ? "▶ " : "") + (s.name || s.code) + "</span><span>" + timeText + "</span>";
+        ul.appendChild(li);
+      });
+    }
+
+    if (mapShown && data.lat != null && data.lng != null) {
+      ensureMap();
+      marker.setLatLng([data.lat, data.lng]);
+      map.panTo([data.lat, data.lng]);
+    }
+  }
+
+  function ensureMap() {
+    if (map) return;
+    var script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js";
+    script.onload = function () {
+      var link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css";
+      document.head.appendChild(link);
+      map = L.map("map").setView([22.9, 79.0], 5);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18 }).addTo(map);
+      marker = L.marker([22.9, 79.0]).addTo(map);
+    };
+    document.head.appendChild(script);
+  }
+
+  document.getElementById("mapToggleBtn").addEventListener("click", function () {
+    mapShown = !mapShown;
+    document.getElementById("map").style.display = mapShown ? "block" : "none";
+    this.textContent = mapShown ? "🗺️ Hide map" : "🗺️ Show map (uses more data)";
+    if (mapShown) ensureMap();
+  });
+
+  document.getElementById("copyLinkBtn").addEventListener("click", function () {
+    navigator.clipboard && navigator.clipboard.writeText(location.href).then(function () {
+      document.getElementById("connStatus").textContent = "Link copied — share it with anyone.";
+    });
+  });
+
+  function connect() {
+    var ws;
+    try { ws = new WebSocket(wsUrl); } catch (e) {
+      document.getElementById("connStatus").textContent = "Couldn't connect — retrying…";
+      setTimeout(connect, 4000);
+      return;
+    }
+    ws.onmessage = function (evt) {
+      try { render(JSON.parse(evt.data)); } catch (e) { /* ignore malformed frame */ }
+    };
+    ws.onclose = function () {
+      document.getElementById("connStatus").textContent = "Connection lost — reconnecting…";
+      setTimeout(connect, 4000);
+    };
+    ws.onerror = function () { ws.close(); };
+  }
+
+  if (!trainNumber) {
+    document.getElementById("headline").textContent = "No train number in this link.";
+  } else {
+    connect();
+  }
+})();
+</script>
+</body>
+</html>

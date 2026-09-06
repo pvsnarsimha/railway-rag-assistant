@@ -1,0 +1,63 @@
+{
+  "expo": {
+    "name": "Railway RAG Assistant",
+    "slug": "railway-rag-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#0B3D91"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.railwayrag.mobile",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Used to take a photo of your ticket so the assistant can read the PNR / train number off it.",
+        "NSPhotoLibraryUsageDescription": "Used to attach a ticket photo from your gallery.",
+        "NSLocationWhenInUseUsageDescription": "Used to submit your current position when you tap \"Report my position\" on a train you're riding, so other passengers get a more accurate live position (Crowd-Sourced Train Position Reports)."
+      }
+    },
+    "android": {
+      "package": "com.railwayrag.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B3D91"
+      },
+      "permissions": ["CAMERA", "READ_EXTERNAL_STORAGE", "POST_NOTIFICATIONS", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"],
+      "config": {
+        "googleMaps": {
+          "apiKey": "YOUR_ANDROID_GOOGLE_MAPS_API_KEY"
+        }
+      }
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Used to attach a ticket photo from your gallery.",
+          "cameraPermission": "Used to take a photo of your ticket."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#0B3D91"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Used to submit your current position when you tap \"Report my position\" on a train you're riding (Crowd-Sourced Train Position Reports)."
+        }
+      ]
+    ],
+    "extra": {
+      "defaultApiBaseUrl": "http://localhost:8000",
+      "defaultWsBaseUrl": "ws://localhost:8000",
+      "eas": {
+        "projectId": "YOUR_EAS_PROJECT_ID"
+      }
+    }
+  }
+}

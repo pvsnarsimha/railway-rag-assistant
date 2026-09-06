@@ -1,0 +1,1682 @@
+:root {
+  --ink-navy: #0B2545;
+  --rail-steel: #16324F;
+  --steel-line: #274668;
+  --signal-amber: #FFB300;
+  --platform-cream: #F3EEE3;
+  --coach-red: #C1272D;
+  --go-green: #2E8B57;
+  --text-soft: #C9D6E8;
+
+  --font-display: 'Rajdhani', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --font-mono: 'Roboto Mono', monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--ink-navy);
+  font-family: var(--font-body);
+  color: var(--platform-cream);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
+.board-frame {
+  max-width: 760px;
+  margin: 0 auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--steel-line);
+  border-right: 1px solid var(--steel-line);
+}
+
+/* ---------- HEADER ---------- */
+.board-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 24px 18px;
+  background: linear-gradient(180deg, var(--rail-steel) 0%, var(--ink-navy) 100%);
+  border-bottom: 2px solid var(--signal-amber);
+}
+.board-header__left { display: flex; align-items: center; gap: 14px; }
+.board-header__right { display: flex; align-items: center; gap: 12px; }
+.board-header__title { display: flex; flex-direction: column; }
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--signal-amber);
+  margin-bottom: 2px;
+}
+.board-header h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 26px;
+  margin: 0;
+  letter-spacing: 0.02em;
+  color: var(--platform-cream);
+}
+.board-header__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-soft);
+}
+.pulse-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--signal-amber);
+  box-shadow: 0 0 0 0 rgba(255,179,0,0.6);
+  animation: pulse 1.8s infinite;
+}
+.pulse-dot.online { background: var(--go-green); }
+.pulse-dot.offline { background: var(--coach-red); }
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255,179,0,0.55); }
+  70% { box-shadow: 0 0 0 8px rgba(255,179,0,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,179,0,0); }
+}
+
+/* ---------- TICKER (signature element) ---------- */
+.ticker {
+  overflow: hidden;
+  background: #081b34;
+  border-bottom: 1px solid var(--steel-line);
+  padding: 7px 0;
+}
+.ticker__track {
+  display: flex;
+  width: max-content;
+  animation: scroll-left 26s linear infinite;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--signal-amber);
+  white-space: nowrap;
+}
+.ticker__track span { padding-right: 48px; }
+@keyframes scroll-left {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* ---------- CHAT ---------- */
+.chat-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--platform-cream);
+  color: #1c2733;
+}
+.chat-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 22px 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.msg { display: flex; flex-direction: column; max-width: 88%; }
+.msg--user { align-self: flex-end; align-items: flex-end; }
+.msg--assistant { align-self: flex-start; align-items: flex-start; }
+
+.msg__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: #6b7686;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+.msg--user .msg__label { color: #7a6a4a; }
+
+.msg__bubble {
+  padding: 12px 16px;
+  border-radius: 4px;
+  line-height: 1.55;
+  font-size: 15px;
+}
+.msg--assistant .msg__bubble {
+  background: #ffffff;
+  border-left: 3px solid var(--rail-steel);
+  box-shadow: 0 1px 2px rgba(11,37,69,0.08);
+}
+.msg--user .msg__bubble {
+  background: var(--ink-navy);
+  color: var(--platform-cream);
+  border-right: 3px solid var(--signal-amber);
+}
+.msg__hint {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: #6b7686;
+  font-style: italic;
+}
+.msg__sources {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: #8a94a3;
+}
+
+.msg__attachment {
+  margin-top: 6px;
+  font-size: 12.5px;
+  opacity: 0.85;
+}
+
+.msg__diagrams {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+}
+.msg__diagram {
+  margin: 0;
+  background: #ffffff;
+  border: 1px solid #ddd3bd;
+  border-radius: 4px;
+  padding: 8px;
+  max-width: 320px;
+}
+.msg__diagram img { width: 100%; display: block; }
+.msg__diagram figcaption {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #6b7686;
+  text-align: center;
+  margin-top: 4px;
+}
+
+.msg--assistant.msg--loading .msg__bubble {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+.dot-flash {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--rail-steel);
+  animation: dot-flash 1s infinite ease-in-out;
+}
+.dot-flash:nth-child(2) { animation-delay: 0.15s; }
+.dot-flash:nth-child(3) { animation-delay: 0.3s; }
+@keyframes dot-flash {
+  0%, 80%, 100% { opacity: 0.25; }
+  40% { opacity: 1; }
+}
+
+/* ---------- COMPOSER ---------- */
+.composer {
+  display: flex;
+  gap: 10px;
+  padding: 14px 20px 20px;
+  background: var(--platform-cream);
+  border-top: 1px solid #ddd3bd;
+}
+.composer__input {
+  flex: 1;
+  padding: 13px 16px;
+  border: 1.5px solid #cfc4a6;
+  border-radius: 4px;
+  font-family: var(--font-body);
+  font-size: 15px;
+  background: #fffdf8;
+  color: #1c2733;
+}
+.composer__input:focus {
+  outline: 2px solid var(--signal-amber);
+  outline-offset: 1px;
+  border-color: var(--signal-amber);
+}
+.composer__send {
+  width: 46px;
+  border: none;
+  border-radius: 4px;
+  background: var(--ink-navy);
+  color: var(--signal-amber);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease;
+}
+.composer__send:hover { background: var(--rail-steel); }
+.composer__send:focus-visible { outline: 2px solid var(--signal-amber); outline-offset: 2px; }
+
+.composer__attach {
+  width: 46px;
+  min-width: 46px;
+  border: 1.5px solid #cfc4a6;
+  border-radius: 4px;
+  background: #fffdf8;
+  color: var(--rail-steel);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease;
+}
+.composer__attach:hover { background: #f1e9d4; }
+
+.image-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 20px;
+  padding: 8px 12px;
+  background: #fffdf8;
+  border: 1px solid #ddd3bd;
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: #4a5568;
+}
+.image-preview img {
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
+  border-radius: 3px;
+  border: 1px solid #ddd3bd;
+}
+.image-preview span { flex: 1; }
+.image-preview button {
+  border: none;
+  background: none;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--coach-red);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+/* ---------- FOOTER ---------- */
+.board-footer {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: #5a6b85;
+  padding: 10px;
+  background: var(--ink-navy);
+}
+
+/* ---------- MOBILE ---------- */
+@media (max-width: 480px) {
+  .board-header h1 { font-size: 21px; }
+  .msg { max-width: 94%; }
+}
+
+/* IMPORTANT: the browser's own [hidden] default rule (display:none) is a
+   UA-stylesheet rule, and author rules always beat UA rules regardless of
+   specificity. Since .image-preview / .tour-overlay / .help-modal each set
+   their own `display` for the visible state, that display value keeps
+   winning even after JS sets the `hidden` attribute - so without the rules
+   below, these elements never actually disappear (and stay clickable,
+   blocking the page underneath). Re-assert display:none whenever [hidden]
+   is present so toggling the attribute actually works. */
+.image-preview[hidden],
+.tour-overlay[hidden],
+.help-modal[hidden] {
+  display: none !important;
+}
+
+/* ---------- HELP BUTTON ---------- */
+.header-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1.5px solid var(--signal-amber);
+  background: transparent;
+  color: var(--signal-amber);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.header-btn:hover { background: var(--signal-amber); color: var(--ink-navy); }
+
+/* ---------- LANGUAGE SELECTOR (Multi-Language Support) ---------- */
+.lang-select {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1.5px solid #cfc4a6;
+  border-radius: 4px;
+  background: #fffdf8;
+  padding: 3px 6px;
+}
+.lang-select__icon { font-size: 13px; }
+.lang-select select {
+  border: none;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-navy);
+  cursor: pointer;
+  max-width: 120px;
+}
+.lang-select select:focus { outline: none; }
+
+/* ---------- VOICE MIC BUTTON ---------- */
+.composer__mic {
+  width: 46px;
+  min-width: 46px;
+  border: 1.5px solid #cfc4a6;
+  border-radius: 4px;
+  background: #fffdf8;
+  color: var(--rail-steel);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.composer__mic:hover { background: #f1e9d4; }
+.composer__mic.listening {
+  background: var(--coach-red);
+  color: #fff;
+  border-color: var(--coach-red);
+  animation: mic-pulse 1s infinite;
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(193,39,45,0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(193,39,45,0); }
+}
+.composer__voice-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 20px 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: #6b7686;
+}
+
+/* ---------- INLINE MAPS (GPS tracking + route map) ---------- */
+.msg__map-wrap {
+  margin-top: 10px;
+  border: 1px solid #ddd3bd;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #fff;
+}
+.msg__map {
+  width: 100%;
+  height: 260px;
+}
+.msg__map-caption {
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #6b7686;
+  background: #fffdf8;
+  border-top: 1px solid #ddd3bd;
+}
+.msg__map-caption .estimate-flag {
+  color: var(--coach-red);
+  font-weight: 600;
+}
+
+.msg__trains-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.msg__trains-list li {
+  font-size: 13px;
+  padding: 6px 10px;
+  background: #fff;
+  border: 1px solid #ddd3bd;
+  border-left: 3px solid var(--rail-steel);
+  border-radius: 3px;
+}
+.msg__trains-list li span {
+  color: #6b7686;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* ---------- ONBOARDING TOUR ---------- */
+.tour-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(11,37,69,0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.tour-card {
+  background: var(--platform-cream);
+  color: #1c2733;
+  border-radius: 6px;
+  padding: 22px 24px;
+  max-width: 380px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+  border-top: 3px solid var(--signal-amber);
+}
+.tour-card h3 { margin: 0 0 8px; font-family: var(--font-display); font-size: 19px; }
+.tour-card p { margin: 0; font-size: 14px; line-height: 1.5; color: #3a4657; }
+.tour-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+.tour-btn {
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: none;
+  background: var(--ink-navy);
+  color: var(--signal-amber);
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tour-btn:hover { background: var(--rail-steel); }
+.tour-btn--ghost {
+  background: transparent;
+  color: #6b7686;
+}
+.tour-btn--ghost:hover { background: rgba(0,0,0,0.05); }
+
+/* ---------- HELP MODAL ---------- */
+.help-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(11,37,69,0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.help-modal__panel {
+  background: var(--platform-cream);
+  color: #1c2733;
+  border-radius: 6px;
+  max-width: 480px;
+  width: 100%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+  border-top: 3px solid var(--signal-amber);
+}
+.help-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #ddd3bd;
+}
+.help-modal__header h2 { margin: 0; font-family: var(--font-display); font-size: 20px; }
+.help-modal__header button {
+  border: none;
+  background: none;
+  font-size: 22px;
+  cursor: pointer;
+  color: #6b7686;
+  line-height: 1;
+}
+.help-modal__body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.help-modal__body .help-item {
+  margin-bottom: 10px;
+}
+.help-modal__body .help-item strong { color: var(--rail-steel); }
+.help-modal__panel > .tour-btn {
+  margin: 0 20px 18px;
+  align-self: flex-start;
+}
+
+/* ============================================================ */
+/* FEATURE: header toolbar for the 4 new feature panels          */
+/* ============================================================ */
+.tool-btns {
+  display: flex;
+  gap: 6px;
+  margin-right: 6px;
+}
+
+/* ============================================================ */
+/* Shared "feature panel" styling — reuses .help-modal as the    */
+/* overlay/backdrop, these rules only extend the panel body.     */
+/* ============================================================ */
+.feature-panel {
+  max-width: 560px;
+}
+.feature-panel--wide {
+  max-width: 900px;
+}
+.feature-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.feature-form input {
+  flex: 1;
+  padding: 9px 10px;
+  border: 1.5px solid var(--rail-steel);
+  border-radius: 4px;
+  font-family: var(--font-body);
+  font-size: 14px;
+}
+.feature-form button {
+  padding: 9px 16px;
+  border: none;
+  border-radius: 4px;
+  background: var(--ink-navy);
+  color: var(--signal-amber);
+  font-family: var(--font-display);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.feature-form button:hover { background: var(--rail-steel); }
+.feature-form--grid {
+  flex-wrap: wrap;
+}
+.feature-form--grid input {
+  flex: 1 1 140px;
+}
+.feature-status {
+  font-size: 13px;
+  color: #5a6675;
+  margin-bottom: 10px;
+  min-height: 18px;
+}
+.feature-status.is-live { color: var(--go-green); font-weight: 600; }
+.feature-status.is-error { color: var(--coach-red); font-weight: 600; }
+.feature-subhead {
+  font-family: var(--font-display);
+  font-size: 15px;
+  margin: 14px 0 6px;
+  color: var(--rail-steel);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+.stat-grid dt { color: #6b7686; }
+.stat-grid dd { margin: 0; font-weight: 600; color: #1c2733; }
+
+.result-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.result-list li {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e4dcc7;
+  font-size: 13.5px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.result-list li:last-child { border-bottom: none; }
+.result-list .result-tag {
+  font-size: 11px;
+  color: #6b7686;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.result-list button.remove-btn {
+  border: none;
+  background: none;
+  color: var(--coach-red);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+.result-list--feed li.alert--warning { border-left: 3px solid var(--coach-red); padding-left: 8px; }
+.result-list--feed li.alert--info { border-left: 3px solid var(--go-green); padding-left: 8px; }
+.result-list--empty {
+  color: #8a93a1;
+  font-style: italic;
+  font-size: 13px;
+}
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.dash-card {
+  background: #fff;
+  border: 1px solid #e4dcc7;
+  border-radius: 6px;
+  padding: 12px;
+}
+/* Long-distance trains can have 20-40+ stops — the double-bar delay chart
+   needs room per station-pair to stay readable, so it scrolls horizontally
+   inside its card rather than cramming every bar/label into a fixed width. */
+.dash-card__chart-scroll {
+  overflow-x: auto;
+}
+.dash-card__chart-inner {
+  min-width: 100%;
+  height: 220px;
+}
+.dash-card h4 {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--rail-steel);
+}
+@media (max-width: 640px) {
+  .dash-grid { grid-template-columns: 1fr; }
+  .feature-form--grid input { flex: 1 1 100%; }
+}
+
+/* ============================================================ */
+/* FEATURE: custom train marker icon on the live-tracking map    */
+/* ============================================================ */
+.train-marker-icon {
+  border-radius: 5px;
+  box-shadow: 0 1px 3px rgba(11, 37, 69, 0.45);
+  background: #fff;
+  padding: 1px;
+  /* transform is set dynamically per-tick by applyTrainMarkerDirection()
+     in app.js, based on the backend's auto-detected UP/DOWN direction */
+  transition: transform 0.25s ease;
+}
+
+/* ============================================================ */
+/* FEATURE: IRCTC-style full stop-by-stop live running status    */
+/* ============================================================ */
+.live-timeline {
+  max-height: 340px;
+  overflow-y: auto;
+  border: 1px solid #e4dcc7;
+  border-radius: 6px;
+  background: #fff;
+  padding: 10px 12px 10px 4px;
+  margin-bottom: 14px;
+}
+.live-timeline__row {
+  display: flex;
+  gap: 10px;
+  padding: 7px 8px;
+  position: relative;
+}
+.live-timeline__row::before {
+  content: "";
+  position: absolute;
+  left: 15px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #e4dcc7;
+}
+.live-timeline__row:first-child::before { top: 50%; }
+.live-timeline__row:last-child::before { bottom: 50%; }
+.live-timeline__dot {
+  position: relative;
+  z-index: 1;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex-shrink: 0;
+  background: #b9c2cf;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px #cfd6e0;
+}
+.live-timeline__row.is-passed .live-timeline__dot { background: var(--go-green); box-shadow: 0 0 0 1px var(--go-green); }
+.live-timeline__row.is-current .live-timeline__dot {
+  background: var(--coach-red);
+  box-shadow: 0 0 0 1px var(--coach-red);
+  animation: liveDotPulse 1.4s ease-in-out infinite;
+}
+.live-timeline__row.is-upcoming .live-timeline__dot { background: #b9c2cf; }
+.live-timeline__from-last-row { margin-top: 2px; }
+.live-timeline__from-last {
+  font-size: 11px;
+  color: #6b7280;
+  font-style: italic;
+}
+.live-timeline__train-icon-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 0;
+}
+.live-timeline__train-icon {
+  position: relative;
+  z-index: 1;
+  width: 18px;
+  height: 13px;
+  object-fit: cover;
+  border-radius: 4px;
+  margin-top: 2px;
+  flex-shrink: 0;
+  background: #fff;
+  border: 2px solid var(--coach-red);
+  box-shadow: 0 0 0 1px #fff;
+  animation: liveTrainIconPulse 1.4s ease-in-out infinite;
+}
+@keyframes liveTrainIconPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(193, 39, 45, 0.5), 0 0 0 1px #fff; }
+  50% { box-shadow: 0 0 0 5px rgba(193, 39, 45, 0), 0 0 0 1px #fff; }
+}
+@keyframes liveDotPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(193, 39, 45, 0.5); }
+  50% { box-shadow: 0 0 0 5px rgba(193, 39, 45, 0); }
+}
+.live-timeline__body { flex: 1; min-width: 0; }
+.live-timeline__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+.live-timeline__name {
+  font-weight: 700;
+  font-size: 13.5px;
+  color: #1c2733;
+}
+.live-timeline__row.is-intermediate .live-timeline__name { font-weight: 500; font-size: 12.5px; color: #3d4959; }
+.live-timeline__code { font-weight: 400; color: #6b7686; font-size: 12px; }
+.live-timeline__meta { font-size: 11px; color: #8a93a1; text-transform: uppercase; letter-spacing: 0.03em; }
+.live-timeline__nofix { color: #b98a00; }
+.live-timeline__timing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #4a5568;
+  margin-top: 2px;
+}
+.live-timeline__timing-label { width: 62px; flex-shrink: 0; color: #8a93a1; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+.live-timeline__timing-vals { display: flex; gap: 10px; flex-wrap: wrap; font-family: var(--font-mono); }
+.live-timeline__delay { font-weight: 700; padding: 0 5px; border-radius: 3px; }
+.live-timeline__delay.is-late { color: #fff; background: var(--coach-red); }
+.live-timeline__delay.is-early { color: #fff; background: var(--go-green); }
+.live-timeline__delay.is-ontime { color: #fff; background: #6b7686; }
+
+/* Per-station predicted delay badge (upcoming reporting halts only) */
+.live-timeline__predicted-row { margin-top: 3px; }
+.live-timeline__predicted {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  letter-spacing: 0.01em;
+}
+.live-timeline__predicted.is-late { color: var(--coach-red); background: #ffe4e0; }
+.live-timeline__predicted.is-ontime { color: var(--go-green); background: #e2f6e9; }
+
+/* "✓ cross-verified" tag - shown when independent prediction methods
+   (ML ensemble, heuristic, actual-vs-expected arithmetic) agree closely */
+.live-timeline__verified {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: var(--go-green);
+  background: #e2f6e9;
+  border: 1px solid var(--go-green);
+  vertical-align: middle;
+}
+
+/* Collapsed "+N No-Halt stations" group row (RailYatri-style) */
+.live-timeline__dot--muted { background: #d8dee6 !important; box-shadow: none !important; }
+.live-timeline__nohalt-toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #3d6fd6;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.live-timeline__nohalt-toggle:hover { text-decoration: underline; }
+.live-timeline__nohalt-arrow { font-size: 10px; }
+.live-timeline__nohalt-detail { margin-top: 6px; padding-left: 2px; border-left: 2px solid #e4e8ee; }
+.live-timeline__nohalt-station {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 4px 10px;
+  font-size: 12px;
+}
+.live-timeline__nohalt-name { color: #4a5568; }
+
+/* Tap-the-train-icon status popup (RailYatri-style green callout card) */
+.live-timeline__status-popup {
+  position: relative;
+  margin: 22px 0 8px;
+  padding: 12px 14px 10px;
+  border: 1.5px solid var(--go-green);
+  border-radius: 10px;
+  background: #fff;
+  max-width: 340px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+/* Speech-bubble freshness indicator, floating above the card with a
+   downward-pointing tail — matches the RailYatri "As of N mins ago"
+   tooltip sitting above the crossed-station card. */
+.live-timeline__status-asof-bubble {
+  position: absolute;
+  top: -22px;
+  left: 10px;
+  font-size: 10.5px;
+  color: #4a5568;
+  background: #fff;
+  border: 1px solid #dde3ec;
+  border-radius: 6px;
+  padding: 2px 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  white-space: nowrap;
+}
+.live-timeline__status-asof-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -5px;
+  left: 12px;
+  width: 8px;
+  height: 8px;
+  background: #fff;
+  border-right: 1px solid #dde3ec;
+  border-bottom: 1px solid #dde3ec;
+  transform: rotate(45deg);
+}
+.live-timeline__status-head { font-size: 14px; font-weight: 700; color: #1c2733; margin-bottom: 5px; }
+.live-timeline__status-halt,
+.live-timeline__status-distance,
+.live-timeline__status-covered { font-size: 12px; color: #4a5568; margin-bottom: 4px; line-height: 1.4; }
+.live-timeline__status-delay-row { margin: 4px 0 8px; }
+.live-timeline__status-delay { font-size: 12px; font-weight: 700; padding: 2px 7px; border-radius: 3px; }
+.live-timeline__status-delay.is-late { color: #fff; background: var(--coach-red); }
+.live-timeline__status-delay.is-ontime { color: #fff; background: var(--go-green); }
+/* Plain text link, RailYatri-style, right-aligned under the card — not a
+   boxed button. */
+.live-timeline__report-link {
+  display: block;
+  margin-left: auto;
+  margin-top: 2px;
+  border: none;
+  background: none;
+  color: #4a90d9;
+  font-size: 11.5px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+.live-timeline__report-link:hover { color: #2b6cb0; }
+.live-timeline__report-link:disabled { opacity: 0.6; cursor: default; text-decoration: none; }
+
+
+/* ============================================================ */
+/* FEATURE: delay-prediction explanation + crowd prediction UI   */
+/* ============================================================ */
+.explain-text {
+  font-size: 12.5px;
+  color: #6b7686;
+  line-height: 1.5;
+  margin: 6px 0 10px;
+  font-style: italic;
+}
+.explain-text__lead {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--rail-steel);
+  margin: 10px 0 4px;
+}
+.crowd-result {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid #e4dcc7;
+  border-radius: 6px;
+  background: #fff;
+}
+.crowd-result__level {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 16px;
+  padding: 4px 0;
+}
+.crowd-result__level--low { color: var(--go-green); }
+.crowd-result__level--moderate { color: #b8860b; }
+.crowd-result__level--high { color: var(--coach-red); }
+.crowd-result__level--very-high { color: var(--coach-red); text-decoration: underline; }
+.feature-form__label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: #6b7686;
+  flex: 1 1 140px;
+}
+.feature-form__label input {
+  padding: 8px 9px;
+  border: 1.5px solid var(--rail-steel);
+  border-radius: 4px;
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+#liveTrackOptionsForm { margin-bottom: 4px; }
+#liveTrackOptionsForm select {
+  padding: 8px 9px;
+  border: 1.5px solid var(--rail-steel);
+  border-radius: 4px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  flex: 1 1 140px;
+}
+
+/* FEATURE: Train Search pagination controls */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+}
+.pagination button {
+  padding: 7px 14px;
+  border: 1.5px solid var(--rail-steel);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink-navy);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+.pagination button:hover:not(:disabled) { background: var(--ink-navy); color: var(--signal-amber); }
+.pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+.pagination span {
+  font-size: 13px;
+  color: #5a6675;
+}
+/* ============================================================ */
+/* FEATURE: "More Tools" panel — tab strip + 10 tool panels       */
+/* ============================================================ */
+.feature-panel--tools {
+  max-width: 960px;
+  width: 100%;
+}
+.tools-tabstrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 20px 0;
+  border-bottom: 1px solid #ddd3bd;
+}
+.tools-tab {
+  border: 1.5px solid var(--rail-steel);
+  background: transparent;
+  color: var(--rail-steel);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 7px 12px;
+  border-radius: 999px 999px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, color .15s;
+}
+.tools-tab:hover { background: rgba(22,50,79,0.08); }
+.tools-tab.is-active {
+  background: var(--ink-navy);
+  color: var(--signal-amber);
+  border-color: var(--ink-navy);
+}
+.tools-body { max-height: 62vh; }
+.tools-panel { display: none; }
+.tools-panel.is-active { display: block; }
+.tools-panel__intro {
+  font-size: 13px;
+  color: #5a6675;
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+.feature-form__wide { flex: 1 1 100% !important; }
+
+.tools-result-card {
+  background: #fff;
+  border: 1px solid #e4dcc7;
+  border-left: 4px solid var(--signal-amber);
+  border-radius: 6px;
+  padding: 14px 16px;
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+.tools-result-card h4 {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-size: 15px;
+  color: var(--rail-steel);
+}
+.tools-result-card .result-tag { margin-left: 6px; }
+.tools-result-card .tools-disclaimer {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #ddd3bd;
+  font-size: 11.5px;
+  color: #8a93a1;
+  font-style: italic;
+}
+.tools-result-card .tools-badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.tools-badge {
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: #eef3f8;
+  color: var(--rail-steel);
+  font-weight: 600;
+}
+.tools-badge.is-yes { background: #e3f3ea; color: var(--go-green); }
+.tools-badge.is-no { background: #fbeaea; color: var(--coach-red); }
+
+/* FEATURE: Dynamic Re-route Suggestions During Live Tracking — an urgent
+   variant of .tools-result-card (red left border instead of amber) so a
+   "severely delayed, here's an alternative" alert reads as more pressing
+   than the usual info card next to it. */
+.tools-result-card--reroute {
+  border-left-color: var(--coach-red);
+  background: #fff8f7;
+}
+.tools-result-card--reroute h4 { color: var(--coach-red); }
+
+/* FEATURE: Crowd-Sourced Train Position — mobile-first GPS. The proactive
+   "are you riding this train?" prompt shown once tracking starts, distinct
+   from the plain info-toned .tools-result-card so it visually asks for a
+   decision rather than just stating a fact. */
+.tools-result-card--prompt {
+  border-left-color: var(--rail-steel);
+  background: #f4f8fb;
+}
+.tools-result-card--prompt .prompt-actions { display: flex; gap: 8px; margin-top: 10px; }
+.tools-result-card--prompt .prompt-actions button { flex: 1; }
+.share-position-row {
+  display: flex; align-items: center; gap: 8px; flex-direction: row;
+}
+.share-position-row.is-active { color: var(--go-green); font-weight: 600; }
+.tools-menu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 20px; margin: 8px 0; }
+.tools-menu-grid h5 { margin: 0 0 3px; font-size: 12.5px; color: var(--rail-steel); }
+.tools-menu-grid ul { margin: 0; padding-left: 16px; font-size: 12.5px; }
+
+.seat-pref-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+  margin: 4px 0 10px;
+  font-size: 13px;
+}
+.seat-pref-grid label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.coach-diagram {
+  max-width: 420px;
+  margin: 10px auto;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid #ddd3bd;
+  border-radius: 6px;
+}
+.coach-toilets { display: flex; gap: 6px; margin-bottom: 4px; }
+.coach-toilets span {
+  flex: 1;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--rail-steel);
+  border: 1.5px solid var(--rail-steel);
+  border-radius: 4px;
+  padding: 5px 4px;
+  background: #f6f2e6;
+}
+.coach-entry-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9.5px;
+  color: #8a93a1;
+  text-transform: uppercase;
+  letter-spacing: .02em;
+  margin: 2px 0 8px;
+}
+.coach-bay-row { display: flex; justify-content: center; gap: 14px; margin-bottom: 3px; }
+.coach-bay-row--coupe { border: 1px dashed #cbb98e; border-radius: 4px; padding: 3px 0; }
+.coach-bay-block { display: flex; gap: 3px; }
+.coach-bay-side {
+  display: flex;
+  justify-content: center;
+  gap: 3px;
+  margin: 2px 0 8px;
+  padding: 3px 0;
+  border-top: 1px dashed #ddd3bd;
+  border-bottom: 1px dashed #ddd3bd;
+}
+.coach-seat {
+  min-width: 26px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-align: center;
+  padding: 5px 3px;
+  border-radius: 3px;
+  border: 1px solid #c9bfa3;
+  color: #1c2733;
+}
+.coach-seat.is-lower { background: #fdf3c7; }   /* yellow, matches reference */
+.coach-seat.is-middle { background: #f4c9c2; }  /* pink/salmon */
+.coach-seat.is-upper { background: #cfe3f0; }   /* blue */
+.coach-seat--side { min-width: 30px; }
+/* CROWD-POSITION FOLLOW-UP: seat/berth occupancy ESTIMATE shading — only
+   ever applied when a real occupancy_estimate came back from the
+   backend (see estimate_seat_occupancy's disclaimer, always rendered
+   next to this). Darker/crossed styling on top of whichever type color
+   is already set, not a replacement for it, so berth type stays legible. */
+.coach-seat.is-occupied-estimate {
+  background: #d9534f !important;
+  color: #fff;
+  border-color: #b03a37;
+  text-decoration: line-through;
+  opacity: 0.85;
+}
+
+.coach-diagram--row .coach-row { display: flex; align-items: center; gap: 3px; margin-bottom: 4px; justify-content: center; }
+.coach-aisle-gap { width: 14px; }
+
+.coach-legend { padding: 2px 8px !important; }
+.coach-legend--lower { background: #fdf3c7 !important; color: #7a6a1f !important; }
+.coach-legend--middle { background: #f4c9c2 !important; color: #8a3f36 !important; }
+.coach-legend--upper { background: #cfe3f0 !important; color: #2a5b7a !important; }
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+.compare-card {
+  background: #fff;
+  border: 1px solid #e4dcc7;
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 13px;
+}
+.compare-card h5 { margin: 0 0 6px; font-family: var(--font-display); color: var(--rail-steel); font-size: 14px; }
+.compare-card dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 8px; margin: 0; }
+.compare-card dt { color: #6b7686; font-size: 12px; }
+.compare-card dd { margin: 0; font-weight: 600; }
+
+.heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 8px;
+}
+.heatmap-cell {
+  background: #fff;
+  border: 1px solid #e4dcc7;
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+  text-align: center;
+}
+.heatmap-cell__date { font-weight: 700; color: var(--rail-steel); font-size: 12.5px; }
+.heatmap-cell__weekday { font-size: 10.5px; color: #8a93a1; margin-bottom: 4px; }
+.heatmap-cell__fare { font-family: var(--font-mono); font-weight: 700; margin: 4px 0 2px; }
+.heatmap-cell__status { font-size: 10.5px; color: #5a6675; }
+.heatmap-cell.is-available { border-left: 3px solid var(--go-green); }
+.heatmap-cell.is-waitlist { border-left: 3px solid var(--coach-red); }
+
+@media (max-width: 640px) {
+  .tools-menu-grid { grid-template-columns: 1fr; }
+  .seat-pref-grid { grid-template-columns: 1fr; }
+}
+
+/* ============================================================ */
+/* FEATURE: IRCTC-style filter bar for Search Trains (From/To/   */
+/* Date/Time/Class/Quota/Per-page), replacing the old flex form   */
+/* that let the page-size number input stretch to an odd height.  */
+/* ============================================================ */
+.irctc-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.irctc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: #6b7686;
+  flex: 0 0 auto;
+  width: 130px;
+}
+.irctc-field--grow { flex: 1 1 160px; width: auto; }
+.irctc-field--narrow { width: 90px; }
+.irctc-field span { font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.irctc-field input,
+.irctc-field select {
+  padding: 9px 10px;
+  border: 1.5px solid var(--rail-steel);
+  border-radius: 4px;
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  width: 100%;
+  height: 38px;
+  box-sizing: border-box;
+  background: #fff;
+}
+.irctc-field__submit {
+  padding: 0 20px;
+  height: 38px;
+  border: none;
+  border-radius: 4px;
+  background: var(--ink-navy);
+  color: var(--signal-amber);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.irctc-field__submit:hover { background: var(--rail-steel); }
+@media (max-width: 640px) {
+  .irctc-field, .irctc-field--narrow { width: 100%; flex: 1 1 100%; }
+}
+
+/* Per-field Reset buttons — one next to every Search Trains field   */
+/* (text/date/select/number inputs, both checkboxes, both time-band  */
+/* groups) so any single field can be cleared back to its own        */
+/* default without resetting the rest of the form.                   */
+.irctc-field__label-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.field-reset-btn {
+  font-family: var(--font-body);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 10px;
+  color: var(--rail-steel);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  white-space: nowrap;
+}
+.field-reset-btn:hover { color: var(--ink-navy); }
+.irctc-checkbox-row { position: relative; padding-right: 34px; }
+.field-reset-btn--checkbox { position: absolute; right: 0; top: 50%; transform: translateY(-50%); }
+.time-band-group__label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* Train result cards: class tags + live availability badge, IRCTC-ish */
+.result-list--trains li { flex-wrap: wrap; align-items: flex-start; }
+.result-list--trains .train-row__main { display: flex; flex-direction: column; gap: 3px; }
+.result-list--trains .train-row__classes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.class-chip {
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #eef3f8;
+  color: var(--rail-steel);
+  font-weight: 600;
+}
+.class-chip.is-selected { background: var(--ink-navy); color: var(--signal-amber); }
+.availability-badge {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.availability-badge.is-available { background: #e3f3ea; color: var(--go-green); }
+.availability-badge.is-waitlist { background: #fbeaea; color: var(--coach-red); }
+.availability-badge.is-rac { background: #fff3d9; color: #b8860b; }
+.availability-badge.is-unknown { background: #eef1f4; color: #6b7686; }
+.train-row__book-btn {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: var(--signal-amber);
+  color: var(--ink-navy);
+  text-decoration: none;
+  display: inline-block;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+.train-row__book-btn:hover { filter: brightness(0.95); }
+
+/* ============================================================ */
+/* FEATURE: IRCTC-style departure/arrival time-band picker        */
+/* (00-06 / 06-12 / 12-18 / 18-00 quick buttons + Custom range)   */
+/* ============================================================ */
+.time-band-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 4px 0 12px;
+  padding: 10px 12px;
+  background: rgba(22,50,79,0.04);
+  border: 1px solid #e4dcc7;
+  border-radius: 6px;
+}
+.time-band-group { flex: 1 1 260px; min-width: 240px; }
+.time-band-group__label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  color: #6b7686;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  margin-bottom: 6px;
+}
+.time-band-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.time-band-btn {
+  border: 1.5px solid var(--rail-steel);
+  background: #fff;
+  color: var(--rail-steel);
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 12.5px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.time-band-btn:hover { background: rgba(22,50,79,0.08); }
+.time-band-btn.is-active { background: var(--ink-navy); color: var(--signal-amber); border-color: var(--ink-navy); }
+.time-band-btn--custom { border-style: dashed; }
+.time-band-custom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 8px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #e4dcc7;
+  border-radius: 4px;
+}
+.time-band-custom label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: #6b7686;
+}
+.time-band-custom input[type="time"] {
+  padding: 7px 8px;
+  border: 1.5px solid var(--rail-steel);
+  border-radius: 4px;
+  font-size: 13px;
+}
+.time-band-custom__hint {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: #8a93a1;
+  font-style: italic;
+}
+@media (max-width: 640px) {
+  .time-band-group { flex: 1 1 100%; }
+}
+
+/* "Available only" checkbox in the Search Trains filter bar */
+.irctc-field--checkbox { justify-content: flex-end; }
+.irctc-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--rail-steel);
+  white-space: nowrap;
+}
+.irctc-checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+
+.coach-bay-label {
+  text-align: center;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #8a93a1;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  margin-top: 4px;
+}
+
+/* ============================================================ */
+/* FEATURE: Journey Timeline (Gantt view)                         */
+/* ============================================================ */
+.gantt-timeline { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+.gantt-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 90px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 0;
+  border-bottom: 1px dashed #e4dcc7;
+}
+.gantt-row__name { font-weight: 600; color: var(--rail-steel); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gantt-row__bar-track { position: relative; height: 10px; background: #f0ebd9; border-radius: 5px; }
+.gantt-row__bar {
+  position: absolute;
+  top: 0; left: 0; height: 100%;
+  border-radius: 5px;
+  background: var(--go-green);
+}
+.gantt-row__bar.is-current { background: var(--signal-amber); }
+.gantt-row__bar.is-upcoming { background: #cbd6e0; }
+.gantt-row__delay { font-size: 11px; text-align: right; color: #6b7686; }
+.gantt-row__delay.is-late { color: var(--coach-red); font-weight: 700; }
+.gantt-legend { display: flex; gap: 10px; font-size: 11px; color: #6b7686; margin-top: 6px; }
+.gantt-legend span::before { content: "●"; margin-right: 4px; }
+.gantt-legend .is-passed::before { color: var(--go-green); }
+.gantt-legend .is-current::before { color: var(--signal-amber); }
+.gantt-legend .is-upcoming::before { color: #cbd6e0; }
+
+.crowd-meter { display: flex; gap: 4px; margin: 8px 0; }
+.crowd-meter__bar { flex: 1; height: 14px; border-radius: 3px; background: #eef1f4; }
+.crowd-meter__bar.is-filled { background: var(--signal-amber); }
+.crowd-meter__bar.is-filled.is-high { background: var(--coach-red); }
+
+.tools-subheading {
+  margin: 18px 0 4px;
+  padding-top: 12px;
+  border-top: 1px solid #e4dcc7;
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--rail-steel);
+}
+.platform-heatmap { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.platform-cell {
+  min-width: 70px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fbeaea;
+  border: 1px solid var(--coach-red);
+  text-align: center;
+}
+.platform-cell__label { font-size: 10.5px; font-weight: 700; color: var(--coach-red); text-transform: uppercase; }
+.platform-cell__count { font-size: 16px; font-weight: 700; color: #7a2e28; }
+
+/* Offline station map (real cached Leaflet tiles, per-station download) */
+.offline-map-actions { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; flex-wrap: wrap; }
+.feature-form__submit-like {
+  padding: 9px 16px;
+  border: none;
+  border-radius: 4px;
+  background: var(--ink-navy);
+  color: var(--signal-amber);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+.feature-form__submit-like:hover { background: var(--rail-steel); }
+.feature-form__submit-like:disabled { opacity: 0.6; cursor: not-allowed; }
+.offline-map-container {
+  height: 240px;
+  border-radius: 6px;
+  border: 1px solid #e4dcc7;
+  margin-top: 8px;
+}
+
+/* ---------- Train Delay Prediction with Explainable AI ---------- */
+/* Each attribution factor is a labelled bar, direction shown via sign +
+   arrow glyph + color (never color alone — see the app's accessibility
+   pass), red = adds delay, green = reduces it, matching --coach-red /
+   --go-green used everywhere else in this theme for the same meaning. */
+.shap-bar-row { margin: 10px 0; }
+.shap-bar-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12.5px;
+}
+.shap-bar-label { font-weight: 600; color: var(--rail-steel); flex: 1; }
+.shap-bar-minutes { font-weight: 700; white-space: nowrap; }
+.shap-bar-minutes.is-up { color: var(--coach-red); }
+.shap-bar-minutes.is-down { color: var(--go-green); }
+.shap-bar-track { height: 10px; border-radius: 3px; background: #eef1f4; overflow: hidden; }
+.shap-bar-fill { height: 100%; border-radius: 3px; }
+.shap-bar-fill.is-up { background: var(--coach-red); }
+.shap-bar-fill.is-down { background: var(--go-green); }
+.shap-bar-pct { font-size: 10.5px; color: #8a93a1; margin-top: 2px; }
+.shap-legend {
+  font-size: 11px; color: #8a93a1; font-style: italic;
+  margin-top: 10px; padding-top: 8px; border-top: 1px dashed #ddd3bd;
+}
+.historical-callout {
+  background: #eef3f8;
+  border-left: 4px solid var(--rail-steel);
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  color: var(--rail-steel);
+  margin: 10px 0;
+  line-height: 1.5;
+}
+
+/* ---------- Crowd-Sourced Train Position Reports ---------- */
+.cp-badge-pill {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #eef3f8;
+  color: var(--rail-steel);
+}
+.cp-leader-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+}
+.cp-leader-rank { width: 24px; font-weight: 700; color: #8a93a1; font-size: 12px; }
+.cp-leader-name { flex: 1; font-size: 12.5px; font-weight: 600; color: var(--rail-steel); }
+.cp-leader-count { font-size: 12px; color: #8a93a1; font-weight: 700; min-width: 22px; text-align: right; }
+
+/* ---------- New dynamic tools: departure reminder / smart alarm / transit
+   optimizer / route time-lapse / coach crowd map / water & restroom check ---------- */
+.feature-form__checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: #6b7686;
+  cursor: pointer;
+}
+.tools-urgency {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  margin-left: 6px;
+}
+.tools-urgency--plenty_of_time { background: #e3f3ea; color: var(--go-green); }
+.tools-urgency--leave_soon { background: #fff3cf; color: #b8860b; }
+.tools-urgency--leave_now, .tools-urgency--departed { background: #fbeaea; color: var(--coach-red); }
+
+.tools-timelapse-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.tools-timelapse-controls input[type="range"] { flex: 1; }
+
+/* NOTE: "Live Crowd Map for Train Coaches" and "Water/Restroom Availability
+   Live Check" styles (.coach-grid / .coach-chip*) were removed along with
+   the features themselves — neither RailKit (RapidAPI) nor RailRadar
+   exposes any real per-coach occupancy or water/restroom sensor feed.
+   FEATURE: Real-Time Per-Coach Crowding (below) is different from that —
+   it's a rider SELF-report, never presented as a sensor reading. */
+
+/* =============================================================
+   FEATURE: Lite/Text-Only Tracking Mode — hides the map + delay
+   chart (no tile/canvas rendering) while everything else in the
+   Live Tracking modal stays visible. Toggled via #ltLiteModeToggle.
+   ============================================================= */
+#liveTrackModal.lt-lite-mode .msg__map-wrap,
+#liveTrackModal.lt-lite-mode .dash-card {
+  display: none;
+}
+
+/* FEATURE: a small live delay-trend sparkline. */
+#ltSparklineCard canvas {
+  width: 100%;
+  display: block;
+}
+
+/* FEATURE: Track Two Trains Side by Side. */
+.compare-train-col .headline-card {
+  margin-top: 10px;
+}
+@media (max-width: 640px) {
+  #compareTrainsModal .compare-trains-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

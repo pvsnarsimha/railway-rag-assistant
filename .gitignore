@@ -1,0 +1,32 @@
+# Secrets — never commit real API keys. Render/Railway get these pasted
+# into their dashboard's Environment Variables screen instead.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+backend/venv/
+backend/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# SQLite databases — regenerated at runtime, and reset on every redeploy
+# on a free-tier host anyway (ephemeral disk) unless you attach a
+# persistent volume. Not meant to be version-controlled data.
+*.db
+*.sqlite
+*.sqlite3
+
+# Node
+node_modules/
+railkit-service/node_modules/
+
+# Expo / React Native
+mobile-app/node_modules/
+mobile-app/.expo/
+mobile-app/dist/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

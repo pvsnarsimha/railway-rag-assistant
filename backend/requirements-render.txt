@@ -1,0 +1,35 @@
+# Lean install list for a free/small hosting tier (e.g. Render's free
+# 512MB-RAM web service). Identical to requirements.txt except it leaves
+# out sentence-transformers + torch, by far the two heaviest installs here
+# (multi-GB combined, and torch alone can exceed a 512MB build/runtime
+# budget). This is a safe trim, not a feature cut: semantic_engine.py
+# already detects their absence at import time and transparently falls
+# back to a TF-IDF + Truncated SVD (LSA) pseudo-embedding — see the
+# "Semantic Search Upgrade" section of README.md. Every other feature
+# (live tracking, all 9 Live Tracking additions, delay prediction, push,
+# PNR/fare/crowd tools) is unaffected.
+#
+# If you deploy on a host with more RAM (Render's paid tiers, a real VM,
+# etc.) and want real sentence embeddings for semantic search, just use
+# requirements.txt instead of this file as the build command's target.
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+requests==2.32.3
+python-dotenv==1.0.1
+scikit-learn==1.5.2
+anthropic==0.34.2
+google-genai>=2.19.0
+pydantic==2.9.2
+joblib==1.4.2
+shap==0.46.0
+websockets==13.1
+
+APScheduler==3.10.4
+firebase-admin==6.5.0
+
+rank-bm25==0.2.2
+networkx==3.3
+numpy==1.26.4
+
+yake==0.4.8

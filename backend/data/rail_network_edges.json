@@ -1,0 +1,317 @@
+[
+  {
+    "from": "NDLS",
+    "to": "GZB",
+    "distance_km": 23.0
+  },
+  {
+    "from": "GZB",
+    "to": "CNB",
+    "distance_km": 376.0
+  },
+  {
+    "from": "CNB",
+    "to": "ALD",
+    "distance_km": 186.2
+  },
+  {
+    "from": "ALD",
+    "to": "GAYA",
+    "distance_km": 328.0
+  },
+  {
+    "from": "GAYA",
+    "to": "DHN",
+    "distance_km": 182.7
+  },
+  {
+    "from": "DHN",
+    "to": "HWH",
+    "distance_km": 237.4
+  },
+  {
+    "from": "GAYA",
+    "to": "PNBE",
+    "distance_km": 91.7
+  },
+  {
+    "from": "PNBE",
+    "to": "RJPB",
+    "distance_km": 1.8
+  },
+  {
+    "from": "PNBE",
+    "to": "DBG",
+    "distance_km": 97.9
+  },
+  {
+    "from": "DHN",
+    "to": "RNC",
+    "distance_km": 122.1
+  },
+  {
+    "from": "RNC",
+    "to": "BSP",
+    "distance_km": 356.8
+  },
+  {
+    "from": "BSP",
+    "to": "R",
+    "distance_km": 107.3
+  },
+  {
+    "from": "R",
+    "to": "NGP",
+    "distance_km": 263.0
+  },
+  {
+    "from": "NDLS",
+    "to": "AGC",
+    "distance_km": 181.6
+  },
+  {
+    "from": "AGC",
+    "to": "JHS",
+    "distance_km": 198.8
+  },
+  {
+    "from": "JHS",
+    "to": "GWL",
+    "distance_km": 93.5
+  },
+  {
+    "from": "GWL",
+    "to": "AGC",
+    "distance_km": 106.9
+  },
+  {
+    "from": "JHS",
+    "to": "BPL",
+    "distance_km": 269.7
+  },
+  {
+    "from": "BPL",
+    "to": "NGP",
+    "distance_km": 292.9
+  },
+  {
+    "from": "NGP",
+    "to": "SC",
+    "distance_km": 418.4
+  },
+  {
+    "from": "SC",
+    "to": "BZA",
+    "distance_km": 247.7
+  },
+  {
+    "from": "BZA",
+    "to": "MAS",
+    "distance_km": 383.7
+  },
+  {
+    "from": "BZA",
+    "to": "VSKP",
+    "distance_km": 314.6
+  },
+  {
+    "from": "VSKP",
+    "to": "BBS",
+    "distance_km": 388.6
+  },
+  {
+    "from": "BBS",
+    "to": "HWH",
+    "distance_km": 365.6
+  },
+  {
+    "from": "SC",
+    "to": "SBC",
+    "distance_km": 505.6
+  },
+  {
+    "from": "SBC",
+    "to": "MAS",
+    "distance_km": 293.1
+  },
+  {
+    "from": "MAS",
+    "to": "TPTY",
+    "distance_km": 110.7
+  },
+  {
+    "from": "SBC",
+    "to": "CBE",
+    "distance_km": 229.4
+  },
+  {
+    "from": "CBE",
+    "to": "ERS",
+    "distance_km": 136.3
+  },
+  {
+    "from": "ERS",
+    "to": "TVC",
+    "distance_km": 180.4
+  },
+  {
+    "from": "CBE",
+    "to": "MDU",
+    "distance_km": 174.6
+  },
+  {
+    "from": "MDU",
+    "to": "MAS",
+    "distance_km": 422.9
+  },
+  {
+    "from": "MDU",
+    "to": "ERS",
+    "distance_km": 200.8
+  },
+  {
+    "from": "NDLS",
+    "to": "JP",
+    "distance_km": 237.8
+  },
+  {
+    "from": "JP",
+    "to": "JU",
+    "distance_km": 283.6
+  },
+  {
+    "from": "JU",
+    "to": "BKN",
+    "distance_km": 194.5
+  },
+  {
+    "from": "JU",
+    "to": "UDZ",
+    "distance_km": 200.5
+  },
+  {
+    "from": "JP",
+    "to": "KOTA",
+    "distance_km": 193.5
+  },
+  {
+    "from": "KOTA",
+    "to": "RTM",
+    "distance_km": 222.1
+  },
+  {
+    "from": "RTM",
+    "to": "INDB",
+    "distance_km": 108.1
+  },
+  {
+    "from": "INDB",
+    "to": "BPL",
+    "distance_km": 169.4
+  },
+  {
+    "from": "RTM",
+    "to": "BRC",
+    "distance_km": 221.7
+  },
+  {
+    "from": "BRC",
+    "to": "ST",
+    "distance_km": 128.8
+  },
+  {
+    "from": "ST",
+    "to": "BCT",
+    "distance_km": 247.6
+  },
+  {
+    "from": "BCT",
+    "to": "PUNE",
+    "distance_km": 121.4
+  },
+  {
+    "from": "ADI",
+    "to": "BRC",
+    "distance_km": 99.7
+  },
+  {
+    "from": "ADI",
+    "to": "JU",
+    "distance_km": 365.0
+  },
+  {
+    "from": "ADI",
+    "to": "UDZ",
+    "distance_km": 205.3
+  },
+  {
+    "from": "NGP",
+    "to": "BCT",
+    "distance_km": 699.3
+  },
+  {
+    "from": "NGP",
+    "to": "PUNE",
+    "distance_km": 619.4
+  },
+  {
+    "from": "CNB",
+    "to": "LKO",
+    "distance_km": 72.2
+  },
+  {
+    "from": "LKO",
+    "to": "GZB",
+    "distance_km": 397.7
+  },
+  {
+    "from": "NDLS",
+    "to": "UMB",
+    "distance_km": 197.2
+  },
+  {
+    "from": "UMB",
+    "to": "CDG",
+    "distance_km": 35.6
+  },
+  {
+    "from": "UMB",
+    "to": "LDH",
+    "distance_km": 106.0
+  },
+  {
+    "from": "LDH",
+    "to": "ASR",
+    "distance_km": 124.0
+  },
+  {
+    "from": "HWH",
+    "to": "NJP",
+    "distance_km": 457.6
+  },
+  {
+    "from": "NJP",
+    "to": "GHY",
+    "distance_km": 339.9
+  },
+  {
+    "from": "CSMT",
+    "to": "BCT",
+    "distance_km": 3.7
+  },
+  {
+    "from": "CSMT",
+    "to": "PUNE",
+    "distance_km": 118.6
+  },
+  {
+    "from": "BZA",
+    "to": "GNT",
+    "distance_km": 30.7
+  },
+  {
+    "from": "GNT",
+    "to": "SC",
+    "distance_km": 241.1
+  }
+]

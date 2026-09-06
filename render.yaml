@@ -1,0 +1,78 @@
+# Render Blueprint — deploys the two backend processes this app needs as
+# separate always-on web services from one repo, in one click ("New +" ->
+# "Blueprint" on render.com, pointed at this repo). See README.md's
+# "Deploying it permanently" section for the full step-by-step.
+#
+# Env vars marked `sync: false` are secrets — Render will prompt you to
+# type each one into its dashboard during setup rather than reading a
+# value from this file (which gets committed to git and must never hold
+# real keys).
+#
+# NOTE: `RAILKIT_SERVICE_URL` below is intentionally left blank at first.
+# Render assigns `railkit-service`'s public URL only after its first
+# deploy finishes, so you fill this in as a manual second step (copy that
+# URL from the railkit-service dashboard page into the backend service's
+# Environment tab) rather than something this file can know in advance.
+
+services:
+  # Terminal 1 equivalent: the RailKit microservice (Node.js).
+  - type: web
+    name: railkit-service
+    runtime: node
+    plan: free
+    rootDir: railkit-service
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: RAILKIT_API_KEY
+        sync: false
+      - key: RAILRADAR_API_KEY
+        sync: false
+      # PORT is set automatically by Render — server.js already reads
+      # process.env.PORT, no change needed.
+
+  # Terminal 2 equivalent: the FastAPI backend (also serves the web
+  # frontend + the /track and /trip public share pages).
+  - type: web
+    name: railway-rag-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    # Lean install for the free tier's 512MB RAM — see
+    # requirements-render.txt's own header comment for why, and swap to
+    # `pip install -r requirements.txt` if you upgrade to a bigger plan
+    # and want real sentence-transformer embeddings for semantic search.
+    buildCommand: pip install -r requirements-render.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: RAILKIT_SERVICE_URL
+        sync: false   # fill in after railkit-service's first deploy — see note above
+      - key: RAPIDAPI_KEY
+        sync: false
+      - key: RAPIDAPI_HOST
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false
+      - key: ANTHROPIC_MODEL
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: RAILRADAR_API_KEY
+        sync: false
+      - key: WEATHER_API_KEY
+        sync: false
+      - key: ALERT_CHECK_INTERVAL_MINUTES
+        sync: false
+      - key: PUBLIC_APP_URL
+        sync: false   # set this to this same service's own Render URL once you know it
+      # FIREBASE_SERVICE_ACCOUNT_JSON: don't set this as a plain env var —
+      # it's a path to a credentials FILE on disk, which doesn't exist on
+      # Render unless you upload it. Use Render's "Secret Files" feature
+      # (dashboard -> this service -> Environment -> Secret Files) to
+      # upload your firebase-service-account.json, note the path Render
+      # shows you for it (typically /etc/secrets/<filename>), and set
+      # FIREBASE_SERVICE_ACCOUNT_JSON to that path as a regular env var.
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false

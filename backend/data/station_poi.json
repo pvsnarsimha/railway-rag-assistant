@@ -1,0 +1,56 @@
+{
+  "_comment": "FEATURE: Station Navigator. HONEST NOTE (same rule as advanced_features.py's platform navigation guide): no Indian Railways station publishes a real indoor-facility map through any API this app can reach. `entrance_sides` is only ever filled in for a handful of very well-documented major-terminus stations where the named entrances/sides are genuinely public, widely-published facts (e.g. New Delhi's Ajmeri Gate vs Paharganj side) - every other station is left as an empty list rather than guessed. `notable_note` is the same kind of well-known public fact (e.g. a station's two separate complexes), never a guess about a specific shop/counter location. Everything about WHICH platform a specific amenity sits on is deliberately NOT included here - that's exactly the kind of precise indoor-layout fact this project's honesty rule (see advanced_features.py's module docstring) won't fabricate. The backend composes this real-but-sparse data with generic, clearly-labelled Indian-station-layout conventions (see advanced_features.station_navigator) rather than inventing precise positions.",
+  "NDLS": {
+    "name": "New Delhi",
+    "entrance_sides": ["Ajmeri Gate side (south) — closer to Paharganj/Main Bazar", "Paharganj side (north) — closer to Chelmsford Road"],
+    "notable_note": "One of India's busiest stations, with two named entrance sides serving opposite ends of the station."
+  },
+  "HWH": {
+    "name": "Howrah Jn",
+    "entrance_sides": ["Old Complex (platforms 1-15)", "New Complex (platforms 16-23)"],
+    "notable_note": "Split into two physically separate complexes joined by a connecting passage — check which complex your platform is in."
+  },
+  "CSMT": {
+    "name": "Chhatrapati Shivaji Maharaj Terminus",
+    "entrance_sides": ["Main heritage building entrance (facing Dr Dadabhai Naoroji Road)"],
+    "notable_note": "A UNESCO World Heritage building; the main entrance/circulating area fronts the road, with all platforms behind it."
+  },
+  "BCT": {
+    "name": "Mumbai Central",
+    "entrance_sides": ["Main entrance (Maulana Azad Road side)"],
+    "notable_note": null
+  },
+  "MAS": {
+    "name": "Chennai Central",
+    "entrance_sides": ["Main entrance (EVR Periyar Salai / Wall Tax Road side)"],
+    "notable_note": "Adjacent to (but a separate station from) Chennai Egmore — don't confuse the two when booking a cab/auto."
+  },
+  "SBC": {
+    "name": "KSR Bengaluru (Bengaluru City)",
+    "entrance_sides": ["Main entrance (Gubbi Thotadappa Road side)"],
+    "notable_note": null
+  },
+  "SC": {
+    "name": "Secunderabad Jn",
+    "entrance_sides": ["Main entrance (Station Road side)"],
+    "notable_note": null
+  },
+  "BZA": { "name": "Vijayawada Jn", "entrance_sides": [], "notable_note": null },
+  "PUNE": { "name": "Pune Jn", "entrance_sides": ["Main entrance (Station Road side)", "Second entrance (Dnyaneshwar Paduka Chowk side)"], "notable_note": null },
+  "ADI": { "name": "Ahmedabad Jn", "entrance_sides": ["Kalupur side (main entrance)"], "notable_note": null },
+  "LKO": { "name": "Lucknow NR (Charbagh)", "entrance_sides": ["Main entrance (Charbagh Road side)"], "notable_note": "The building's distinctive dome-and-chhatri architecture is a well-known Lucknow landmark." },
+  "PNBE": { "name": "Patna Jn", "entrance_sides": ["Main entrance (Station Road side)"], "notable_note": null },
+  "NGP": { "name": "Nagpur Jn", "entrance_sides": ["Main entrance (Central Avenue side)"], "notable_note": null },
+  "BPL": { "name": "Bhopal Jn (Habibganj/Rani Kamlapati)", "entrance_sides": [], "notable_note": null },
+  "CNB": { "name": "Kanpur Central", "entrance_sides": ["Main entrance (Platform 1 side)"], "notable_note": null },
+  "ASR": { "name": "Amritsar Jn", "entrance_sides": ["Main entrance (Court Road side)"], "notable_note": null },
+  "JP": { "name": "Jaipur Jn", "entrance_sides": ["Main entrance (Station Road side)"], "notable_note": null },
+  "GZB": { "name": "Ghaziabad Jn", "entrance_sides": [], "notable_note": null },
+  "VSKP": { "name": "Visakhapatnam Jn", "entrance_sides": ["Main entrance (Station Road side)"], "notable_note": null },
+  "BBS": { "name": "Bhubaneswar", "entrance_sides": ["Main entrance (Station Square side)"], "notable_note": null },
+  "AGC": { "name": "Agra Cantt", "entrance_sides": ["Main entrance (Wazirpura Road side)"], "notable_note": null },
+  "JHS": { "name": "Jhansi Jn", "entrance_sides": [], "notable_note": null },
+  "GAYA": { "name": "Gaya Jn", "entrance_sides": [], "notable_note": null },
+  "DHN": { "name": "Dhanbad Jn", "entrance_sides": [], "notable_note": null },
+  "LDH": { "name": "Ludhiana Jn", "entrance_sides": [], "notable_note": null }
+}
