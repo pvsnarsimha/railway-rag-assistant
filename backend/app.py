@@ -32,9 +32,9 @@ import uuid
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 
 from dotenv import load_dotenv
@@ -4823,21 +4823,50 @@ def api_sentiment_analyze(req: SentimentRequest):
 # Serve the frontend as a static site at the root path.
 # =============================================================================
 # FEATURE: Shareable Read-Only Tracking Link. A plain URL
-# (PUBLIC_APP_URL + "/track/12951") that opens directly to a lightweight,
-# read-only live-tracking view — no login (there isn't one anywhere in this
-# app), no app install, no need to re-type the train number. Served as its
-# own small standalone page (frontend/track.html + track.js), NOT the main
-# SPA (index.html/app.js) with a query param, so this stays genuinely
-# lightweight and can't regress if the main app's tracking UI changes.
-# It talks to the SAME public /ws/track/{train_number} websocket the main
-# app itself uses — that socket already has no auth of its own, so this
-# page needs none either. Registered explicitly (matched before the
-# StaticFiles catch-all mount below) so "/track/12951" resolves to this
-# page rather than a literal (nonexistent) static file.
+# (PUBLIC_APP_URL + "/track/12951") that opens directly to a live-tracking
+# view — no login (there isn't one anywhere in this app), no app install,
+# no need to re-type the train number. It talks to the SAME public
+# /ws/track/{train_number} websocket the main app itself uses — that socket
+# already has no auth of its own, so this page needs none either.
+# Registered explicitly (matched before the StaticFiles catch-all mount
+# below) so "/track/12951" resolves here rather than a literal (nonexistent)
+# static file.
+#
+# Which UI a visitor gets depends on the device they open the link on:
+#   - Phone (User-Agent looks like a mobile browser): the small standalone
+#     lite page (frontend/track.html + track.js) — genuinely lightweight,
+#     matches the mobile app's own read-only tracking screen, and can't
+#     regress if the main desktop app's tracking UI changes.
+#   - Desktop/laptop browser: redirected into the full web app
+#     (index.html/app.js) with the Live Tracking panel auto-opened and
+#     already tracking this train, so desktop visitors get the richer full
+#     app experience (bigger map, delay chart, coach crowding, etc.)
+#     instead of the phone-sized lite view.
 # =============================================================================
+_MOBILE_UA_RE = re.compile(
+    r"Mobi|Android|iPhone|iPod|IEMobile|BlackBerry|Opera Mini|Windows Phone",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_mobile(user_agent: str) -> bool:
+    return bool(_MOBILE_UA_RE.search(user_agent or ""))
+
+
 @app.get("/track/{train_number}")
-def track_share_page(train_number: str):
-    return FileResponse(os.path.join(FRONTEND_DIR, "track.html"))
+def track_share_page(train_number: str, request: Request, date: Optional[str] = None):
+    user_agent = request.headers.get("user-agent", "")
+    if _looks_like_mobile(user_agent):
+        return FileResponse(os.path.join(FRONTEND_DIR, "track.html"))
+
+    # Desktop: hand off to the full app UI via a redirect (not a direct
+    # FileResponse of index.html) so index.html's own relative asset paths
+    # ("app.js", "style.css", ...) keep resolving correctly against "/"
+    # instead of against "/track/<number>".
+    query = f"openTrack={train_number}"
+    if date:
+        query += f"&openTrackDate={date}"
+    return RedirectResponse(url=f"/?{query}")
 
 
 # =============================================================================

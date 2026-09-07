@@ -1943,6 +1943,43 @@ if (!alreadySeenTour) {
   });
 
   // -------------------------------------------------------------
+  // FEATURE: Shareable Read-Only Tracking Link — desktop hand-off.
+  // Opening a /track/12951 link on a desktop browser gets redirected
+  // server-side (see backend's track_share_page) to "/?openTrack=12951"
+  // so this full app UI opens instead of the phone-sized lite page. On
+  // load, detect that query param, auto-open the Live Tracking panel,
+  // and start tracking immediately — the visitor shouldn't have to
+  // re-type the train number they already clicked a link for.
+  // -------------------------------------------------------------
+  (function autoOpenTrackFromShareLink() {
+    const params = new URLSearchParams(location.search);
+    const autoTrainNumber = params.get("openTrack");
+    if (!autoTrainNumber || !/^\d{5}$/.test(autoTrainNumber)) return;
+
+    liveTrackModal.hidden = false;
+    requestAnimationFrame(ensureLiveTrackMap);
+
+    const ltDateInput = document.getElementById("liveTrackDateInput");
+    const ddmmyyyy = params.get("openTrackDate");
+    if (ltDateInput && ddmmyyyy) {
+      const [d, m, y] = ddmmyyyy.split("-");
+      if (d && m && y) ltDateInput.value = `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+    }
+    if (ltDateInput && !ltDateInput.value) {
+      ltDateInput.value = new Date().toISOString().slice(0, 10);
+    }
+
+    liveTrackInput.value = autoTrainNumber;
+    liveTrackReconnectAttempts = 0;
+    startLiveTrack(autoTrainNumber);
+
+    // Clean the query string out of the address bar (keeps the URL
+    // shareable-looking and avoids re-triggering this on a plain refresh)
+    // without a full navigation/reload.
+    history.replaceState({}, "", location.pathname);
+  })();
+
+  // -------------------------------------------------------------
   // FEATURE: Train Delay Prediction with Explainable AI — on-demand
   // "why" for the currently-tracked train, reusing whatever this panel
   // already knows (train number, date/class from the options form, and
