@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { View, Text, StyleSheet, ScrollView, Platform } from "react-native";
-import MapView, { Marker, Circle, PROVIDER_GOOGLE } from "react-native-maps";
+import { View, Text, StyleSheet, ScrollView } from "react-native";
+import FusedPositionMap from "../components/FusedPositionMap";
 import { colors, spacing, radius } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";
@@ -144,31 +144,14 @@ export default function CrowdPositionScreen() {
         <SectionCard title="Fused position">
           {fused.lat != null && fused.lng != null ? (
             <>
-              <View style={styles.mapBox}>
-                <MapView
-                  style={styles.map}
-                  provider={Platform.OS === "android" ? PROVIDER_GOOGLE : undefined}
-                  initialRegion={{
-                    latitude: fused.lat, longitude: fused.lng,
-                    latitudeDelta: 0.08, longitudeDelta: 0.08,
-                  }}
-                >
-                  <Marker
-                    coordinate={{ latitude: fused.lat, longitude: fused.lng }}
-                    pinColor={SOURCE_COLOR[fused.position_source] || colors.primary}
-                    title={fused.current_station || `Train ${fused.train_number}`}
-                    description={fused.confidence_label}
-                  />
-                  {fused.uncertainty_radius_m ? (
-                    <Circle
-                      center={{ latitude: fused.lat, longitude: fused.lng }}
-                      radius={fused.uncertainty_radius_m}
-                      strokeColor={SOURCE_COLOR[fused.position_source] || colors.primary}
-                      fillColor={`${SOURCE_COLOR[fused.position_source] || colors.primary}22`}
-                    />
-                  ) : null}
-                </MapView>
-              </View>
+              <FusedPositionMap
+                lat={fused.lat}
+                lng={fused.lng}
+                color={SOURCE_COLOR[fused.position_source] || colors.primary}
+                title={fused.current_station || `Train ${fused.train_number}`}
+                description={fused.confidence_label}
+                uncertaintyRadiusM={fused.uncertainty_radius_m}
+              />
               <InfoLine label="Confidence" value={fused.confidence_label} />
               <InfoLine label="Source" value={fused.position_source} />
               <InfoLine label="Confirming reports" value={`${fused.n_confirming_reports} of ${fused.n_total_reports} recent`} />

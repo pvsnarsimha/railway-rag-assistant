@@ -10,6 +10,9 @@
       "backgroundColor": "#0B3D91"
     },
     "assetBundlePatterns": ["**/*"],
+    "experiments": {
+      "baseUrl": "/mobile-app"
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.railwayrag.mobile",

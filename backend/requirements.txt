@@ -5,7 +5,7 @@ python-dotenv==1.0.1
 scikit-learn==1.5.2
 anthropic==0.34.2
 google-genai>=2.19.0  # Gemini: primary text-synthesis provider (GPS/live-status/routes/FAQ)
-pydantic==2.9.2
+pydantic==2.12.5
 joblib==1.4.2              # Train Delay Prediction: caches the fitted stacked ensemble model to disk
 shap==0.46.0                # Train Delay Prediction: SHAP KernelExplainer for real per-factor delay attribution
 websockets==13.1           # Real-Time Train Position + Proactive Alerts: WebSocket support for uvicorn

@@ -89,6 +89,7 @@ app = FastAPI(title="Indian Railways RAG Assistant")
 _TRACK_POLL_INTERVAL_SECONDS = 5
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+MOBILE_WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mobile_web")
 
 
 @app.on_event("startup")
@@ -4878,5 +4879,32 @@ def track_share_page(train_number: str, request: Request, date: Optional[str] = 
 def trip_summary_page(share_id: str):
     return FileResponse(os.path.join(FRONTEND_DIR, "trip.html"))
 
+
+# =============================================================================
+# FEATURE: Device-based home page — same idea as /track above, but for the
+# site's root URL itself.
+#   - Phone/tablet browser: redirected into the exported mobile-app (Expo/
+#     React Native web build, served as static files from MOBILE_WEB_DIR)
+#     mounted at /mobile-app, so mobile visitors to the bare domain get the
+#     actual mobile-app UI instead of the desktop-oriented web frontend.
+#   - Desktop/laptop browser: unchanged — the existing full web app
+#     (frontend/index.html).
+# Registered before the catch-all StaticFiles mount below (and the
+# /mobile-app mount is also registered before that same catch-all) so both
+# take precedence over it, exactly like /track/{train_number} already does.
+# =============================================================================
+_MOBILE_WEB_INDEX = os.path.join(MOBILE_WEB_DIR, "index.html")
+
+
+@app.get("/")
+def home_page(request: Request):
+    user_agent = request.headers.get("user-agent", "")
+    if _looks_like_mobile(user_agent) and os.path.isfile(_MOBILE_WEB_INDEX):
+        return RedirectResponse(url="/mobile-app/")
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+
+if os.path.isdir(MOBILE_WEB_DIR):
+    app.mount("/mobile-app", StaticFiles(directory=MOBILE_WEB_DIR, html=True), name="mobile_web")
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from "react";
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Linking } from "react-native";
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
+import NearbyStationMap from "../components/NearbyStationMap";
+import RoutePositionMap from "../components/RoutePositionMap";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { colors, spacing, radius } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
@@ -1012,14 +1013,7 @@ function OfflineTool({ apiBaseUrl }) {
             {entry.amenities && ["food_court", "executive_lounge", "retiring_room", "wifi", "cloak_room", "waiting_room"].map((k) => (
               <Text key={k} style={styles.resultLine}>{entry.amenities[k] ? "✓" : "✕"} {k.replace("_", " ")}</Text>
             ))}
-            <MapView
-              style={styles.offlineMap}
-              provider={PROVIDER_GOOGLE}
-              initialRegion={{ latitude: entry.lat, longitude: entry.lng, latitudeDelta: 0.05, longitudeDelta: 0.05 }}
-              region={{ latitude: entry.lat, longitude: entry.lng, latitudeDelta: 0.05, longitudeDelta: 0.05 }}
-            >
-              <Marker coordinate={{ latitude: entry.lat, longitude: entry.lng }} title={entry.name} />
-            </MapView>
+            <NearbyStationMap latitude={entry.lat} longitude={entry.lng} title={entry.name} />
             <Text style={styles.disclaimer}>
               This map view needs network (react-native-maps/Google Maps here has no built-in offline tile
               download). For a genuinely offline map of this area, open it in Google Maps and use Google
@@ -1815,7 +1809,6 @@ function RouteTimelapseTool({ apiBaseUrl }) {
   const [playing, setPlaying] = useState(false);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  const mapRef = React.useRef(null);
 
   async function run() {
     if (!/^\d{5}$/.test(trainNumber)) { setError("Enter a valid 5-digit train number."); return; }
@@ -1825,12 +1818,6 @@ function RouteTimelapseTool({ apiBaseUrl }) {
       setData(result);
       const plottable = result.found ? (result.stops || []).filter((s) => s.lat != null && s.lng != null && s.progress != null) : [];
       setStops(plottable);
-      if (plottable.length > 1 && mapRef.current) {
-        setTimeout(() => mapRef.current?.fitToCoordinates(
-          plottable.map((s) => ({ latitude: s.lat, longitude: s.lng })),
-          { edgePadding: { top: 40, right: 40, bottom: 40, left: 40 }, animated: true },
-        ), 300);
-      }
     } catch (e) { setError(describeApiError(e)); setData(null); setStops([]); }
     finally { setLoading(false); }
   }
@@ -1857,18 +1844,7 @@ function RouteTimelapseTool({ apiBaseUrl }) {
       {data && !data.found && <Text style={styles.resultLine}>{data.note}</Text>}
       {stops.length > 1 && (
         <>
-          <MapView
-            ref={mapRef}
-            style={{ width: "100%", height: 220, borderRadius: radius.md, marginTop: spacing.md }}
-            provider={PROVIDER_GOOGLE}
-            initialRegion={{ latitude: stops[0].lat, longitude: stops[0].lng, latitudeDelta: 4, longitudeDelta: 4 }}
-          >
-            <Polyline coordinates={stops.map((s) => ({ latitude: s.lat, longitude: s.lng }))} strokeColor={colors.primary} strokeWidth={3} />
-            {stops.map((s, i) => (
-              <Marker key={s.code + i} coordinate={{ latitude: s.lat, longitude: s.lng }} title={`${s.name} (${s.code})`} pinColor={colors.border} opacity={0.6} />
-            ))}
-            {pos && <Marker coordinate={{ latitude: pos.latitude, longitude: pos.longitude }} title="Train" pinColor={colors.accent} />}
-          </MapView>
+          <RoutePositionMap stops={stops} pos={pos} />
           <View style={{ flexDirection: "row", alignItems: "center", marginTop: spacing.sm, gap: 8 }}>
             <PrimaryButton title={playing ? "⏸ Pause" : "▶ Play"} onPress={() => setPlaying((p) => !p)} style={{ flex: 1 }} />
             <PrimaryButton title="⏮ Reset" onPress={() => { setPlaying(false); setProgress(0); }} variant="secondary" style={{ flex: 1 }} />
