@@ -33,15 +33,57 @@ function isPrivateOrLocalHost(url) {
 const LOCAL_SHARE_WARNING =
   "⚠️ Local address — won't open for anyone outside this device/WiFi. See the README's \"Sharing links publicly\" section.";
 
+// FEATURE: "Train on map" — a real Leaflet map on demand, shown/hidden by a
+// toggle button rather than always rendered (matches the web frontend's own
+// "Train on map" / "Delay chart" collapsible sections). `react-native-maps`
+// has no web target (see the module docstring below for why this file
+// exists at all), but plain Leaflet has no such restriction — it's just DOM
+// + JS, so it runs fine inside a react-native-web <View> (which is a <div>
+// under the hood; a ref to it is a real DOM node Leaflet can mount into).
+// Reuses the SAME vendored Leaflet build + train icon the web frontend
+// already ships (frontend/assets/vendor/leaflet, frontend/assets/icons) —
+// served from this same backend at these absolute paths regardless of
+// whether this page itself is loaded from "/" or "/mobile-app/" — instead
+// of adding a new CDN dependency.
+const LEAFLET_CSS_URL = "/assets/vendor/leaflet/leaflet.css";
+const LEAFLET_JS_URL = "/assets/vendor/leaflet/leaflet.js";
+const TRAIN_ICON_URL = "/assets/icons/train-marker.png";
+
+let leafletLoadPromise = null;
+function loadLeaflet() {
+  if (typeof window === "undefined") return Promise.reject(new Error("no window"));
+  if (window.L) return Promise.resolve(window.L);
+  if (leafletLoadPromise) return leafletLoadPromise;
+  leafletLoadPromise = new Promise((resolve, reject) => {
+    if (!document.querySelector(`link[href="${LEAFLET_CSS_URL}"]`)) {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = LEAFLET_CSS_URL;
+      document.head.appendChild(link);
+    }
+    const script = document.createElement("script");
+    script.src = LEAFLET_JS_URL;
+    script.async = true;
+    script.onload = () => (window.L ? resolve(window.L) : reject(new Error("Leaflet loaded but window.L is missing")));
+    script.onerror = () => reject(new Error("Failed to load the map library"));
+    document.head.appendChild(script);
+  });
+  return leafletLoadPromise;
+}
+
 /**
  * Web build of Live Tracking. `react-native-maps` has no web target — even
  * importing it breaks Metro's web bundle (see MapMarkerNativeComponent's
  * native-only import) — so this file exists purely so Metro's platform
  * resolution (`LiveTrackingScreen.web.js` beats `LiveTrackingScreen.js` on
- * web) picks a map-free screen instead of one that imports react-native-maps.
- * Everything except the map itself — the live WebSocket feed, delay/crowd
- * prediction, and stop timeline — works identically to the native screen.
- * The native/Expo Go build still gets the full map in LiveTrackingScreen.js.
+ * web) picks a screen that never imports react-native-maps. It still gets a
+ * real map though, via the "Train on map" toggle: plain Leaflet (see
+ * loadLeaflet() above) has no such native-only restriction, so it's loaded
+ * and mounted directly into a react-native-web <View>'s underlying DOM node
+ * on demand, matching the web frontend's own collapsible map section.
+ * Everything else — the live WebSocket feed, delay/crowd prediction, and
+ * stop timeline — works identically to the native screen. The native/Expo
+ * Go build still gets its own map in LiveTrackingScreen.js.
  */
 
 // green = already arrived, yellow = the very next station the train is
@@ -63,6 +105,17 @@ export default function LiveTrackingScreen() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const wsRef = useRef(null);
+
+  // FEATURE: "Train on map" toggle — see the module-level comment above
+  // loadLeaflet() for why a real Leaflet map is possible here despite
+  // react-native-maps having no web target.
+  const [showMap, setShowMap] = useState(false);
+  const [mapError, setMapError] = useState(null);
+  const mapContainerRef = useRef(null);
+  const leafletMapRef = useRef(null);
+  const routeLayerRef = useRef(null);
+  const trainMarkerRef = useRef(null);
+  const routeBoundsFitRef = useRef(false);
 
   // FEATURE: Live delay-trend sparkline — shown as compact text on this
   // already text-only fallback screen, rather than a canvas/SVG chart.
@@ -106,6 +159,96 @@ export default function LiveTrackingScreen() {
     setConnection("idle");
   }, []);
 
+  const toggleMap = useCallback(() => setShowMap((prev) => !prev), []);
+
+  function initMapIfNeeded() {
+    if (leafletMapRef.current || !mapContainerRef.current || typeof window === "undefined" || !window.L) return;
+    const L = window.L;
+    leafletMapRef.current = L.map(mapContainerRef.current, { scrollWheelZoom: false }).setView([22.5, 79], 5);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors", maxZoom: 18,
+    }).addTo(leafletMapRef.current);
+  }
+
+  // Load Leaflet (once) the first time the map is revealed, then init the
+  // map instance and nudge it to size correctly (it was created — or is
+  // being re-shown — against a container that may have been zero-height a
+  // moment ago, same invalidateSize()-on-reveal pattern the web frontend
+  // uses for its own toggle).
+  useEffect(() => {
+    if (!showMap) return;
+    let cancelled = false;
+    loadLeaflet()
+      .then(() => {
+        if (cancelled) return;
+        setMapError(null);
+        requestAnimationFrame(() => {
+          initMapIfNeeded();
+          leafletMapRef.current?.invalidateSize();
+        });
+      })
+      .catch((e) => {
+        if (!cancelled) setMapError(e.message || "Couldn't load the map library.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showMap]);
+
+  // Redraw the route (polyline + per-station dots) whenever the timeline
+  // changes, same shape/coloring as the web frontend's drawLiveTrackRoute.
+  useEffect(() => {
+    if (!showMap || !leafletMapRef.current || typeof window === "undefined" || !window.L) return;
+    const L = window.L;
+    const points = (payload?.timeline || []).filter((s) => s.lat != null && s.lng != null);
+    if (routeLayerRef.current) {
+      leafletMapRef.current.removeLayer(routeLayerRef.current);
+      routeLayerRef.current = null;
+    }
+    if (points.length < 2) return;
+    const layer = L.layerGroup();
+    L.polyline(points.map((s) => [s.lat, s.lng]), { color: "#16324F", weight: 3 }).addTo(layer);
+    points.forEach((s) => {
+      const color = s.status === "passed" ? "#2E8B57" : s.status === "current" ? "#C1272D" : "#8a93a1";
+      L.circleMarker([s.lat, s.lng], {
+        radius: s.kind === "intermediate" ? 3 : 5,
+        color, fillColor: color, fillOpacity: 1, weight: 1,
+      }).bindTooltip(`${s.name} (${s.code})`).addTo(layer);
+    });
+    layer.addTo(leafletMapRef.current);
+    routeLayerRef.current = layer;
+    if (!routeBoundsFitRef.current) {
+      leafletMapRef.current.fitBounds(points.map((s) => [s.lat, s.lng]), { padding: [30, 30] });
+      routeBoundsFitRef.current = true;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showMap, JSON.stringify(payload?.timeline || [])]);
+
+  // Move (or create) the live train-position marker — falls back to the
+  // last passed/current station's own coordinate when the live fix is
+  // momentarily unavailable, same honesty rule the web frontend uses.
+  useEffect(() => {
+    if (!showMap || !leafletMapRef.current || typeof window === "undefined" || !window.L) return;
+    const L = window.L;
+    let lat = payload?.lat, lng = payload?.lng;
+    if ((lat == null || lng == null) && Array.isArray(payload?.timeline)) {
+      const passedWithFix = payload.timeline.filter((s) => s.lat != null && (s.status === "passed" || s.status === "current"));
+      const last = passedWithFix[passedWithFix.length - 1];
+      if (last) { lat = last.lat; lng = last.lng; }
+    }
+    if (lat == null || lng == null) return;
+    if (!trainMarkerRef.current) {
+      const icon = L.icon({ iconUrl: TRAIN_ICON_URL, iconSize: [26, 19], iconAnchor: [13, 9.5], popupAnchor: [0, -9] });
+      trainMarkerRef.current = L.marker([lat, lng], { icon }).addTo(leafletMapRef.current);
+    } else {
+      trainMarkerRef.current.setLatLng([lat, lng]);
+    }
+    trainMarkerRef.current.bindPopup(
+      `Train ${payload?.train_number || trainNumber}${payload?.current_station ? `<br>${payload.current_station}` : ""}`
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showMap, payload?.lat, payload?.lng, payload?.current_station, payload?.train_number]);
+
   const refreshNow = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       setRefreshing(true);
@@ -124,6 +267,14 @@ export default function LiveTrackingScreen() {
     tripSummaryShownKeyRef.current = null;
     setTripSummary(null);
     setTripSummaryShareStatus(null);
+
+    // A stale route/marker from a PREVIOUSLY tracked train would be
+    // actively misleading pinned to the new train's map.
+    if (leafletMapRef.current) {
+      if (routeLayerRef.current) { leafletMapRef.current.removeLayer(routeLayerRef.current); routeLayerRef.current = null; }
+      if (trainMarkerRef.current) { leafletMapRef.current.removeLayer(trainMarkerRef.current); trainMarkerRef.current = null; }
+    }
+    routeBoundsFitRef.current = false;
 
     const url = buildTrackingWsUrl(wsBaseUrl, trainNumber.trim(), {
       date: trackDate.trim() || undefined,
@@ -227,16 +378,19 @@ export default function LiveTrackingScreen() {
           )}
         </View>
         {shareLinkNote && <Text style={styles.errorText}>{shareLinkNote}</Text>}
-        <Text style={styles.liteNotice}>
-          This web preview is already text-only and map-free \u2014 a natural fit for a slow/patchy connection (the native app's own explicit "Lite mode" hides the map on request instead).
-        </Text>
-        <View style={styles.webNotice}>
-          <Ionicons name="map-outline" size={14} color={colors.textMuted} />
-          <Text style={styles.webNoticeText}>
-            Map view isn't available in the web preview — open this app in Expo Go on a phone to see the live map.
-            Position, delay, and timeline data below still work here.
-          </Text>
+        <TouchableOpacity onPress={toggleMap} style={styles.mapToggleBtn}>
+          <Ionicons name="map-outline" size={14} color={colors.primary} />
+          <Text style={styles.mapToggleBtnText}>{showMap ? "Hide train on map" : "🗺️ Train on map"}</Text>
+        </TouchableOpacity>
+        {mapError && <Text style={styles.errorText}>{mapError}</Text>}
+        <View style={[styles.mapBox, !showMap && styles.mapBoxHidden]}>
+          <View ref={mapContainerRef} style={styles.mapInner} />
         </View>
+        {showMap && (
+          <Text style={styles.webNoticeText}>
+            {payload ? "Route + live position for this train." : "Start tracking above to plot this train's route and position."}
+          </Text>
+        )}
       </SectionCard>
 
       {/* FEATURE: End-of-Trip Summary Card (shareable) */}
@@ -405,6 +559,19 @@ const styles = StyleSheet.create({
   webNotice: { flexDirection: "row", gap: 6, marginTop: spacing.md, alignItems: "flex-start" },
   webNoticeText: { fontSize: 11, color: colors.textMuted, flex: 1, lineHeight: 16 },
   liteNotice: { fontSize: 10.5, color: colors.textMuted, fontStyle: "italic", marginTop: spacing.sm, lineHeight: 15 },
+  mapToggleBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start",
+    marginTop: spacing.sm, paddingVertical: 6, paddingHorizontal: 12,
+    borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.chip,
+  },
+  mapToggleBtnText: { fontSize: 12.5, fontWeight: "600", color: colors.primary },
+  // The map container is ALWAYS mounted (never conditionally rendered) so
+  // the Leaflet instance created inside it survives repeated show/hide —
+  // mapBoxHidden just collapses it to zero height, matching the show-again
+  // "invalidateSize()" nudge already wired up in the toggle effect above.
+  mapBox: { height: 220, borderRadius: radius.md, overflow: "hidden", borderWidth: 1, borderColor: colors.border, marginTop: spacing.sm },
+  mapBoxHidden: { height: 0, borderWidth: 0, marginTop: 0 },
+  mapInner: { flex: 1, minHeight: 220 },
   tripSummaryLine: { fontSize: 12.5, color: colors.text, lineHeight: 17 },
   infoRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },
   infoLabel: { fontSize: 13, color: colors.textMuted },

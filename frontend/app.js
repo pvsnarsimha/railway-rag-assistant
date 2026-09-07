@@ -2498,6 +2498,43 @@ if (!alreadySeenTour) {
   }
 
   // -------------------------------------------------------------
+  // FEATURE: "Train on map" / "Delay chart" show-on-demand toggles — both
+  // sections start collapsed (see the `hidden` attribute on their
+  // containers in index.html) so the panel opens compact; each button
+  // reveals its own section and relabels itself to "Hide ...". Leaflet/
+  // Chart.js both need a nudge (invalidateSize/resize) right after being
+  // un-hidden, since they were sized against a zero-height container while
+  // hidden — same pattern already used for offlineMap/cpMap/tlMap elsewhere
+  // in this file.
+  // -------------------------------------------------------------
+  const liveTrackMapWrap = document.getElementById("liveTrackMapWrap");
+  const ltToggleMapBtn = document.getElementById("ltToggleMapBtn");
+  if (ltToggleMapBtn && liveTrackMapWrap) {
+    ltToggleMapBtn.addEventListener("click", () => {
+      const showing = liveTrackMapWrap.hidden; // about to reveal it
+      liveTrackMapWrap.hidden = !showing;
+      ltToggleMapBtn.textContent = showing ? "🗺️ Hide train on map" : "🗺️ Train on map";
+      if (showing) {
+        ensureLiveTrackMap();
+        setTimeout(() => liveTrackMap && liveTrackMap.invalidateSize(), 50);
+      }
+    });
+  }
+
+  const liveTrackChartCard = document.getElementById("liveTrackChartCard");
+  const ltToggleChartBtn = document.getElementById("ltToggleChartBtn");
+  if (ltToggleChartBtn && liveTrackChartCard) {
+    ltToggleChartBtn.addEventListener("click", () => {
+      const showing = liveTrackChartCard.hidden;
+      liveTrackChartCard.hidden = !showing;
+      ltToggleChartBtn.textContent = showing ? "📊 Hide delay chart" : "📊 Delay chart";
+      if (showing && liveTrackChart) {
+        setTimeout(() => liveTrackChart.resize(), 50);
+      }
+    });
+  }
+
+  // -------------------------------------------------------------
   // FEATURE: Connection-Risk Alert — see backend/connection_risk.py.
   // -------------------------------------------------------------
   async function checkPnrConnectionPrompt(primaryTrainNumber) {

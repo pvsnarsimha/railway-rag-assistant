@@ -1,28 +1,39 @@
 import React from "react";
-import { View, Text, StyleSheet } from "react-native";
-import { colors, radius, spacing } from "../theme/colors";
+import { View, StyleSheet, Platform } from "react-native";
+import MapView, { Marker, Circle, PROVIDER_GOOGLE } from "react-native-maps";
+import { colors, radius } from "../theme/colors";
 
 /**
- * Web build of FusedPositionMap. `react-native-maps` has no web target, so
- * this shows the fused coordinates as text instead of a marker/circle map.
+ * FusedPositionMap — the "Fused position" map from CrowdPositionScreen.js,
+ * pulled into its own component so the web build can swap in a map-free
+ * `.web.js` sibling without duplicating the rest of that screen. See
+ * LiveTrackingScreen.web.js for the established pattern.
  */
 export default function FusedPositionMap({ lat, lng, color, title, description, uncertaintyRadiusM }) {
   if (lat == null || lng == null) return null;
+  const markerColor = color || colors.primary;
   return (
-    <View style={[styles.box, { borderColor: color || colors.border }]}>
-      <Text style={styles.line}>
-        📍 {title || "Current position"}: {lat.toFixed(5)}, {lng.toFixed(5)}
-      </Text>
-      {description ? <Text style={styles.desc}>{description}</Text> : null}
-      {uncertaintyRadiusM ? <Text style={styles.hint}>Uncertainty radius: ~{uncertaintyRadiusM} m</Text> : null}
-      <Text style={styles.hint}>Map preview isn't available in the web app.</Text>
+    <View style={styles.mapBox}>
+      <MapView
+        style={styles.map}
+        provider={Platform.OS === "android" ? PROVIDER_GOOGLE : undefined}
+        initialRegion={{ latitude: lat, longitude: lng, latitudeDelta: 0.08, longitudeDelta: 0.08 }}
+      >
+        <Marker coordinate={{ latitude: lat, longitude: lng }} pinColor={markerColor} title={title} description={description} />
+        {uncertaintyRadiusM ? (
+          <Circle
+            center={{ latitude: lat, longitude: lng }}
+            radius={uncertaintyRadiusM}
+            strokeColor={markerColor}
+            fillColor={`${markerColor}22`}
+          />
+        ) : null}
+      </MapView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  box: { borderRadius: radius.md, borderWidth: 1, padding: spacing.md, marginBottom: 8, backgroundColor: colors.chip },
-  line: { fontSize: 13, color: colors.text, fontWeight: "600" },
-  desc: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
-  hint: { fontSize: 11, color: colors.textMuted, marginTop: 4, fontStyle: "italic" },
+  mapBox: { height: 220, borderRadius: radius.md, overflow: "hidden", borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
+  map: { flex: 1 },
 });

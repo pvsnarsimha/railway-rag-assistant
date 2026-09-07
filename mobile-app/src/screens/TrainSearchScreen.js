@@ -149,48 +149,58 @@ export default function TrainSearchScreen() {
   const canNext = meta && meta.page < meta.totalPages;
 
   return (
-    <View style={styles.flex}>
-      <View style={styles.content}>
-        <SectionCard
-          title="Search trains"
-          subtitle="Real-time filter by source, destination, date, time, class and quota — choose how many trains per page (1-50)."
-        >
-          <View style={styles.row}>
-            <LabeledInput label="From" placeholder="e.g. NDLS or Delhi" value={source} onChangeText={setSource} style={styles.half} />
-            <LabeledInput label="To" placeholder="e.g. BCT or Mumbai" value={dest} onChangeText={setDest} style={styles.half} />
-          </View>
-          <View style={styles.row}>
-            <LabeledInput label="Date (dd-mm-yyyy, optional)" placeholder="02-08-2026" value={date} onChangeText={setDate} style={styles.half} autoCapitalize="none" />
-            <LabeledInput label="Time (HH:MM, optional)" placeholder="15:30" value={time} onChangeText={setTime} style={styles.half} autoCapitalize="none" keyboardType="numbers-and-punctuation" />
-          </View>
-          <Text style={styles.chipLabel}>Class</Text>
-          <ChipRow options={CLASS_OPTIONS} value={travelClass} onSelect={setTravelClass} getKey={(c) => c} getLabel={(c) => c} />
-          <Text style={styles.chipLabel}>Quota</Text>
-          <ChipRow options={QUOTA_OPTIONS} value={quota} onSelect={setQuota} getKey={(q) => q.code} getLabel={(q) => q.code} />
-          <LabeledInput
-            label={`Trains per page (${MIN_LIMIT}-${MAX_LIMIT})`}
-            placeholder="10"
-            value={limitText}
-            onChangeText={setLimitText}
-            keyboardType="number-pad"
-          />
-          <PrimaryButton title="Search" onPress={() => runSearch(1)} loading={loading} />
-          {error ? <Text style={styles.error}>{error}</Text> : null}
-          {meta ? (
-            <Text style={styles.note}>
-              {meta.total} train{meta.total === 1 ? "" : "s"} found — page {meta.page} of {meta.totalPages} ({meta.limit}/page)
-              {note ? ` — ${note}` : ""}
-            </Text>
-          ) : null}
-          {fareNote ? <Text style={styles.note}>💰 {fareNote}</Text> : null}
-        </SectionCard>
-      </View>
-
-      <FlatList
-        data={trains || []}
-        keyExtractor={(item, idx) => `${item.train_number}_${idx}`}
-        contentContainerStyle={styles.listContent}
-        renderItem={({ item }) => (
+    <FlatList
+      style={styles.flex}
+      data={trains || []}
+      keyExtractor={(item, idx) => `${item.train_number}_${idx}`}
+      contentContainerStyle={styles.listContent}
+      // NOTE: the search form used to sit in its own fixed View above a
+      // separate FlatList. On a short viewport (a phone, or — especially —
+      // the web build, where the page can't fall back to body scrolling)
+      // that left no way to reach the results below a tall form: two
+      // sibling scroll regions inside one flex column both default to
+      // flex-shrink, so the results pane could get squeezed to ~0 height
+      // instead of getting its own scrollbar. Making the whole screen ONE
+      // FlatList (form as its header) gives everything a single, always-
+      // reachable scroll container — same idiom used to fix StationSearchScreen.
+      ListHeaderComponent={
+        <View style={styles.content}>
+          <SectionCard
+            title="Search trains"
+            subtitle="Real-time filter by source, destination, date, time, class and quota — choose how many trains per page (1-50)."
+          >
+            <View style={styles.row}>
+              <LabeledInput label="From" placeholder="e.g. NDLS or Delhi" value={source} onChangeText={setSource} style={styles.half} />
+              <LabeledInput label="To" placeholder="e.g. BCT or Mumbai" value={dest} onChangeText={setDest} style={styles.half} />
+            </View>
+            <View style={styles.row}>
+              <LabeledInput label="Date (dd-mm-yyyy, optional)" placeholder="02-08-2026" value={date} onChangeText={setDate} style={styles.half} autoCapitalize="none" />
+              <LabeledInput label="Time (HH:MM, optional)" placeholder="15:30" value={time} onChangeText={setTime} style={styles.half} autoCapitalize="none" keyboardType="numbers-and-punctuation" />
+            </View>
+            <Text style={styles.chipLabel}>Class</Text>
+            <ChipRow options={CLASS_OPTIONS} value={travelClass} onSelect={setTravelClass} getKey={(c) => c} getLabel={(c) => c} />
+            <Text style={styles.chipLabel}>Quota</Text>
+            <ChipRow options={QUOTA_OPTIONS} value={quota} onSelect={setQuota} getKey={(q) => q.code} getLabel={(q) => q.code} />
+            <LabeledInput
+              label={`Trains per page (${MIN_LIMIT}-${MAX_LIMIT})`}
+              placeholder="10"
+              value={limitText}
+              onChangeText={setLimitText}
+              keyboardType="number-pad"
+            />
+            <PrimaryButton title="Search" onPress={() => runSearch(1)} loading={loading} />
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+            {meta ? (
+              <Text style={styles.note}>
+                {meta.total} train{meta.total === 1 ? "" : "s"} found — page {meta.page} of {meta.totalPages} ({meta.limit}/page)
+                {note ? ` — ${note}` : ""}
+              </Text>
+            ) : null}
+            {fareNote ? <Text style={styles.note}>💰 {fareNote}</Text> : null}
+          </SectionCard>
+        </View>
+      }
+      renderItem={({ item }) => (
           <View style={styles.trainRow}>
             <View style={styles.numberBadge}>
               <Text style={styles.numberBadgeText}>{item.train_number}</Text>
@@ -253,7 +263,6 @@ export default function TrainSearchScreen() {
           ) : null
         }
       />
-    </View>
   );
 }
 

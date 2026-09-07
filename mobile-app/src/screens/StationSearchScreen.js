@@ -33,44 +33,49 @@ export default function StationSearchScreen() {
   }
 
   return (
-    <View style={styles.flex}>
-      <View style={styles.content}>
-        <SectionCard title="Station search" subtitle="Find a station by name, city, or fuzzy spelling.">
-          <LabeledInput
-            label="Search"
-            placeholder="e.g. Vijayawada, or 'vijaywada' misspelled"
-            value={query}
-            onChangeText={setQuery}
-            autoCapitalize="none"
-          />
-          <PrimaryButton title="Search" onPress={runSearch} loading={loading} />
-          {error ? <Text style={styles.error}>{error}</Text> : null}
-          {note ? <Text style={styles.note}>{note}</Text> : null}
-        </SectionCard>
-      </View>
-
-      <FlatList
-        data={matches || []}
-        keyExtractor={(item, idx) => `${item.code}_${idx}`}
-        contentContainerStyle={styles.listContent}
-        renderItem={({ item }) => (
-          <View style={styles.matchRow}>
-            <View style={styles.codeBadge}>
-              <Text style={styles.codeBadgeText}>{item.code}</Text>
-            </View>
-            <View style={styles.matchInfo}>
-              <Text style={styles.matchName}>{item.name}</Text>
-              <Text style={styles.matchMeta}>
-                matched on {item.matched_on} · score {item.score?.toFixed?.(2) ?? item.score}
-              </Text>
-            </View>
+    <FlatList
+      style={styles.flex}
+      data={matches || []}
+      keyExtractor={(item, idx) => `${item.code}_${idx}`}
+      contentContainerStyle={styles.listContent}
+      // See TrainSearchScreen.js for why this is one FlatList (form as its
+      // header) instead of a fixed form View + separate FlatList — the old
+      // split layout could squeeze the results pane to ~0 height on a short
+      // viewport (a phone, or the web build, which has no body scroll to
+      // fall back on).
+      ListHeaderComponent={
+        <View style={styles.content}>
+          <SectionCard title="Station search" subtitle="Find a station by name, city, or fuzzy spelling.">
+            <LabeledInput
+              label="Search"
+              placeholder="e.g. Vijayawada, or 'vijaywada' misspelled"
+              value={query}
+              onChangeText={setQuery}
+              autoCapitalize="none"
+            />
+            <PrimaryButton title="Search" onPress={runSearch} loading={loading} />
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+            {note ? <Text style={styles.note}>{note}</Text> : null}
+          </SectionCard>
+        </View>
+      }
+      renderItem={({ item }) => (
+        <View style={styles.matchRow}>
+          <View style={styles.codeBadge}>
+            <Text style={styles.codeBadgeText}>{item.code}</Text>
           </View>
-        )}
-        ListEmptyComponent={
-          matches ? <Text style={styles.emptyText}>No matches found.</Text> : null
-        }
-      />
-    </View>
+          <View style={styles.matchInfo}>
+            <Text style={styles.matchName}>{item.name}</Text>
+            <Text style={styles.matchMeta}>
+              matched on {item.matched_on} · score {item.score?.toFixed?.(2) ?? item.score}
+            </Text>
+          </View>
+        </View>
+      )}
+      ListEmptyComponent={
+        matches ? <Text style={styles.emptyText}>No matches found.</Text> : null
+      }
+    />
   );
 }
 

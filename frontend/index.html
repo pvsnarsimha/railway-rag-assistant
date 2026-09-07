@@ -202,7 +202,7 @@
       <div class="feature-status" id="ltShareLinkStatus" hidden></div>
 
       <div class="feature-status" id="liveTrackStatus">Not connected.</div>
-      <div class="msg__map-wrap">
+      <div class="msg__map-wrap" id="liveTrackMapWrap" hidden>
         <div class="msg__map" id="liveTrackMap"></div>
         <div class="msg__map-caption" id="liveTrackCaption"></div>
       </div>
@@ -362,12 +362,20 @@
       </div>
 
       <h3 class="feature-subhead" id="liveTrackChartHead">Delay chart for this train</h3>
-      <div class="dash-card">
+      <div class="dash-card" id="liveTrackChartCard" hidden>
         <div class="dash-card__chart-scroll">
           <div class="dash-card__chart-inner" id="liveTrackChartInner">
             <canvas id="liveTrackChart" height="220"></canvas>
           </div>
         </div>
+      </div>
+
+      <!-- FEATURE: Map/chart shown on demand — both start collapsed so the
+           panel opens compact; each button reveals its section (map above,
+           chart just above this row) and relabels itself to "Hide ...". -->
+      <div class="actions-row" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;">
+        <button type="button" class="feature-form__submit-like" id="ltToggleMapBtn">🗺️ Train on map</button>
+        <button type="button" class="feature-form__submit-like" id="ltToggleChartBtn">📊 Delay chart</button>
       </div>
 
       <h3 class="feature-subhead">Crowd prediction for this train</h3>
