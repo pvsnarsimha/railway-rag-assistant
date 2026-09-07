@@ -646,6 +646,10 @@ if (!alreadySeenTour) {
   const liveTrackCaption = document.getElementById("liveTrackCaption");
   const liveTrackStats = document.getElementById("liveTrackStats");
   const liveTrackTimeline = document.getElementById("liveTrackTimeline");
+  // REDESIGN: RailYatri-style "Next: <station> in <eta> (<delay>)" bar —
+  // shows/hides in lockstep with the full stat table below (liveTrackStats)
+  // and shares its ltNextStation/ltNextEta/ltDelay child elements.
+  const liveTrackQuickBar = document.getElementById("liveTrackQuickBar");
 
   let liveTrackSocket = null;
   // FEATURE: auto-reconnect for the live-tracking WebSocket. Previously,
@@ -1313,6 +1317,7 @@ if (!alreadySeenTour) {
     liveTrackWantsConnection = true;
     setStatus(liveTrackStatus, `Connecting to live feed for train ${trainNumber}…`);
     liveTrackStats.hidden = true;
+    if (liveTrackQuickBar) liveTrackQuickBar.hidden = true;
     if (liveTrackTimeline) {
       liveTrackTimeline.innerHTML = `<p class="result-list--empty">Loading stop-by-stop running status…</p>`;
     }
@@ -1501,6 +1506,7 @@ if (!alreadySeenTour) {
         updateLiveTrackChartFromTimeline(data.timeline);
 
         liveTrackStats.hidden = false;
+        if (liveTrackQuickBar) liveTrackQuickBar.hidden = false;
         // FEATURE: "RailRadar wins wherever it has live data" - current
         // station now prefers RailRadar's real GPS-sourced station code
         // over RailKit's own (possibly cache-lagged) pointer when
@@ -1514,7 +1520,20 @@ if (!alreadySeenTour) {
         // real station CODE, not just the display name above.
         ltCurrentStationCode = data.current_station_code || null;
         ltNextStationCode = data.next_station_code || null;
-        document.getElementById("ltDelay").textContent = data.delay_minutes != null ? formatDelayDuration(data.delay_minutes) : "Unknown";
+        {
+          // RailYatri-style red/green "43m late" pill in the quick bar —
+          // same delay_minutes value as the old plain-text stat row, just
+          // color-coded now that it's a headline element instead of one
+          // row in a 17-row table.
+          const ltDelayEl = document.getElementById("ltDelay");
+          ltDelayEl.textContent = data.delay_minutes != null
+            ? `${data.delay_minutes > 0 ? "+" : ""}${formatDelayDuration(data.delay_minutes)}${data.delay_minutes > 0 ? " late" : data.delay_minutes < 0 ? " early" : " on time"}`
+            : "Unknown";
+          ltDelayEl.classList.remove("is-late", "is-early", "is-ontime");
+          if (data.delay_minutes != null) {
+            ltDelayEl.classList.add(data.delay_minutes > 0 ? "is-late" : data.delay_minutes < 0 ? "is-early" : "is-ontime");
+          }
+        }
         if (data.delay_minutes != null) lastKnownDelayMinutes = data.delay_minutes;
 
         // FEATURE: Dynamic Re-route Suggestions During Live Tracking — see

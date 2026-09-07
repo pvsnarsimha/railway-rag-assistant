@@ -164,203 +164,78 @@
       <button type="button" id="liveTrackClose" aria-label="Close">&times;</button>
     </div>
     <div class="help-modal__body">
+      <!-- ============================================================
+           REDESIGN (RailYatri-style declutter): the search row and the
+           running-status timeline are now the star of this panel, shown
+           immediately below each other. Everything that isn't "search a
+           train, see where it is" — journey options, alarms, connection
+           risk, crowd-sourcing, food ordering, the full raw stats — is
+           tucked into a couple of native <details> disclosures further
+           down so the panel opens clean instead of as a wall of forms.
+           No feature was removed; every element id below is unchanged so
+           app.js's existing wiring keeps working as-is. ============ -->
       <form class="feature-form" id="liveTrackForm">
         <input type="text" id="liveTrackInput" placeholder="5-digit train number (e.g. 12951)" inputmode="numeric" maxlength="5" required />
         <button type="submit">Track</button>
       </form>
-      <form class="feature-form feature-form--grid" id="liveTrackOptionsForm">
-        <label class="feature-form__label">
-          Date
-          <input type="date" id="liveTrackDateInput" />
-        </label>
-        <input type="text" id="liveTrackSourceInput" placeholder="Source code (optional, e.g. NDLS)" maxlength="6" />
-        <input type="text" id="liveTrackDestInput" placeholder="Destination code (optional, e.g. BCT)" maxlength="6" />
-        <select id="liveTrackClassSelect">
-          <option value="SL">Sleeper (SL)</option>
-          <option value="3A">AC 3 Tier (3A)</option>
-          <option value="2A">AC 2 Tier (2A)</option>
-          <option value="1A">AC First (1A)</option>
-          <option value="CC">Chair Car (CC)</option>
-          <option value="EC">Executive Chair (EC)</option>
-          <option value="2S">Second Sitting (2S)</option>
-        </select>
-      </form>
-      <p class="explain-text">Source + destination are optional — add them for a crowd estimate backed by real seat-availability data instead of date/class patterns alone. Changing these while already tracking takes effect the next time you tap Track.</p>
 
-      <!-- FEATURE: Lite/Text-Only Tracking Mode — for 2G/patchy connectivity.
-           Hides the map + delay chart entirely (no tiles, no canvas
-           rendering) and shows only the plain-text headline + stop list,
-           which is all that's actually re-sent by the websocket anyway. -->
-      <label class="feature-form__label" style="display:flex;align-items:center;gap:8px;flex-direction:row;">
-        <input type="checkbox" id="ltLiteModeToggle" style="width:auto;" /> 📶 Lite mode (text only — no map/chart, for slow connections)
-      </label>
-
-      <div class="actions-row" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;">
-        <button type="button" class="feature-form__submit-like" id="ltShareLinkBtn">🔗 Share a read-only tracking link</button>
-        <button type="button" class="feature-form__submit-like" id="ltCompareTrainsBtn">🚆🚆 Compare two trains side by side</button>
-      </div>
-      <div class="feature-status" id="ltShareLinkStatus" hidden></div>
+      <details class="lt-section lt-section--options">
+        <summary>⚙️ Journey options — date, class, source/destination (optional)</summary>
+        <form class="feature-form feature-form--grid" id="liveTrackOptionsForm">
+          <label class="feature-form__label">
+            Date
+            <input type="date" id="liveTrackDateInput" />
+          </label>
+          <input type="text" id="liveTrackSourceInput" placeholder="Source code (optional, e.g. NDLS)" maxlength="6" />
+          <input type="text" id="liveTrackDestInput" placeholder="Destination code (optional, e.g. BCT)" maxlength="6" />
+          <select id="liveTrackClassSelect">
+            <option value="SL">Sleeper (SL)</option>
+            <option value="3A">AC 3 Tier (3A)</option>
+            <option value="2A">AC 2 Tier (2A)</option>
+            <option value="1A">AC First (1A)</option>
+            <option value="CC">Chair Car (CC)</option>
+            <option value="EC">Executive Chair (EC)</option>
+            <option value="2S">Second Sitting (2S)</option>
+          </select>
+        </form>
+        <p class="explain-text">Source + destination are optional — add them for a crowd estimate backed by real seat-availability data instead of date/class patterns alone. Changing these while already tracking takes effect the next time you tap Track.</p>
+      </details>
 
       <div class="feature-status" id="liveTrackStatus">Not connected.</div>
+
+      <!-- FEATURE: Dynamic Re-route Suggestions / Route-Deviation Detection
+           — these only ever render content once the backend actually flags
+           something (delay severity / sustained off-route), so they add no
+           clutter when nothing is wrong; kept up top since they're safety-
+           relevant when they do fire. -->
+      <div class="tools-result-card tools-result-card--reroute" id="ltRerouteAlert" hidden></div>
+      <div class="tools-result-card tools-result-card--reroute" id="ltDeviationAlert" hidden></div>
+
+      <!-- RailYatri-style "Next: <station> in <eta> (<delay>)" quick-glance
+           strip — reuses the same ltNextStation/ltNextEta/ltDelay elements
+           app.js already fills in on every poll (previously buried as
+           three rows inside the 17-row stat table below). -->
+      <div class="lt-quickbar" id="liveTrackQuickBar" hidden>
+        <span class="lt-quickbar__icon" aria-hidden="true">🚆</span>
+        <span class="lt-quickbar__text">
+          Next: <strong id="ltNextStation">—</strong>
+          <span class="lt-quickbar__eta">ETA <span id="ltNextEta">—</span></span>
+        </span>
+        <span class="lt-quickbar__delay" id="ltDelay">—</span>
+      </div>
+
+      <!-- FEATURE: Map/chart shown on demand — RailYatri's "Coach layout /
+           Time Table" quick-action buttons, adapted here to "Train on map /
+           Delay chart". Both start collapsed; each reveals its section and
+           relabels itself to "Hide ...". -->
+      <div class="actions-row" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;">
+        <button type="button" class="feature-form__submit-like" id="ltToggleMapBtn">🗺️ Train on map</button>
+        <button type="button" class="feature-form__submit-like" id="ltToggleChartBtn">📊 Delay chart</button>
+      </div>
       <div class="msg__map-wrap" id="liveTrackMapWrap" hidden>
         <div class="msg__map" id="liveTrackMap"></div>
         <div class="msg__map-caption" id="liveTrackCaption"></div>
       </div>
-      <dl class="stat-grid" id="liveTrackStats" hidden>
-        <dt>Current station</dt><dd id="ltCurrentStation">—</dd>
-        <dt>Next station</dt><dd id="ltNextStation">—</dd>
-        <dt>Reported delay</dt><dd id="ltDelay">—</dd>
-        <dt>ML-predicted delay</dt><dd id="ltPredictedDelay">—</dd>
-        <dt>Position source</dt><dd id="ltSource">—</dd>
-        <dt>Direction</dt><dd id="ltDirection">—</dd>
-        <dt>Current speed (live, smoothed)</dt><dd id="ltInstantSpeed">—</dd>
-        <dt>Avg. running speed (since departure)</dt><dd id="ltAvgSpeed">—</dd>
-        <dt>Next station ETA (recalculated live)</dt><dd id="ltNextEta">—</dd>
-        <dt>Avg. distance between halts</dt><dd id="ltAvgDistanceBetweenHalts">—</dd>
-        <dt>Avg. time between halts</dt><dd id="ltAvgTimeBetweenHalts">—</dd>
-        <dt>Delay trend</dt><dd id="ltDelayTrend">—</dd>
-        <dt>Weather at current position</dt><dd id="ltWeatherCurrent">—</dd>
-        <dt>Weather at next station</dt><dd id="ltWeatherNext">—</dd>
-        <dt>Progress to next station</dt><dd id="ltSegmentProgress">—</dd>
-        <dt>Distance covered (since last stop)</dt><dd id="ltDistanceCovered">—</dd>
-        <dt>Distance remaining (to next station)</dt><dd id="ltDistanceRemaining">—</dd>
-        <dt>Last update</dt><dd id="ltUpdated">—</dd>
-      </dl>
-      <p class="explain-text" id="ltRouteStatsBasis" hidden></p>
-      <p class="explain-text" id="ltPredictedDelayBasis" hidden></p>
-      <p class="explain-text" id="ltWeatherBasis" hidden></p>
-
-      <!-- FEATURE: Dynamic Re-route Suggestions During Live Tracking — see
-           backend/reroute_suggestions.py + app.py's /ws/track payload
-           field `reroute_suggestion`. Only shown once the train's delay
-           (predicted, falling back to reported) crosses the severity
-           threshold; renderRerouteAlert() below fills this in every poll. -->
-      <div class="tools-result-card tools-result-card--reroute" id="ltRerouteAlert" hidden></div>
-
-      <!-- FEATURE: Route-Deviation/Diversion Detection — see
-           backend/route_deviation.py + the /ws/track payload field
-           `route_deviation`. Only shown once the SUSTAINED off-route flag
-           trips (likely_diversion), not on a single noisy ping. -->
-      <div class="tools-result-card tools-result-card--reroute" id="ltDeviationAlert" hidden></div>
-
-      <!-- FEATURE: a small live delay-trend sparkline — last ~20 polls'
-           predicted/reported delay, distinct from the big per-station bar
-           chart further down (that one is per-STATION history; this one is
-           "is the number getting better or worse RIGHT NOW"). -->
-      <div class="dash-card" id="ltSparklineCard" hidden>
-        <h3 class="feature-subhead" style="margin-top:0;">Delay trend (live, last ~20 updates)</h3>
-        <canvas id="ltSparkline" height="46"></canvas>
-      </div>
-
-      <!-- FEATURE: End-of-Trip Summary Card — shown once the tracked train
-           reaches its final destination. Shareable via the same public
-           /trip/{share_id} page the "Share" button below links to. -->
-      <div class="tools-result-card tools-result-card--prompt" id="ltTripSummaryCard" hidden></div>
-
-      <button type="button" class="feature-form__submit-like" id="ltExplainBtn">🧠 Why this prediction? (Explainable AI)</button>
-      <div class="tools-result-card" id="ltExplainResult" hidden></div>
-
-      <!-- FEATURE: "Smart Alarm" — Dynamic Departure Reminder. Polls the
-           same real /api/advanced/smart-alarm endpoint the More Tools
-           "Smart Alarm" tab already uses, but does it automatically while
-           this tab stays open and fires a real browser Notification 45
-           min (configurable) before the revised ETA, instead of requiring
-           a manual re-check. -->
-      <h3 class="feature-subhead">⏰ Smart Alarm for this train</h3>
-      <p class="explain-text">Get a browser notification a set number of minutes before this train's real, live-predicted arrival at a station you pick (e.g. your boarding station) — auto-adjusts as the predicted ETA changes. Requires this tab to stay open (or backgrounded, not closed) so the check can keep running.</p>
-      <form class="feature-form feature-form--grid" id="ltAlarmForm">
-        <input type="text" id="ltAlarmStationInput" placeholder="Station code (e.g. NDLS)" maxlength="6" required />
-        <label class="feature-form__label">Notify me (min before ETA)
-          <input type="number" id="ltAlarmLeadInput" min="1" value="45" />
-        </label>
-        <button type="submit" id="ltAlarmSetBtn">Set Alarm</button>
-      </form>
-      <!-- FEATURE: Background-surviving Smart Alarm — mirrors the existing
-           push pipeline ("Watch This Route"/Delay Alerts): registers this
-           exact alarm with the backend (see /api/push/alarms +
-           alert_scheduler.py's alarm job) so it can still fire via a real
-           push notification even after this tab (or the mobile app) is
-           fully closed, not just backgrounded. -->
-      <label class="feature-form__label" style="display:flex;align-items:center;gap:8px;flex-direction:row;">
-        <input type="checkbox" id="ltAlarmBackgroundToggle" style="width:auto;" /> 🔔 Also notify me if I close this tab (background push)
-      </label>
-      <div class="feature-status" id="ltAlarmStatus"></div>
-
-      <!-- FEATURE: Connection-Risk Alert — cross-references this train's
-           real live arrival at an interchange station against a connecting
-           train's real live departure from that station. If a PNR watch
-           (see More Tools -> PNR Tracking) is on file, its train number is
-           offered as a one-tap prefill. -->
-      <h3 class="feature-subhead">🔀 Connection risk</h3>
-      <p class="explain-text">Catching another train at an interchange? Check the real live buffer between this train's arrival and your connecting train's departure.</p>
-      <div class="tools-result-card tools-result-card--prompt" id="ltConnectionPnrPrompt" hidden></div>
-      <form class="feature-form feature-form--grid" id="ltConnectionForm">
-        <input type="text" id="ltConnectionStationInput" placeholder="Interchange station code (e.g. BZA)" maxlength="6" required />
-        <input type="text" id="ltConnectionTrainInput" placeholder="Connecting train number" maxlength="5" required />
-        <input type="date" id="ltConnectionDateInput" />
-        <button type="submit">Check connection risk</button>
-      </form>
-      <div class="feature-status" id="ltConnectionStatus"></div>
-      <div class="tools-result-card" id="ltConnectionResult" hidden></div>
-
-      <!-- FEATURE: On-Board Catering "Pre-Order" Gateway — real deep link
-           to IRCTC's own e-catering portal (ecatering.irctc.co.in), scoped
-           to the train's current/next real station code when known. -->
-      <button type="button" class="feature-form__submit-like" id="ltOrderFoodBtn">🍽️ Order food for this journey (IRCTC e-catering)</button>
-
-      <!-- FEATURE: "Station Navigator" — Point of Interest Finder. Click
-           the current station name to see a facilities panel for it. -->
-      <button type="button" class="feature-form__submit-like" id="ltStationNavBtn">🧭 Station facilities at current station</button>
-      <div class="tools-result-card" id="ltStationNavResult" hidden></div>
-
-      <h3 class="feature-subhead">📡 Crowd-sourced position (this train)</h3>
-      <p class="explain-text">Official tracking above is often just a snapped last-known-station coordinate. Real passenger-submitted GPS reports fill the gap — fused with it via a Kalman filter. See the 🧰 More Tools tab for the full standalone view with leaderboard.</p>
-
-      <!-- FEATURE: Crowd-Sourced Train Position — mobile-first GPS. Shown
-           once, the first time a live position update arrives for a
-           tracking session, instead of passengers having to go find the
-           standalone Crowd Positions tab themselves. -->
-      <div class="tools-result-card tools-result-card--prompt" id="ltSharePositionPrompt" hidden>
-        <h4>📍 Riding this train right now?</h4>
-        <p>Share your live GPS to help other passengers see a more accurate position than the official last-known-station fix — reports are anonymous and fused with a Kalman filter, never trusted alone.</p>
-        <div class="prompt-actions">
-          <button type="button" class="feature-form__submit-like" id="ltSharePositionPromptYes">Yes, share my position</button>
-          <button type="button" class="feature-form__submit-like" id="ltSharePositionPromptDismiss">Not now</button>
-        </div>
-      </div>
-
-      <label class="share-position-row feature-form__label" id="ltShareMyPositionLabel">
-        <input type="checkbox" id="ltShareMyPositionToggle" style="width:auto;" /> 📍 Share my live position automatically while tracking (I'm riding this train)
-      </label>
-      <p class="explain-text" id="ltShareMyPositionNote" hidden></p>
-      <label class="feature-form__label" style="display:flex;align-items:center;gap:8px;flex-direction:row;">
-        <input type="checkbox" id="ltCrowdOverlayToggle" style="width:auto;" /> Show crowd-sourced position overlay on the map above
-      </label>
-      <button type="button" class="feature-form__submit-like" id="ltReportPositionBtn">📍 Report my position for this train (one-time)</button>
-      <div class="feature-status" id="ltCrowdPositionStatus"></div>
-      <div class="tools-result-card" id="ltCrowdBadgeCard" hidden></div>
-
-      <h3 class="feature-subhead">🧍 How crowded is your coach right now?</h3>
-      <p class="explain-text">Real-time, rider-reported — different from the booking-data Crowd Prediction below and the static Coach Layout seat maps. Riding this train right now? Tap once to tell other passengers.</p>
-      <form class="feature-form feature-form--grid" id="ltCoachCrowdForm">
-        <input type="text" id="ltCoachCrowdCoachInput" placeholder="Your coach (e.g. S4, B2)" maxlength="6" required />
-        <select id="ltCoachCrowdLevelSelect">
-          <option value="empty">🟢 Empty</option>
-          <option value="comfortable">🟡 Comfortable</option>
-          <option value="crowded">🟠 Crowded</option>
-          <option value="packed">🔴 Packed</option>
-        </select>
-        <button type="submit">Report</button>
-      </form>
-      <div class="feature-status" id="ltCoachCrowdStatus"></div>
-      <ul class="result-list" id="ltCoachCrowdList"></ul>
-
-      <h3 class="feature-subhead">Running status — every station (IRCTC-style)</h3>
-      <p class="explain-text">Every stop RailKit reports for this run, including small intermediate stations the train only passes through — not just major halts. Expected (scheduled/predicted) is shown next to actual for both arrival and departure.</p>
-      <div class="live-timeline" id="liveTrackTimeline">
-        <p class="result-list--empty">Track a train to see its full stop-by-stop running status.</p>
-      </div>
-
       <h3 class="feature-subhead" id="liveTrackChartHead">Delay chart for this train</h3>
       <div class="dash-card" id="liveTrackChartCard" hidden>
         <div class="dash-card__chart-scroll">
@@ -370,37 +245,191 @@
         </div>
       </div>
 
-      <!-- FEATURE: Map/chart shown on demand — both start collapsed so the
-           panel opens compact; each button reveals its section (map above,
-           chart just above this row) and relabels itself to "Hide ...". -->
-      <div class="actions-row" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;">
-        <button type="button" class="feature-form__submit-like" id="ltToggleMapBtn">🗺️ Train on map</button>
-        <button type="button" class="feature-form__submit-like" id="ltToggleChartBtn">📊 Delay chart</button>
+      <h3 class="feature-subhead">Running status — every station (IRCTC-style)</h3>
+      <p class="explain-text">Every stop RailKit reports for this run, including small intermediate stations the train only passes through — not just major halts. Expected (scheduled/predicted) is shown next to actual for both arrival and departure.</p>
+      <div class="live-timeline" id="liveTrackTimeline">
+        <p class="result-list--empty">Track a train to see its full stop-by-stop running status.</p>
       </div>
 
-      <h3 class="feature-subhead">Crowd prediction for this train</h3>
-      <form class="feature-form feature-form--grid" id="crowdForm">
-        <input type="text" id="crowdSourceInput" placeholder="Source code (e.g. NDLS)" maxlength="6" required />
-        <input type="text" id="crowdDestInput" placeholder="Destination code (e.g. BCT)" maxlength="6" required />
-        <input type="date" id="crowdDateInput" required />
-        <select id="crowdClassSelect">
-          <option value="SL">Sleeper (SL)</option>
-          <option value="3A">AC 3 Tier (3A)</option>
-          <option value="2A">AC 2 Tier (2A)</option>
-          <option value="1A">AC First (1A)</option>
-          <option value="CC">Chair Car (CC)</option>
-          <option value="EC">Executive Chair (EC)</option>
-          <option value="2S">Second Sitting (2S)</option>
-        </select>
-        <button type="submit">Predict Crowd</button>
-      </form>
-      <div class="feature-status" id="crowdStatus">Uses the train number entered above — this also updates automatically from the live feed if you filled in source/destination above before tapping Track.</div>
-      <div class="crowd-result" id="crowdResult" hidden>
-        <div class="crowd-result__level" id="crowdLevel"></div>
-        <p class="explain-text__lead">Why this estimate:</p>
-        <ul class="result-list" id="crowdBasisList"></ul>
-        <p class="explain-text" id="crowdDisclaimer"></p>
-      </div>
+      <details class="lt-section">
+        <summary>📈 More live stats for this train</summary>
+        <dl class="stat-grid" id="liveTrackStats" hidden>
+          <dt>Current station</dt><dd id="ltCurrentStation">—</dd>
+          <dt>ML-predicted delay</dt><dd id="ltPredictedDelay">—</dd>
+          <dt>Position source</dt><dd id="ltSource">—</dd>
+          <dt>Direction</dt><dd id="ltDirection">—</dd>
+          <dt>Current speed (live, smoothed)</dt><dd id="ltInstantSpeed">—</dd>
+          <dt>Avg. running speed (since departure)</dt><dd id="ltAvgSpeed">—</dd>
+          <dt>Avg. distance between halts</dt><dd id="ltAvgDistanceBetweenHalts">—</dd>
+          <dt>Avg. time between halts</dt><dd id="ltAvgTimeBetweenHalts">—</dd>
+          <dt>Delay trend</dt><dd id="ltDelayTrend">—</dd>
+          <dt>Weather at current position</dt><dd id="ltWeatherCurrent">—</dd>
+          <dt>Weather at next station</dt><dd id="ltWeatherNext">—</dd>
+          <dt>Progress to next station</dt><dd id="ltSegmentProgress">—</dd>
+          <dt>Distance covered (since last stop)</dt><dd id="ltDistanceCovered">—</dd>
+          <dt>Distance remaining (to next station)</dt><dd id="ltDistanceRemaining">—</dd>
+          <dt>Last update</dt><dd id="ltUpdated">—</dd>
+        </dl>
+        <p class="explain-text" id="ltRouteStatsBasis" hidden></p>
+        <p class="explain-text" id="ltPredictedDelayBasis" hidden></p>
+        <p class="explain-text" id="ltWeatherBasis" hidden></p>
+
+        <!-- FEATURE: a small live delay-trend sparkline — last ~20 polls'
+             predicted/reported delay, distinct from the big per-station bar
+             chart above (that one is per-STATION history; this one is "is
+             the number getting better or worse RIGHT NOW"). -->
+        <div class="dash-card" id="ltSparklineCard" hidden>
+          <h3 class="feature-subhead" style="margin-top:0;">Delay trend (live, last ~20 updates)</h3>
+          <canvas id="ltSparkline" height="46"></canvas>
+        </div>
+
+        <!-- FEATURE: End-of-Trip Summary Card — shown once the tracked
+             train reaches its final destination. Shareable via the same
+             public /trip/{share_id} page the Share button below links to. -->
+        <div class="tools-result-card tools-result-card--prompt" id="ltTripSummaryCard" hidden></div>
+
+        <button type="button" class="feature-form__submit-like" id="ltExplainBtn">🧠 Why this prediction? (Explainable AI)</button>
+        <div class="tools-result-card" id="ltExplainResult" hidden></div>
+      </details>
+
+      <details class="lt-section">
+        <summary>🧰 More tracking tools &amp; alerts</summary>
+
+        <!-- FEATURE: Lite/Text-Only Tracking Mode — for 2G/patchy
+             connectivity. Hides the map + delay chart entirely (no tiles,
+             no canvas rendering) and shows only the plain-text headline +
+             stop list, which is all that's actually re-sent by the
+             websocket anyway. -->
+        <label class="feature-form__label" style="display:flex;align-items:center;gap:8px;flex-direction:row;">
+          <input type="checkbox" id="ltLiteModeToggle" style="width:auto;" /> 📶 Lite mode (text only — no map/chart, for slow connections)
+        </label>
+
+        <div class="actions-row" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;">
+          <button type="button" class="feature-form__submit-like" id="ltShareLinkBtn">🔗 Share a read-only tracking link</button>
+          <button type="button" class="feature-form__submit-like" id="ltCompareTrainsBtn">🚆🚆 Compare two trains side by side</button>
+        </div>
+        <div class="feature-status" id="ltShareLinkStatus" hidden></div>
+
+        <!-- FEATURE: "Smart Alarm" — Dynamic Departure Reminder. Polls the
+             same real /api/advanced/smart-alarm endpoint the More Tools
+             "Smart Alarm" tab already uses, but does it automatically while
+             this tab stays open and fires a real browser Notification 45
+             min (configurable) before the revised ETA, instead of requiring
+             a manual re-check. -->
+        <h3 class="feature-subhead">⏰ Smart Alarm for this train</h3>
+        <p class="explain-text">Get a browser notification a set number of minutes before this train's real, live-predicted arrival at a station you pick (e.g. your boarding station) — auto-adjusts as the predicted ETA changes. Requires this tab to stay open (or backgrounded, not closed) so the check can keep running.</p>
+        <form class="feature-form feature-form--grid" id="ltAlarmForm">
+          <input type="text" id="ltAlarmStationInput" placeholder="Station code (e.g. NDLS)" maxlength="6" required />
+          <label class="feature-form__label">Notify me (min before ETA)
+            <input type="number" id="ltAlarmLeadInput" min="1" value="45" />
+          </label>
+          <button type="submit" id="ltAlarmSetBtn">Set Alarm</button>
+        </form>
+        <!-- FEATURE: Background-surviving Smart Alarm — mirrors the
+             existing push pipeline ("Watch This Route"/Delay Alerts):
+             registers this exact alarm with the backend (see
+             /api/push/alarms + alert_scheduler.py's alarm job) so it can
+             still fire via a real push notification even after this tab
+             (or the mobile app) is fully closed, not just backgrounded. -->
+        <label class="feature-form__label" style="display:flex;align-items:center;gap:8px;flex-direction:row;">
+          <input type="checkbox" id="ltAlarmBackgroundToggle" style="width:auto;" /> 🔔 Also notify me if I close this tab (background push)
+        </label>
+        <div class="feature-status" id="ltAlarmStatus"></div>
+
+        <!-- FEATURE: Connection-Risk Alert — cross-references this train's
+             real live arrival at an interchange station against a
+             connecting train's real live departure from that station. If a
+             PNR watch (see More Tools -> PNR Tracking) is on file, its
+             train number is offered as a one-tap prefill. -->
+        <h3 class="feature-subhead">🔀 Connection risk</h3>
+        <p class="explain-text">Catching another train at an interchange? Check the real live buffer between this train's arrival and your connecting train's departure.</p>
+        <div class="tools-result-card tools-result-card--prompt" id="ltConnectionPnrPrompt" hidden></div>
+        <form class="feature-form feature-form--grid" id="ltConnectionForm">
+          <input type="text" id="ltConnectionStationInput" placeholder="Interchange station code (e.g. BZA)" maxlength="6" required />
+          <input type="text" id="ltConnectionTrainInput" placeholder="Connecting train number" maxlength="5" required />
+          <input type="date" id="ltConnectionDateInput" />
+          <button type="submit">Check connection risk</button>
+        </form>
+        <div class="feature-status" id="ltConnectionStatus"></div>
+        <div class="tools-result-card" id="ltConnectionResult" hidden></div>
+
+        <!-- FEATURE: On-Board Catering "Pre-Order" Gateway — real deep link
+             to IRCTC's own e-catering portal (ecatering.irctc.co.in),
+             scoped to the train's current/next real station code when
+             known. -->
+        <button type="button" class="feature-form__submit-like" id="ltOrderFoodBtn">🍽️ Order food for this journey (IRCTC e-catering)</button>
+
+        <!-- FEATURE: "Station Navigator" — Point of Interest Finder. Click
+             the current station name to see a facilities panel for it. -->
+        <button type="button" class="feature-form__submit-like" id="ltStationNavBtn">🧭 Station facilities at current station</button>
+        <div class="tools-result-card" id="ltStationNavResult" hidden></div>
+
+        <h3 class="feature-subhead">📡 Crowd-sourced position (this train)</h3>
+        <p class="explain-text">Official tracking above is often just a snapped last-known-station coordinate. Real passenger-submitted GPS reports fill the gap — fused with it via a Kalman filter. See the 🧰 More Tools tab for the full standalone view with leaderboard.</p>
+
+        <!-- FEATURE: Crowd-Sourced Train Position — mobile-first GPS. Shown
+             once, the first time a live position update arrives for a
+             tracking session, instead of passengers having to go find the
+             standalone Crowd Positions tab themselves. -->
+        <div class="tools-result-card tools-result-card--prompt" id="ltSharePositionPrompt" hidden>
+          <h4>📍 Riding this train right now?</h4>
+          <p>Share your live GPS to help other passengers see a more accurate position than the official last-known-station fix — reports are anonymous and fused with a Kalman filter, never trusted alone.</p>
+          <div class="prompt-actions">
+            <button type="button" class="feature-form__submit-like" id="ltSharePositionPromptYes">Yes, share my position</button>
+            <button type="button" class="feature-form__submit-like" id="ltSharePositionPromptDismiss">Not now</button>
+          </div>
+        </div>
+
+        <label class="share-position-row feature-form__label" id="ltShareMyPositionLabel">
+          <input type="checkbox" id="ltShareMyPositionToggle" style="width:auto;" /> 📍 Share my live position automatically while tracking (I'm riding this train)
+        </label>
+        <p class="explain-text" id="ltShareMyPositionNote" hidden></p>
+        <label class="feature-form__label" style="display:flex;align-items:center;gap:8px;flex-direction:row;">
+          <input type="checkbox" id="ltCrowdOverlayToggle" style="width:auto;" /> Show crowd-sourced position overlay on the map above
+        </label>
+        <button type="button" class="feature-form__submit-like" id="ltReportPositionBtn">📍 Report my position for this train (one-time)</button>
+        <div class="feature-status" id="ltCrowdPositionStatus"></div>
+        <div class="tools-result-card" id="ltCrowdBadgeCard" hidden></div>
+
+        <h3 class="feature-subhead">🧍 How crowded is your coach right now?</h3>
+        <p class="explain-text">Real-time, rider-reported — different from the booking-data Crowd Prediction below and the static Coach Layout seat maps. Riding this train right now? Tap once to tell other passengers.</p>
+        <form class="feature-form feature-form--grid" id="ltCoachCrowdForm">
+          <input type="text" id="ltCoachCrowdCoachInput" placeholder="Your coach (e.g. S4, B2)" maxlength="6" required />
+          <select id="ltCoachCrowdLevelSelect">
+            <option value="empty">🟢 Empty</option>
+            <option value="comfortable">🟡 Comfortable</option>
+            <option value="crowded">🟠 Crowded</option>
+            <option value="packed">🔴 Packed</option>
+          </select>
+          <button type="submit">Report</button>
+        </form>
+        <div class="feature-status" id="ltCoachCrowdStatus"></div>
+        <ul class="result-list" id="ltCoachCrowdList"></ul>
+
+        <h3 class="feature-subhead">Crowd prediction for this train</h3>
+        <form class="feature-form feature-form--grid" id="crowdForm">
+          <input type="text" id="crowdSourceInput" placeholder="Source code (e.g. NDLS)" maxlength="6" required />
+          <input type="text" id="crowdDestInput" placeholder="Destination code (e.g. BCT)" maxlength="6" required />
+          <input type="date" id="crowdDateInput" required />
+          <select id="crowdClassSelect">
+            <option value="SL">Sleeper (SL)</option>
+            <option value="3A">AC 3 Tier (3A)</option>
+            <option value="2A">AC 2 Tier (2A)</option>
+            <option value="1A">AC First (1A)</option>
+            <option value="CC">Chair Car (CC)</option>
+            <option value="EC">Executive Chair (EC)</option>
+            <option value="2S">Second Sitting (2S)</option>
+          </select>
+          <button type="submit">Predict Crowd</button>
+        </form>
+        <div class="feature-status" id="crowdStatus">Uses the train number entered above — this also updates automatically from the live feed if you filled in source/destination above before tapping Track.</div>
+        <div class="crowd-result" id="crowdResult" hidden>
+          <div class="crowd-result__level" id="crowdLevel"></div>
+          <p class="explain-text__lead">Why this estimate:</p>
+          <ul class="result-list" id="crowdBasisList"></ul>
+          <p class="explain-text" id="crowdDisclaimer"></p>
+        </div>
+      </details>
     </div>
   </div>
 </div>
