@@ -709,6 +709,7 @@ export default function LiveTrackingScreen() {
                       ? lastStationRowRef
                       : undefined
                 }
+                staleUnconfirmed={ltJourneyLikelyComplete && idx === timeline.length - 1}
               />
             ))}
           </SectionCard>
@@ -765,8 +766,23 @@ function DelayPill({ minutes, small }) {
 
 // One Arrival or Departure line for a timeline stop — "Exp HH:MM  Act
 // HH:MM  [delay pill]", matching the web frontend's timingRow().
-function TimingLine({ label, timing }) {
+// BUGFIX: staleUnconfirmed (see TimelineStopRow's matching param) — when
+// the provider has gone stale for this stop (most often the destination,
+// once the provider stops updating altogether after the train has
+// genuinely reached it, sometimes days before this is viewed again), the
+// model-predicted "Act"/delay figures can be actively wrong rather than
+// a fair estimate — same reasoning as the web frontend's timingRow().
+function TimingLine({ label, timing, staleUnconfirmed }) {
   if (!timing || (!timing.scheduled && !timing.expected && !timing.actual)) return null;
+  if (staleUnconfirmed && timing.actual_is_predicted) {
+    return (
+      <View style={styles.timingLine}>
+        <Text style={styles.timingLabel}>{label}</Text>
+        <Text style={styles.timingVal}>Exp {timing.expected || timing.scheduled || "—"}</Text>
+        <Text style={styles.timingValMuted}>Not confirmed by provider</Text>
+      </View>
+    );
+  }
   const actLabel = timing.actual_is_predicted ? "Act (pred.)" : "Act";
   return (
     <View style={styles.timingLine}>
@@ -783,7 +799,7 @@ function TimingLine({ label, timing }) {
 // station name/meta/times on the right. Mirrors the web frontend's
 // .live-timeline__row structure closely enough to look like the same
 // feature on both platforms.
-function TimelineStopRow({ stop, isFirst, isLast, rowRef }) {
+function TimelineStopRow({ stop, isFirst, isLast, rowRef, staleUnconfirmed }) {
   const isCurrent = stop.status === "current";
   const isPassed = stop.status === "passed";
   const dotColor = isPassed ? colors.success : isCurrent ? colors.danger : colors.border;
@@ -816,14 +832,19 @@ function TimelineStopRow({ stop, isFirst, isLast, rowRef }) {
             </Text>
           </View>
         )}
-        {stop.status === "upcoming" && stop.predicted_delay_minutes != null && (
+        {/* BUGFIX: suppressed when staleUnconfirmed — see TimingLine's
+            matching comment above. A confident-looking predicted delay is
+            worse than none once the provider has stopped updating this
+            stop altogether (most often the destination, well after the
+            train has genuinely reached it). */}
+        {!staleUnconfirmed && stop.status === "upcoming" && stop.predicted_delay_minutes != null && (
           <Text style={styles.tlPredicted}>
             ~{formatDelayDuration(stop.predicted_delay_minutes)} late (predicted)
             {stop.predicted_eta ? ` · ETA ~${stop.predicted_eta}` : ""}
           </Text>
         )}
-        <TimingLine label="Arrival" timing={stop.arrival} />
-        <TimingLine label="Departure" timing={stop.departure} />
+        <TimingLine label="Arrival" timing={stop.arrival} staleUnconfirmed={staleUnconfirmed} />
+        <TimingLine label="Departure" timing={stop.departure} staleUnconfirmed={staleUnconfirmed} />
       </View>
     </View>
   );
@@ -857,6 +878,7 @@ const styles = StyleSheet.create({
   timingLine: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 3, flexWrap: "wrap" },
   timingLabel: { fontSize: 10.5, color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, width: 52 },
   timingVal: { fontSize: 11.5, color: colors.text },
+  timingValMuted: { fontSize: 11.5, color: colors.textMuted, fontStyle: "italic" },
   tlRow: { flexDirection: "row" },
   tlRail: { width: 26, alignItems: "center" },
   tlLine: { width: 2, flex: 1, backgroundColor: colors.border, minHeight: 8 },
