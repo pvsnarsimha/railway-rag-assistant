@@ -899,7 +899,13 @@ if (!alreadySeenTour) {
 
   function ensureLiveTrackMap() {
     if (liveTrackMap || typeof L === "undefined") return;
-    liveTrackMap = L.map("liveTrackMap", { scrollWheelZoom: false }).setView([22.5, 79], 5);
+    // dragging: false — this map is meant to stay static (see the reconnect
+    // and popup-autoPan fixes above); Leaflet only shows its grab/grabbing
+    // "move" cursor while its drag handler is active, so turning dragging
+    // off also removes that cursor over the whole map, including while
+    // hovering/touching the train icon. Zoom (+/- buttons, pinch, double
+    // tap) is untouched and still works normally.
+    liveTrackMap = L.map("liveTrackMap", { scrollWheelZoom: false, dragging: false }).setView([22.5, 79], 5);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: "&copy; OpenStreetMap contributors", maxZoom: 18,
     }).addTo(liveTrackMap);

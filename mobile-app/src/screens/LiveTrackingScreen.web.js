@@ -238,7 +238,12 @@ export default function LiveTrackingScreen() {
   function initMapIfNeeded() {
     if (leafletMapRef.current || !mapContainerRef.current || typeof window === "undefined" || !window.L) return;
     const L = window.L;
-    leafletMapRef.current = L.map(mapContainerRef.current, { scrollWheelZoom: false }).setView([22.5, 79], 5);
+    // dragging: false — same reasoning as the web frontend's live-tracking
+    // map: this map should stay static, and Leaflet only shows its
+    // grab/grabbing "move" cursor while dragging is enabled, so turning it
+    // off removes that cursor everywhere on the map (including over the
+    // train icon) without touching zoom (buttons/pinch/double-tap).
+    leafletMapRef.current = L.map(mapContainerRef.current, { scrollWheelZoom: false, dragging: false }).setView([22.5, 79], 5);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: "&copy; OpenStreetMap contributors", maxZoom: 18,
     }).addTo(leafletMapRef.current);
