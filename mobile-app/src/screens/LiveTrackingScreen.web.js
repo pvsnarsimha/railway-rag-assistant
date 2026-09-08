@@ -367,6 +367,20 @@ export default function LiveTrackingScreen() {
       const last = passedWithFix[passedWithFix.length - 1];
       if (last) { lat = last.lat; lng = last.lng; }
     }
+    // BUGFIX: once the journey looks likely complete (see
+    // computeJourneyLikelyComplete near the top of this file), the live
+    // fix above still reflects wherever the provider's position got stuck
+    // — for train 20707 that stayed SECUNDERABAD JN, the origin, for 9+
+    // hours after the train had actually finished at VISAKHAPATNAM. Snap
+    // the marker to the real last-known (destination) station instead, so
+    // it isn't left sitting somewhere the train demonstrably isn't
+    // anymore — same reasoning as the quick bar's "Last known" fallback.
+    const timelineForMarker = Array.isArray(payload?.timeline) ? payload.timeline : [];
+    const lastStopForMarker = timelineForMarker.length ? timelineForMarker[timelineForMarker.length - 1] : null;
+    if (computeJourneyLikelyComplete(timelineForMarker, lastStopForMarker) && lastStopForMarker?.lat != null && lastStopForMarker?.lng != null) {
+      lat = lastStopForMarker.lat;
+      lng = lastStopForMarker.lng;
+    }
     if (lat == null || lng == null) return;
     if (!trainMarkerRef.current) {
       const icon = L.icon({
@@ -391,7 +405,7 @@ export default function LiveTrackingScreen() {
       { autoPan: false }
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showMap, payload?.lat, payload?.lng, payload?.current_station, payload?.train_number]);
+  }, [showMap, payload?.lat, payload?.lng, payload?.current_station, payload?.train_number, JSON.stringify(payload?.timeline || [])]);
 
   // Fires once per train (see the autoScrolledRef reset in connect()).
   // Exactly ONE scrollIntoView call, preferring the current-station row
@@ -745,13 +759,20 @@ export default function LiveTrackingScreen() {
                 isFirst={idx === 0}
                 isLast={idx === timeline.length - 1}
                 rowRef={
-                  stop.status === "current"
-                    ? currentStationRowRef
-                    : idx === timeline.length - 1
-                      ? lastStationRowRef
-                      : undefined
+                  // BUGFIX: once the journey looks likely complete, a raw
+                  // stop.status === "current" can be a stuck pointer (see
+                  // computeJourneyLikelyComplete's reasoning) rather than
+                  // the train's real position — scroll to the actual last
+                  // row instead of that stale "current" one.
+                  ltJourneyLikelyComplete
+                    ? (idx === timeline.length - 1 ? lastStationRowRef : undefined)
+                    : stop.status === "current"
+                      ? currentStationRowRef
+                      : idx === timeline.length - 1
+                        ? lastStationRowRef
+                        : undefined
                 }
-                staleUnconfirmed={ltJourneyLikelyComplete && idx === timeline.length - 1}
+                journeyLikelyComplete={ltJourneyLikelyComplete}
               />
             ))}
           </SectionCard>
@@ -841,9 +862,24 @@ function TimingLine({ label, timing, staleUnconfirmed }) {
 // station name/meta/times on the right. Mirrors the web frontend's
 // .live-timeline__row structure closely enough to look like the same
 // feature on both platforms.
-function TimelineStopRow({ stop, isFirst, isLast, rowRef, staleUnconfirmed }) {
-  const isCurrent = stop.status === "current";
-  const isPassed = stop.status === "passed";
+function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete }) {
+  // BUGFIX: once the journey looks likely complete (see
+  // computeJourneyLikelyComplete near the top of this file), the train
+  // has genuinely already gone through every remaining station — even
+  // ones RailKit still shows as "upcoming", or a stuck "current" that
+  // never advanced past the origin (train 20707 kept SECUNDERABAD JN
+  // "current" for 9+ hours after actually finishing at VISAKHAPATNAM).
+  // Render every such row as passed (real "passed" rows are untouched)
+  // instead of leaving them looking not-yet-reached, and stop showing a
+  // live "train is here" callout on a station the train isn't really at
+  // anymore — same reasoning as the map marker and quick bar's "Last
+  // known" fallback. staleUnconfirmed likewise applies to every row once
+  // the journey looks done (harmless on a genuinely-passed row with a
+  // real recorded time, since TimingLine only acts on actual_is_predicted
+  // rows).
+  const staleUnconfirmed = !!journeyLikelyComplete;
+  const isCurrent = stop.status === "current" && !journeyLikelyComplete;
+  const isPassed = stop.status === "passed" || journeyLikelyComplete;
   const dotColor = isPassed ? colors.success : isCurrent ? colors.danger : colors.border;
   const metaBits = [];
   if (stop.halt_minutes != null && stop.halt_minutes !== "") metaBits.push(`Halt: ${stop.halt_minutes} min`);
