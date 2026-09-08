@@ -184,6 +184,12 @@ export default function LiveTrackingScreen() {
   // manually to see where the train actually is.
   const quickBarRef = useRef(null);
   const autoScrolledRef = useRef(false);
+  // More specific than the quick bar above: once the "Running status" list
+  // actually has a current-station row, scroll straight to IT instead (see
+  // the effect below, which runs after the quick-bar one so it wins when
+  // both are available on the same update).
+  const currentStationRowRef = useRef(null);
+  const timelineAutoScrolledRef = useRef(false);
 
   // FEATURE: Live delay-trend sparkline — shown as compact text on this
   // already text-only fallback screen, rather than a canvas/SVG chart.
@@ -355,6 +361,21 @@ export default function LiveTrackingScreen() {
     });
   }, [payload]);
 
+  // Runs after the quick-bar effect above (declared later, so its
+  // rAF-scheduled scroll executes second on the same update and wins) —
+  // once the current-station row actually exists in the "Running status"
+  // list (currentStationRowRef, wired up via TimelineStopRow's rowRef
+  // prop below), jump straight to it instead of just the quick bar. If it
+  // isn't in the DOM yet on this particular payload, this simply retries
+  // on the next one.
+  useEffect(() => {
+    if (!payload || timelineAutoScrolledRef.current || !currentStationRowRef.current) return;
+    timelineAutoScrolledRef.current = true;
+    requestAnimationFrame(() => {
+      currentStationRowRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    });
+  }, [payload]);
+
   const refreshNow = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       setRefreshing(true);
@@ -394,6 +415,7 @@ export default function LiveTrackingScreen() {
       trainMarkerLatLngRef.current = null;
       routeBoundsFitRef.current = false;
       autoScrolledRef.current = false;
+      timelineAutoScrolledRef.current = false;
     }
     lastConnectedTrainRef.current = trainNumber.trim();
 
@@ -660,6 +682,7 @@ export default function LiveTrackingScreen() {
                 stop={stop}
                 isFirst={idx === 0}
                 isLast={idx === timeline.length - 1}
+                rowRef={stop.status === "current" ? currentStationRowRef : undefined}
               />
             ))}
           </SectionCard>
@@ -734,7 +757,7 @@ function TimingLine({ label, timing }) {
 // station name/meta/times on the right. Mirrors the web frontend's
 // .live-timeline__row structure closely enough to look like the same
 // feature on both platforms.
-function TimelineStopRow({ stop, isFirst, isLast }) {
+function TimelineStopRow({ stop, isFirst, isLast, rowRef }) {
   const isCurrent = stop.status === "current";
   const isPassed = stop.status === "passed";
   const dotColor = isPassed ? colors.success : isCurrent ? colors.danger : colors.border;
@@ -742,7 +765,7 @@ function TimelineStopRow({ stop, isFirst, isLast }) {
   if (stop.halt_minutes != null && stop.halt_minutes !== "") metaBits.push(`Halt: ${stop.halt_minutes} min`);
   if (stop.distance_km != null) metaBits.push(`${stop.distance_km} km`);
   return (
-    <View style={styles.tlRow}>
+    <View ref={rowRef} style={styles.tlRow}>
       <View style={styles.tlRail}>
         <View style={[styles.tlLine, isFirst && styles.tlLineHidden]} />
         {isCurrent ? (
