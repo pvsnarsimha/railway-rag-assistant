@@ -1293,8 +1293,17 @@ if (!alreadySeenTour) {
   // retries on the next one, so it can only ever lock onto the real thing.
   function scrollToLivePositionOnce() {
     if (liveTrackAutoScrolled || !liveTrackTimeline) return;
-    const currentRow = liveTrackTimeline.querySelector(".is-current");
-    if (!currentRow) return;
+    // Normally there's exactly one is-current row to land on. But for a
+    // train the provider never flips a "current" pointer to (see the
+    // matching fallback in the quick-bar code above — most often its own
+    // FINAL/destination station, once genuinely reached), there IS no
+    // is-current row at all — fall back to the last row in the list
+    // (the same "last real entry" this app treats as ground truth
+    // elsewhere) so the view still lands on where the train actually
+    // ended up instead of never auto-scrolling.
+    const rows = liveTrackTimeline.querySelectorAll(".live-timeline__row");
+    if (!rows.length) return;
+    const currentRow = liveTrackTimeline.querySelector(".is-current") || rows[rows.length - 1];
     liveTrackAutoScrolled = true;
     requestAnimationFrame(() => {
       currentRow.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1628,23 +1637,61 @@ if (!alreadySeenTour) {
         document.getElementById("ltCurrentStation").textContent = data.current_station
           ? `${data.current_station}${data.current_station_source === "railradar_live_gps" ? " (live GPS)" : ""}`
           : "—";
-        document.getElementById("ltNextStation").textContent = data.next_station || "—";
+        // FEATURE: "no current station" fallback. The provider sometimes
+        // never flips a train's FINAL/destination station's status away
+        // from "upcoming" even once the train has genuinely reached it (a
+        // data lag/quirk on their end, not something wrong on this app's
+        // side — there's no real "actual" timestamp to substitute, which
+        // is exactly why that station's own row already shows its time as
+        // "(predicted)"). When that happens, data.next_station/
+        // next_station_code point at a STALE earlier station instead of
+        // reflecting where the train actually ended up — so instead of
+        // trusting that computation, fall back to the timeline's own LAST
+        // entry (whatever it truthfully says) and label the quick bar
+        // honestly as "Last known" rather than claiming a "Next" stop that
+        // isn't real. See the matching fallback in scrollToLivePositionOnce().
+        const ltTimelineArr = Array.isArray(data.timeline) ? data.timeline : [];
+        const ltHasCurrentStop = ltTimelineArr.some((s) => s.status === "current");
+        const ltLastStop = ltTimelineArr.length ? ltTimelineArr[ltTimelineArr.length - 1] : null;
+        const ltJourneyLikelyComplete = !!(ltLastStop && !ltHasCurrentStop);
+
+        const ltNextLabelEl = document.getElementById("ltNextLabel");
+        const ltNextEtaWrapEl = document.getElementById("ltNextEtaWrap");
+        if (ltJourneyLikelyComplete) {
+          if (ltNextLabelEl) ltNextLabelEl.textContent = "Last known:";
+          if (ltNextEtaWrapEl) ltNextEtaWrapEl.hidden = true;
+          document.getElementById("ltNextStation").textContent = ltLastStop.name || ltLastStop.code || "—";
+          ltNextStationCode = ltLastStop.code || null;
+        } else {
+          if (ltNextLabelEl) ltNextLabelEl.textContent = "Next:";
+          if (ltNextEtaWrapEl) ltNextEtaWrapEl.hidden = false;
+          document.getElementById("ltNextStation").textContent = data.next_station || "—";
+          ltNextStationCode = data.next_station_code || null;
+        }
         // FEATURE: Station Navigator / Catering / Smart Alarm all want a
         // real station CODE, not just the display name above.
         ltCurrentStationCode = data.current_station_code || null;
-        ltNextStationCode = data.next_station_code || null;
         {
           // RailYatri-style red/green "43m late" pill in the quick bar —
           // same delay_minutes value as the old plain-text stat row, just
           // color-coded now that it's a headline element instead of one
-          // row in a 17-row table.
+          // row in a 17-row table. Same fallback as above: prefer the
+          // LAST station's own real/predicted delay over the top-level
+          // figure once that's anchored to a stuck "current station".
+          const ltEffectiveDelay = ltJourneyLikelyComplete
+            ? (
+                (ltLastStop.arrival && ltLastStop.arrival.delay_minutes != null)
+                  ? ltLastStop.arrival.delay_minutes
+                  : (ltLastStop.departure ? ltLastStop.departure.delay_minutes : null)
+              )
+            : data.delay_minutes;
           const ltDelayEl = document.getElementById("ltDelay");
-          ltDelayEl.textContent = data.delay_minutes != null
-            ? `${data.delay_minutes > 0 ? "+" : ""}${formatDelayDuration(data.delay_minutes)}${data.delay_minutes > 0 ? " late" : data.delay_minutes < 0 ? " early" : " on time"}`
+          ltDelayEl.textContent = ltEffectiveDelay != null
+            ? `${ltEffectiveDelay > 0 ? "+" : ""}${formatDelayDuration(ltEffectiveDelay)}${ltEffectiveDelay > 0 ? " late" : ltEffectiveDelay < 0 ? " early" : " on time"}`
             : "Unknown";
           ltDelayEl.classList.remove("is-late", "is-early", "is-ontime");
-          if (data.delay_minutes != null) {
-            ltDelayEl.classList.add(data.delay_minutes > 0 ? "is-late" : data.delay_minutes < 0 ? "is-early" : "is-ontime");
+          if (ltEffectiveDelay != null) {
+            ltDelayEl.classList.add(ltEffectiveDelay > 0 ? "is-late" : ltEffectiveDelay < 0 ? "is-early" : "is-ontime");
           }
         }
         if (data.delay_minutes != null) lastKnownDelayMinutes = data.delay_minutes;

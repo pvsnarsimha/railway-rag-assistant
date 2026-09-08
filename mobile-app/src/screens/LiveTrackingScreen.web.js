@@ -189,6 +189,9 @@ export default function LiveTrackingScreen() {
   // both back to back, which didn't reliably land on the current row).
   const quickBarRef = useRef(null);
   const currentStationRowRef = useRef(null);
+  // Fallback scroll target for a train with no is-current row at all (see
+  // ltJourneyLikelyComplete below) — the timeline's own last row.
+  const lastStationRowRef = useRef(null);
   const autoScrolledRef = useRef(false);
 
   // FEATURE: Live delay-trend sparkline — shown as compact text on this
@@ -348,22 +351,27 @@ export default function LiveTrackingScreen() {
   }, [showMap, payload?.lat, payload?.lng, payload?.current_station, payload?.train_number]);
 
   // Fires once per train (see the autoScrolledRef reset in connect()).
-  // Exactly ONE scrollIntoView call, targeting ONLY the current-station
-  // row inside "Running status" (currentStationRowRef, wired up via
-  // TimelineStopRow's rowRef prop below) — no quick-bar fallback. An
+  // Exactly ONE scrollIntoView call, preferring the current-station row
+  // inside "Running status" (currentStationRowRef, wired up via
+  // TimelineStopRow's rowRef prop below) — no quick-bar fallback (an
   // earlier version raced a quick-bar scroll against this one, which per
-  // user report didn't reliably land on the current row, and a fallback
-  // that locked in early never got a chance to correct itself later. This
-  // version simply waits: if the row isn't in the DOM yet on a given
-  // payload, the flag stays false and it retries on the next one.
-  // currentStationRowRef is a <View ref> which, on this web build,
-  // forwards straight to the underlying DOM node — same ref-is-a-div
-  // pattern this file already relies on for the Leaflet map container.
+  // user report didn't reliably land on the current row). Falls back to
+  // the timeline's own LAST row (lastStationRowRef) for a train the
+  // provider never flips a "current" pointer to at all — most often its
+  // own destination, once genuinely reached (see ltJourneyLikelyComplete
+  // above) — so the view still lands on where the train actually ended
+  // up. If NEITHER ref exists yet on a given payload, the flag stays
+  // false and this retries on the next one. Both refs are <View ref>s
+  // which, on this web build, forward straight to the underlying DOM
+  // node — same ref-is-a-div pattern this file already relies on for the
+  // Leaflet map container.
   useEffect(() => {
-    if (!payload || autoScrolledRef.current || !currentStationRowRef.current) return;
+    if (!payload || autoScrolledRef.current) return;
+    const target = currentStationRowRef.current || lastStationRowRef.current;
+    if (!target) return;
     autoScrolledRef.current = true;
     requestAnimationFrame(() => {
-      currentStationRowRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      target.scrollIntoView?.({ behavior: "smooth", block: "center" });
     });
   }, [payload]);
 
@@ -478,6 +486,23 @@ export default function LiveTrackingScreen() {
   }
 
   const timeline = payload?.timeline || [];
+  // FEATURE: "no current station" fallback — same reasoning as the web
+  // frontend's own copy of this logic (see the matching comment in
+  // app.js): the provider sometimes never flips a train's FINAL/
+  // destination station's status away from "upcoming" even once the
+  // train has genuinely reached it, which left payload.next_station
+  // pointing at a stale earlier station once tracking had otherwise
+  // ended. Falls back to the timeline's own last entry — whatever it
+  // truthfully says — labeled honestly as "Last known" instead of a
+  // "Next" stop that isn't real.
+  const ltHasCurrentStop = timeline.some((s) => s.status === "current");
+  const ltLastStop = timeline.length ? timeline[timeline.length - 1] : null;
+  const ltJourneyLikelyComplete = !!(ltLastStop && !ltHasCurrentStop);
+  const ltEffectiveDelay = ltJourneyLikelyComplete
+    ? (ltLastStop.arrival && ltLastStop.arrival.delay_minutes != null
+        ? ltLastStop.arrival.delay_minutes
+        : (ltLastStop.departure ? ltLastStop.departure.delay_minutes : null))
+    : payload?.delay_minutes;
 
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
@@ -597,10 +622,15 @@ export default function LiveTrackingScreen() {
           <View ref={quickBarRef} style={styles.quickBar}>
             <Text style={styles.quickBarIcon}>🚆</Text>
             <Text style={styles.quickBarText}>
-              Next: <Text style={styles.quickBarStation}>{payload.next_station || "—"}</Text>
-              <Text style={styles.quickBarEta}>  ETA {payload.next_station_live_eta || payload.next_station_expected_arrival || "—"}</Text>
+              {ltJourneyLikelyComplete ? "Last known:" : "Next:"}{" "}
+              <Text style={styles.quickBarStation}>
+                {ltJourneyLikelyComplete ? (ltLastStop.name || ltLastStop.code || "—") : (payload.next_station || "—")}
+              </Text>
+              {!ltJourneyLikelyComplete && (
+                <Text style={styles.quickBarEta}>  ETA {payload.next_station_live_eta || payload.next_station_expected_arrival || "—"}</Text>
+              )}
             </Text>
-            <DelayPill minutes={payload.delay_minutes} />
+            <DelayPill minutes={ltEffectiveDelay} />
           </View>
 
           <TouchableOpacity onPress={() => setShowMoreStats((v) => !v)} style={styles.moreStatsToggle}>
@@ -672,7 +702,13 @@ export default function LiveTrackingScreen() {
                 stop={stop}
                 isFirst={idx === 0}
                 isLast={idx === timeline.length - 1}
-                rowRef={stop.status === "current" ? currentStationRowRef : undefined}
+                rowRef={
+                  stop.status === "current"
+                    ? currentStationRowRef
+                    : idx === timeline.length - 1
+                      ? lastStationRowRef
+                      : undefined
+                }
               />
             ))}
           </SectionCard>
