@@ -1025,6 +1025,54 @@ if (!alreadySeenTour) {
     return t ? escapeHtml(String(t)) : "—";
   }
 
+  // BUGFIX: "no station anywhere is current" (the original journey-complete
+  // signal below) missed a second failure shape — the provider getting
+  // stuck showing the ORIGIN station as "current" forever instead of
+  // clearing the current marker altogether once it stops updating. Seen
+  // live on train 20707: SECUNDERABAD JN (the very first stop) stayed
+  // flagged "current" for 9+ hours after the train should have reached
+  // VISAKHAPATNAM, so the old "no current anywhere" check never fired.
+  // parseRailTimestamp/scheduleWellInPast add a second, independent
+  // signal: the destination's own scheduled arrival ("Exp HH:MM DD-Mon",
+  // RailKit's own format) is well behind the real current time. Requiring
+  // BOTH that AND "current is missing or stuck at/before the first stop"
+  // (see computeJourneyLikelyComplete) keeps a train that's simply
+  // running very late but still genuinely, actively tracked from being
+  // wrongly flagged — a real live position necessarily moves past the
+  // origin as a very late train's journey continues.
+  const RAIL_TIMESTAMP_RE = /(\d{1,2}):(\d{2})\s+(\d{1,2})-([A-Za-z]{3})/;
+  const RAIL_MONTHS = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+  function parseRailTimestamp(str) {
+    const m = RAIL_TIMESTAMP_RE.exec(String(str || ""));
+    if (!m) return null;
+    const monthIdx = RAIL_MONTHS[m[4]];
+    if (monthIdx == null) return null;
+    const now = new Date();
+    let d = new Date(now.getFullYear(), monthIdx, parseInt(m[3], 10), parseInt(m[1], 10), parseInt(m[2], 10));
+    // Year-boundary guard: a "Dec" timestamp read in early January would
+    // otherwise land ~a year in the future.
+    if (d.getTime() - now.getTime() > 200 * 24 * 60 * 60 * 1000) {
+      d = new Date(now.getFullYear() - 1, monthIdx, parseInt(m[3], 10), parseInt(m[1], 10), parseInt(m[2], 10));
+    }
+    return d;
+  }
+  function scheduleWellInPast(timing, thresholdMinutes) {
+    if (!timing) return false;
+    const d = parseRailTimestamp(timing.expected || timing.scheduled);
+    if (!d) return false;
+    return Date.now() - d.getTime() > thresholdMinutes * 60000;
+  }
+  // Shared by renderLiveTimeline() and the WebSocket onmessage handler —
+  // see the comment above parseRailTimestamp for the full reasoning.
+  function computeJourneyLikelyComplete(timelineArr, lastStop) {
+    if (!Array.isArray(timelineArr) || !timelineArr.length || !lastStop) return false;
+    if (lastStop.status === "passed" || lastStop.status === "current") return false;
+    const currentIdx = timelineArr.findIndex((s) => s.status === "current");
+    if (currentIdx === -1) return true; // original signal: no live position anywhere
+    if (currentIdx > 0) return false; // genuinely, actively tracked somewhere along the route
+    return scheduleWellInPast(lastStop.arrival, 180) || scheduleWellInPast(lastStop.departure, 180);
+  }
+
   // FEATURE: show delay durations as "1h 10m" once they cross an hour,
   // instead of raw minutes ("70m") — matches how a person actually reads a
   // delay figure, and keeps a big number like VSKP's from reading as an
@@ -1357,15 +1405,16 @@ if (!alreadySeenTour) {
       const coveredStops = timelineFlat
         .filter((s) => s.kind !== "intermediate" && s.status === "passed")
         .map((s) => ({ code: s.code, name: s.name }));
-      // BUGFIX: see stationRow()'s staleUnconfirmed param — when NO stop
-      // anywhere has status "current" (the provider has gone stale for
-      // this train altogether, most often once it's genuinely reached its
-      // destination and the provider simply stops updating), the model's
-      // predicted delay/ETA for the last stop has nothing real to anchor
-      // to and can be badly stale — flag only that one row so it shows an
-      // honest "not confirmed" instead of a specific wrong-looking number.
-      const journeyLikelyComplete = !timelineFlat.some((s) => s.status === "current");
+      // BUGFIX: see stationRow()'s staleUnconfirmed param — when the
+      // journey looks likely complete (see computeJourneyLikelyComplete
+      // above — no live "current" position anywhere, or one stuck at the
+      // origin long past the destination's scheduled arrival), the
+      // model's predicted delay/ETA for the last stop has nothing real to
+      // anchor to and can be badly stale — flag only that one row so it
+      // shows an honest "not confirmed" instead of a specific
+      // wrong-looking number.
       const lastIdx = timelineFlat.length - 1;
+      const journeyLikelyComplete = computeJourneyLikelyComplete(timelineFlat, timelineFlat[lastIdx]);
       liveTrackTimeline.innerHTML = timelineFlat
         .map((s, i) => stationRow(s, statusMeta, coveredStops, journeyLikelyComplete && i === lastIdx))
         .join("");
@@ -1383,9 +1432,12 @@ if (!alreadySeenTour) {
       // Same staleUnconfirmed fallback as the flat-list branch above,
       // applied to the last real stop entry (no_halt_group rows have no
       // predicted-delay display to suppress in the first place).
-      const journeyLikelyCompleteGrouped = !timelineGrouped.some((e) => e.status === "current");
       let lastStopIdx = -1;
       timelineGrouped.forEach((e, i) => { if (e.display_type !== "no_halt_group") lastStopIdx = i; });
+      const journeyLikelyCompleteGrouped = computeJourneyLikelyComplete(
+        timelineGrouped,
+        lastStopIdx >= 0 ? timelineGrouped[lastStopIdx] : null,
+      );
       liveTrackTimeline.innerHTML = timelineGrouped.map((entry, idx) =>
         entry.display_type === "no_halt_group"
           ? noHaltGroupRow(entry, idx)
@@ -1687,23 +1739,27 @@ if (!alreadySeenTour) {
         document.getElementById("ltCurrentStation").textContent = data.current_station
           ? `${data.current_station}${data.current_station_source === "railradar_live_gps" ? " (live GPS)" : ""}`
           : "—";
-        // FEATURE: "no current station" fallback. The provider sometimes
-        // never flips a train's FINAL/destination station's status away
-        // from "upcoming" even once the train has genuinely reached it (a
-        // data lag/quirk on their end, not something wrong on this app's
-        // side — there's no real "actual" timestamp to substitute, which
-        // is exactly why that station's own row already shows its time as
-        // "(predicted)"). When that happens, data.next_station/
-        // next_station_code point at a STALE earlier station instead of
-        // reflecting where the train actually ended up — so instead of
-        // trusting that computation, fall back to the timeline's own LAST
-        // entry (whatever it truthfully says) and label the quick bar
-        // honestly as "Last known" rather than claiming a "Next" stop that
-        // isn't real. See the matching fallback in scrollToLivePositionOnce().
+        // FEATURE: "journey likely complete" fallback. The provider
+        // sometimes never flips a train's FINAL/destination station's
+        // status away from "upcoming" even once the train has genuinely
+        // reached it (a data lag/quirk on their end, not something wrong
+        // on this app's side — there's no real "actual" timestamp to
+        // substitute, which is exactly why that station's own row already
+        // shows its time as "(predicted)"). Sometimes it goes further and
+        // leaves the ORIGIN stuck flagged "current" for hours/days after
+        // the train should have finished (see computeJourneyLikelyComplete
+        // above train 20707 kept SECUNDERABAD JN "current" for 9+ hours
+        // past VSKP's scheduled arrival). Either way, data.next_station/
+        // next_station_code end up pointing at a STALE earlier station
+        // instead of reflecting where the train actually ended up — so
+        // instead of trusting that computation, fall back to the
+        // timeline's own LAST entry (whatever it truthfully says) and
+        // label the quick bar honestly as "Last known" rather than
+        // claiming a "Next" stop that isn't real. See the matching
+        // fallback in scrollToLivePositionOnce().
         const ltTimelineArr = Array.isArray(data.timeline) ? data.timeline : [];
-        const ltHasCurrentStop = ltTimelineArr.some((s) => s.status === "current");
         const ltLastStop = ltTimelineArr.length ? ltTimelineArr[ltTimelineArr.length - 1] : null;
-        const ltJourneyLikelyComplete = !!(ltLastStop && !ltHasCurrentStop);
+        const ltJourneyLikelyComplete = computeJourneyLikelyComplete(ltTimelineArr, ltLastStop);
 
         const ltNextLabelEl = document.getElementById("ltNextLabel");
         const ltNextEtaWrapEl = document.getElementById("ltNextEtaWrap");

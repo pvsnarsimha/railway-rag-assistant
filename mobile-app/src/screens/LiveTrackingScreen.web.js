@@ -33,6 +33,49 @@ function isPrivateOrLocalHost(url) {
 const LOCAL_SHARE_WARNING =
   "⚠️ Local address — won't open for anyone outside this device/WiFi. See the README's \"Sharing links publicly\" section.";
 
+// BUGFIX: "no station anywhere is current" alone missed a second failure
+// shape — the provider getting stuck showing the ORIGIN station as
+// "current" forever instead of clearing the current marker altogether once
+// it stops updating. Seen live on train 20707: SECUNDERABAD JN (the very
+// first stop) stayed flagged "current" for 9+ hours after the train should
+// have reached VISAKHAPATNAM. parseRailTimestamp/scheduleWellInPast add a
+// second, independent signal: the destination's own scheduled arrival
+// ("Exp HH:MM DD-Mon", RailKit's own format) is well behind the real
+// current time. Requiring BOTH that AND "current is missing or stuck
+// at/before the first stop" (see computeJourneyLikelyComplete) keeps a
+// train that's simply running very late but still genuinely, actively
+// tracked from being wrongly flagged — a real live position necessarily
+// moves past the origin as a very late train's journey continues. Mirrors
+// the web frontend's identical helpers in app.js.
+const RAIL_TIMESTAMP_RE = /(\d{1,2}):(\d{2})\s+(\d{1,2})-([A-Za-z]{3})/;
+const RAIL_MONTHS = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+function parseRailTimestamp(str) {
+  const m = RAIL_TIMESTAMP_RE.exec(String(str || ""));
+  if (!m) return null;
+  const monthIdx = RAIL_MONTHS[m[4]];
+  if (monthIdx == null) return null;
+  const now = new Date();
+  let d = new Date(now.getFullYear(), monthIdx, parseInt(m[3], 10), parseInt(m[1], 10), parseInt(m[2], 10));
+  if (d.getTime() - now.getTime() > 200 * 24 * 60 * 60 * 1000) {
+    d = new Date(now.getFullYear() - 1, monthIdx, parseInt(m[3], 10), parseInt(m[1], 10), parseInt(m[2], 10));
+  }
+  return d;
+}
+function scheduleWellInPast(timing, thresholdMinutes) {
+  if (!timing) return false;
+  const d = parseRailTimestamp(timing.expected || timing.scheduled);
+  if (!d) return false;
+  return Date.now() - d.getTime() > thresholdMinutes * 60000;
+}
+function computeJourneyLikelyComplete(timelineArr, lastStop) {
+  if (!Array.isArray(timelineArr) || !timelineArr.length || !lastStop) return false;
+  if (lastStop.status === "passed" || lastStop.status === "current") return false;
+  const currentIdx = timelineArr.findIndex((s) => s.status === "current");
+  if (currentIdx === -1) return true;
+  if (currentIdx > 0) return false;
+  return scheduleWellInPast(lastStop.arrival, 180) || scheduleWellInPast(lastStop.departure, 180);
+}
+
 // FEATURE: "Train on map" — a real Leaflet map on demand, shown/hidden by a
 // toggle button rather than always rendered (matches the web frontend's own
 // "Train on map" / "Delay chart" collapsible sections). `react-native-maps`
@@ -178,18 +221,21 @@ export default function LiveTrackingScreen() {
   // Reconnect for the SAME train) apart from actually switching to a
   // different train. See the same-train guard in connect() below.
   const lastConnectedTrainRef = useRef(null);
-  // FEATURE: auto-scroll straight down to the current-position quick bar
-  // the first time real tracking data arrives for a train, instead of
-  // leaving the connect form at the top and making the user scroll down
-  // manually to see where the train actually is.
+  // FEATURE: auto-scroll straight down to where the train currently is the
+  // first time real tracking data arrives for a train, instead of leaving
+  // the connect form at the top and making the user scroll down manually.
+  // Prefers the current-station row inside "Running status" (most
+  // specific — e.g. train 20708 lands right on its actual current
+  // station), falling back to the quick bar only if that row genuinely
+  // isn't in the DOM yet. See scrollToLivePositionOnce() below — a SINGLE
+  // scrollIntoView call, not two competing ones (an earlier version fired
+  // both back to back, which didn't reliably land on the current row).
   const quickBarRef = useRef(null);
-  const autoScrolledRef = useRef(false);
-  // More specific than the quick bar above: once the "Running status" list
-  // actually has a current-station row, scroll straight to IT instead (see
-  // the effect below, which runs after the quick-bar one so it wins when
-  // both are available on the same update).
   const currentStationRowRef = useRef(null);
-  const timelineAutoScrolledRef = useRef(false);
+  // Fallback scroll target for a train with no is-current row at all (see
+  // ltJourneyLikelyComplete below) — the timeline's own last row.
+  const lastStationRowRef = useRef(null);
+  const autoScrolledRef = useRef(false);
 
   // FEATURE: Live delay-trend sparkline — shown as compact text on this
   // already text-only fallback screen, rather than a canvas/SVG chart.
@@ -347,32 +393,28 @@ export default function LiveTrackingScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showMap, payload?.lat, payload?.lng, payload?.current_station, payload?.train_number]);
 
-  // Fires once per train (see the autoScrolledRef reset in connect()) the
-  // first time a real payload arrives, scrolling the quick bar (map sits
-  // just above it) into view. quickBarRef is a <View ref> which, on this
-  // web build, forwards straight to the underlying DOM node — same
-  // ref-is-a-div pattern this file already relies on for the Leaflet map
-  // container above.
+  // Fires once per train (see the autoScrolledRef reset in connect()).
+  // Exactly ONE scrollIntoView call, preferring the current-station row
+  // inside "Running status" (currentStationRowRef, wired up via
+  // TimelineStopRow's rowRef prop below) — no quick-bar fallback (an
+  // earlier version raced a quick-bar scroll against this one, which per
+  // user report didn't reliably land on the current row). Falls back to
+  // the timeline's own LAST row (lastStationRowRef) for a train the
+  // provider never flips a "current" pointer to at all — most often its
+  // own destination, once genuinely reached (see ltJourneyLikelyComplete
+  // above) — so the view still lands on where the train actually ended
+  // up. If NEITHER ref exists yet on a given payload, the flag stays
+  // false and this retries on the next one. Both refs are <View ref>s
+  // which, on this web build, forward straight to the underlying DOM
+  // node — same ref-is-a-div pattern this file already relies on for the
+  // Leaflet map container.
   useEffect(() => {
-    if (!payload || autoScrolledRef.current || !quickBarRef.current) return;
+    if (!payload || autoScrolledRef.current) return;
+    const target = currentStationRowRef.current || lastStationRowRef.current;
+    if (!target) return;
     autoScrolledRef.current = true;
     requestAnimationFrame(() => {
-      quickBarRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-    });
-  }, [payload]);
-
-  // Runs after the quick-bar effect above (declared later, so its
-  // rAF-scheduled scroll executes second on the same update and wins) —
-  // once the current-station row actually exists in the "Running status"
-  // list (currentStationRowRef, wired up via TimelineStopRow's rowRef
-  // prop below), jump straight to it instead of just the quick bar. If it
-  // isn't in the DOM yet on this particular payload, this simply retries
-  // on the next one.
-  useEffect(() => {
-    if (!payload || timelineAutoScrolledRef.current || !currentStationRowRef.current) return;
-    timelineAutoScrolledRef.current = true;
-    requestAnimationFrame(() => {
-      currentStationRowRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      target.scrollIntoView?.({ behavior: "smooth", block: "center" });
     });
   }, [payload]);
 
@@ -415,7 +457,6 @@ export default function LiveTrackingScreen() {
       trainMarkerLatLngRef.current = null;
       routeBoundsFitRef.current = false;
       autoScrolledRef.current = false;
-      timelineAutoScrolledRef.current = false;
     }
     lastConnectedTrainRef.current = trainNumber.trim();
 
@@ -488,6 +529,22 @@ export default function LiveTrackingScreen() {
   }
 
   const timeline = payload?.timeline || [];
+  // FEATURE: "no current station" fallback — same reasoning as the web
+  // frontend's own copy of this logic (see the matching comment in
+  // app.js): the provider sometimes never flips a train's FINAL/
+  // destination station's status away from "upcoming" even once the
+  // train has genuinely reached it, which left payload.next_station
+  // pointing at a stale earlier station once tracking had otherwise
+  // ended. Falls back to the timeline's own last entry — whatever it
+  // truthfully says — labeled honestly as "Last known" instead of a
+  // "Next" stop that isn't real.
+  const ltLastStop = timeline.length ? timeline[timeline.length - 1] : null;
+  const ltJourneyLikelyComplete = computeJourneyLikelyComplete(timeline, ltLastStop);
+  const ltEffectiveDelay = ltJourneyLikelyComplete
+    ? (ltLastStop.arrival && ltLastStop.arrival.delay_minutes != null
+        ? ltLastStop.arrival.delay_minutes
+        : (ltLastStop.departure ? ltLastStop.departure.delay_minutes : null))
+    : payload?.delay_minutes;
 
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
@@ -607,10 +664,15 @@ export default function LiveTrackingScreen() {
           <View ref={quickBarRef} style={styles.quickBar}>
             <Text style={styles.quickBarIcon}>🚆</Text>
             <Text style={styles.quickBarText}>
-              Next: <Text style={styles.quickBarStation}>{payload.next_station || "—"}</Text>
-              <Text style={styles.quickBarEta}>  ETA {payload.next_station_live_eta || payload.next_station_expected_arrival || "—"}</Text>
+              {ltJourneyLikelyComplete ? "Last known:" : "Next:"}{" "}
+              <Text style={styles.quickBarStation}>
+                {ltJourneyLikelyComplete ? (ltLastStop.name || ltLastStop.code || "—") : (payload.next_station || "—")}
+              </Text>
+              {!ltJourneyLikelyComplete && (
+                <Text style={styles.quickBarEta}>  ETA {payload.next_station_live_eta || payload.next_station_expected_arrival || "—"}</Text>
+              )}
             </Text>
-            <DelayPill minutes={payload.delay_minutes} />
+            <DelayPill minutes={ltEffectiveDelay} />
           </View>
 
           <TouchableOpacity onPress={() => setShowMoreStats((v) => !v)} style={styles.moreStatsToggle}>
@@ -682,7 +744,14 @@ export default function LiveTrackingScreen() {
                 stop={stop}
                 isFirst={idx === 0}
                 isLast={idx === timeline.length - 1}
-                rowRef={stop.status === "current" ? currentStationRowRef : undefined}
+                rowRef={
+                  stop.status === "current"
+                    ? currentStationRowRef
+                    : idx === timeline.length - 1
+                      ? lastStationRowRef
+                      : undefined
+                }
+                staleUnconfirmed={ltJourneyLikelyComplete && idx === timeline.length - 1}
               />
             ))}
           </SectionCard>
@@ -739,8 +808,23 @@ function DelayPill({ minutes, small }) {
 
 // One Arrival or Departure line for a timeline stop — "Exp HH:MM  Act
 // HH:MM  [delay pill]", matching the web frontend's timingRow().
-function TimingLine({ label, timing }) {
+// BUGFIX: staleUnconfirmed (see TimelineStopRow's matching param) — when
+// the provider has gone stale for this stop (most often the destination,
+// once the provider stops updating altogether after the train has
+// genuinely reached it, sometimes days before this is viewed again), the
+// model-predicted "Act"/delay figures can be actively wrong rather than
+// a fair estimate — same reasoning as the web frontend's timingRow().
+function TimingLine({ label, timing, staleUnconfirmed }) {
   if (!timing || (!timing.scheduled && !timing.expected && !timing.actual)) return null;
+  if (staleUnconfirmed && timing.actual_is_predicted) {
+    return (
+      <View style={styles.timingLine}>
+        <Text style={styles.timingLabel}>{label}</Text>
+        <Text style={styles.timingVal}>Exp {timing.expected || timing.scheduled || "—"}</Text>
+        <Text style={styles.timingValMuted}>Not confirmed by provider</Text>
+      </View>
+    );
+  }
   const actLabel = timing.actual_is_predicted ? "Act (pred.)" : "Act";
   return (
     <View style={styles.timingLine}>
@@ -757,7 +841,7 @@ function TimingLine({ label, timing }) {
 // station name/meta/times on the right. Mirrors the web frontend's
 // .live-timeline__row structure closely enough to look like the same
 // feature on both platforms.
-function TimelineStopRow({ stop, isFirst, isLast, rowRef }) {
+function TimelineStopRow({ stop, isFirst, isLast, rowRef, staleUnconfirmed }) {
   const isCurrent = stop.status === "current";
   const isPassed = stop.status === "passed";
   const dotColor = isPassed ? colors.success : isCurrent ? colors.danger : colors.border;
@@ -790,14 +874,19 @@ function TimelineStopRow({ stop, isFirst, isLast, rowRef }) {
             </Text>
           </View>
         )}
-        {stop.status === "upcoming" && stop.predicted_delay_minutes != null && (
+        {/* BUGFIX: suppressed when staleUnconfirmed — see TimingLine's
+            matching comment above. A confident-looking predicted delay is
+            worse than none once the provider has stopped updating this
+            stop altogether (most often the destination, well after the
+            train has genuinely reached it). */}
+        {!staleUnconfirmed && stop.status === "upcoming" && stop.predicted_delay_minutes != null && (
           <Text style={styles.tlPredicted}>
             ~{formatDelayDuration(stop.predicted_delay_minutes)} late (predicted)
             {stop.predicted_eta ? ` · ETA ~${stop.predicted_eta}` : ""}
           </Text>
         )}
-        <TimingLine label="Arrival" timing={stop.arrival} />
-        <TimingLine label="Departure" timing={stop.departure} />
+        <TimingLine label="Arrival" timing={stop.arrival} staleUnconfirmed={staleUnconfirmed} />
+        <TimingLine label="Departure" timing={stop.departure} staleUnconfirmed={staleUnconfirmed} />
       </View>
     </View>
   );
@@ -831,6 +920,7 @@ const styles = StyleSheet.create({
   timingLine: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 3, flexWrap: "wrap" },
   timingLabel: { fontSize: 10.5, color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, width: 52 },
   timingVal: { fontSize: 11.5, color: colors.text },
+  timingValMuted: { fontSize: 11.5, color: colors.textMuted, fontStyle: "italic" },
   tlRow: { flexDirection: "row" },
   tlRail: { width: 26, alignItems: "center" },
   tlLine: { width: 2, flex: 1, backgroundColor: colors.border, minHeight: 8 },
