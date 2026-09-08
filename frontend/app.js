@@ -1044,10 +1044,32 @@ if (!alreadySeenTour) {
     return `${sign}${h}h ${m}m`;
   }
 
-  function timingRow(label, timing) {
+  function timingRow(label, timing, staleUnconfirmed) {
     if (!timing) return "";
     const hasAny = timing.scheduled || timing.expected || timing.actual;
     if (!hasAny) return "";
+    // BUGFIX: when the provider has gone stale for this stop (see
+    // stationRow()'s staleUnconfirmed param — most often the destination,
+    // once the provider stops updating altogether after the train has
+    // genuinely reached it, sometimes days earlier by the time this is
+    // viewed again), the model-predicted "Act"/delay figures here can be
+    // actively wrong rather than a fair estimate — e.g. an "Exp 13:50
+    // 06-Sep" against a predicted "Act 05:59" showing "0m" (on time) when
+    // it's really either running hours early or, more likely, the
+    // prediction itself is just stale and was never recomputed once live
+    // position tracking stopped. Rather than show a specific number that
+    // may be badly wrong, show only the real Exp time and say plainly
+    // that nothing else is confirmed.
+    if (staleUnconfirmed && timing.actual_is_predicted) {
+      return `
+        <div class="live-timeline__timing">
+          <span class="live-timeline__timing-label">${label}</span>
+          <span class="live-timeline__timing-vals">
+            <span title="Expected">Exp ${fmtTime(timing.expected || timing.scheduled)}</span>
+            <span class="live-timeline__nofix" title="The provider stopped sending updates for this stop, so no actual/predicted time can be shown reliably">Not confirmed by provider</span>
+          </span>
+        </div>`;
+    }
     const delayBadge = timing.delay_minutes != null
       ? `<span class="live-timeline__delay ${timing.delay_minutes > 0 ? "is-late" : timing.delay_minutes < 0 ? "is-early" : "is-ontime"}">${timing.delay_minutes > 0 ? "+" : ""}${formatDelayDuration(timing.delay_minutes)}</span>`
       : "";
@@ -1071,6 +1093,9 @@ if (!alreadySeenTour) {
 
   // RailYatri-style predicted-delay badge for an upcoming (not-yet-reached)
   // reporting station — backend's _predict_delay_per_reporting_station.
+  // Suppressed by stationRow() when staleUnconfirmed (see timingRow above)
+  // — same reasoning, a confident-looking predicted delay is worse than
+  // none when the provider has stopped updating this stop altogether.
   function predictedDelayBadge(s) {
     if (s.predicted_delay_minutes == null) return "";
     const cls = s.predicted_delay_minutes > 0 ? "is-late" : "is-ontime";
@@ -1152,7 +1177,7 @@ if (!alreadySeenTour) {
       </div>`;
   }
 
-  function stationRow(s, statusMeta, coveredStops) {
+  function stationRow(s, statusMeta, coveredStops, staleUnconfirmed) {
     const statusClass = s.status === "passed" ? "is-passed" : s.status === "current" ? "is-current" : "is-upcoming";
     const noFix = s.lat == null ? `<span class="live-timeline__nofix">no map fix</span>` : "";
     const distKm = resolvedDistanceKm(s);
@@ -1166,6 +1191,12 @@ if (!alreadySeenTour) {
     // text without recomputing anything.
     const stopsForAttr = isCurrent && Array.isArray(coveredStops)
       ? escapeHtml(coveredStops.map((c) => c.name).join(", ")) : "";
+    // BUGFIX: staleUnconfirmed (set by renderLiveTimeline for the LAST
+    // stop, only when the WHOLE timeline has no is-current row at all —
+    // see scrollToLivePositionOnce()'s matching fallback and the quick
+    // bar's "Last known:" fallback) suppresses the predicted-delay badge
+    // for exactly this same reason: no real signal to predict FROM.
+    const badge = staleUnconfirmed ? "" : predictedDelayBadge(s);
     return `
       <div class="live-timeline__row ${statusClass} is-stoppage">
         ${isCurrent
@@ -1177,11 +1208,11 @@ if (!alreadySeenTour) {
           <div class="live-timeline__head">
             <span class="live-timeline__name">${escapeHtml(s.name)} <span class="live-timeline__code">(${escapeHtml(s.code)})</span></span>
             <span class="live-timeline__meta">${metaLine} ${noFix}</span>
-            ${predictedDelayBadge(s) ? `<div class="live-timeline__predicted-row">${predictedDelayBadge(s)}</div>` : ""}
+            ${badge ? `<div class="live-timeline__predicted-row">${badge}</div>` : ""}
           </div>
           ${isCurrent ? statusPopupHtml(s, statusMeta, coveredStops) : ""}
-          ${timingRow("Arrival", s.arrival)}
-          ${timingRow("Departure", s.departure)}
+          ${timingRow("Arrival", s.arrival, staleUnconfirmed)}
+          ${timingRow("Departure", s.departure, staleUnconfirmed)}
         </div>
       </div>`;
   }
@@ -1326,7 +1357,18 @@ if (!alreadySeenTour) {
       const coveredStops = timelineFlat
         .filter((s) => s.kind !== "intermediate" && s.status === "passed")
         .map((s) => ({ code: s.code, name: s.name }));
-      liveTrackTimeline.innerHTML = timelineFlat.map((s) => stationRow(s, statusMeta, coveredStops)).join("");
+      // BUGFIX: see stationRow()'s staleUnconfirmed param — when NO stop
+      // anywhere has status "current" (the provider has gone stale for
+      // this train altogether, most often once it's genuinely reached its
+      // destination and the provider simply stops updating), the model's
+      // predicted delay/ETA for the last stop has nothing real to anchor
+      // to and can be badly stale — flag only that one row so it shows an
+      // honest "not confirmed" instead of a specific wrong-looking number.
+      const journeyLikelyComplete = !timelineFlat.some((s) => s.status === "current");
+      const lastIdx = timelineFlat.length - 1;
+      liveTrackTimeline.innerHTML = timelineFlat
+        .map((s, i) => stationRow(s, statusMeta, coveredStops, journeyLikelyComplete && i === lastIdx))
+        .join("");
       wireStatusPopup();
       return;
     }
@@ -1338,8 +1380,16 @@ if (!alreadySeenTour) {
       const coveredStops = timelineGrouped
         .filter((e) => e.display_type !== "no_halt_group" && e.status === "passed")
         .map((e) => ({ code: e.code, name: e.name }));
+      // Same staleUnconfirmed fallback as the flat-list branch above,
+      // applied to the last real stop entry (no_halt_group rows have no
+      // predicted-delay display to suppress in the first place).
+      const journeyLikelyCompleteGrouped = !timelineGrouped.some((e) => e.status === "current");
+      let lastStopIdx = -1;
+      timelineGrouped.forEach((e, i) => { if (e.display_type !== "no_halt_group") lastStopIdx = i; });
       liveTrackTimeline.innerHTML = timelineGrouped.map((entry, idx) =>
-        entry.display_type === "no_halt_group" ? noHaltGroupRow(entry, idx) : stationRow(entry, statusMeta, coveredStops)
+        entry.display_type === "no_halt_group"
+          ? noHaltGroupRow(entry, idx)
+          : stationRow(entry, statusMeta, coveredStops, journeyLikelyCompleteGrouped && idx === lastStopIdx)
       ).join("");
       liveTrackTimeline.querySelectorAll("[data-nohalt-toggle]").forEach((btn) => {
         btn.addEventListener("click", () => {
