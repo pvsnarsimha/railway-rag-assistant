@@ -228,7 +228,7 @@ def departure_reminder(
             distance_km = round(haversine_km(user_lat, user_lng, coords["lat"], coords["lng"]), 2)
         else:
             distance_note = (
-                f"{boarding_station} isn't in this app's curated ~50-station coordinate table, so your live "
+                f"{boarding_station} isn't in this app's curated {len(_STATION_COORDS)}-station coordinate table, so your live "
                 "location can't be converted into a distance automatically — enter the distance manually."
             )
 

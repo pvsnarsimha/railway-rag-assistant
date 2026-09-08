@@ -121,6 +121,12 @@ export default function LiveTrackingScreen() {
   // already text-only fallback screen, rather than a canvas/SVG chart.
   const [delaySparkline, setDelaySparkline] = useState([]);
 
+  // REDESIGN (RailYatri-style): the raw coordinate/speed/weather stat rows
+  // are now tucked behind a "More details" toggle so the headline quick bar
+  // + stop timeline are what's visible by default, matching the web
+  // frontend's own declutter (see frontend/index.html's lt-section).
+  const [showMoreStats, setShowMoreStats] = useState(false);
+
   // FEATURE: End-of-Trip Summary Card (shareable).
   const tripSummaryShownKeyRef = useRef(null);
   const [tripSummary, setTripSummary] = useState(null);
@@ -458,33 +464,64 @@ export default function LiveTrackingScreen() {
 
       {payload && (
         <>
-          <SectionCard title="Live position (text)">
-            <InfoRow label="Coordinates" value={payload.lat && payload.lng ? `${payload.lat}, ${payload.lng}` : "—"} />
-            <InfoRow label="Current station" value={payload.current_station || "—"} />
-            <InfoRow label="Next station" value={payload.next_station || "—"} />
-            <InfoRow label="Reported delay" value={payload.delay_minutes != null ? formatDelayDuration(payload.delay_minutes) : "—"} />
-            <InfoRow
-              label="ML predicted delay"
-              value={
-                payload.predicted_delay_minutes != null
-                  ? `${formatDelayDuration(payload.predicted_delay_minutes)} (${payload.predicted_delay_confidence || "n/a"} confidence)`
-                  : "—"
-              }
-            />
-            {/* FEATURE: Live delay-trend sparkline — text form (getting
-                better/worse right now), fitting this already text-only
-                screen rather than adding a chart library here. */}
-            {delaySparkline.length >= 2 && (
+          {/* RailYatri-style "Next: <station>  ETA <time>  <delay pill>"
+              quick-glance bar — the headline element now, same idea as the
+              web frontend's #liveTrackQuickBar. */}
+          <View style={styles.quickBar}>
+            <Text style={styles.quickBarIcon}>🚆</Text>
+            <Text style={styles.quickBarText}>
+              Next: <Text style={styles.quickBarStation}>{payload.next_station || "—"}</Text>
+              <Text style={styles.quickBarEta}>  ETA {payload.next_station_live_eta || payload.next_station_expected_arrival || "—"}</Text>
+            </Text>
+            <DelayPill minutes={payload.delay_minutes} />
+          </View>
+
+          <TouchableOpacity onPress={() => setShowMoreStats((v) => !v)} style={styles.moreStatsToggle}>
+            <Text style={styles.moreStatsToggleText}>{showMoreStats ? "▾ Hide more details" : "▸ More details"}</Text>
+          </TouchableOpacity>
+
+          {showMoreStats && (
+            <SectionCard title="Live position — full details">
+              <InfoRow label="Coordinates" value={payload.lat && payload.lng ? `${payload.lat}, ${payload.lng}` : "—"} />
+              <InfoRow label="Current station" value={payload.current_station || "—"} />
               <InfoRow
-                label={`Delay trend (last ${delaySparkline.length})`}
-                value={`${delaySparkline.map((v) => (v > 0 ? `+${v}` : String(v))).join(", ")} ${
-                  delaySparkline[delaySparkline.length - 1] < delaySparkline[0] ? "(improving)"
-                  : delaySparkline[delaySparkline.length - 1] > delaySparkline[0] ? "(worsening)" : "(steady)"
-                }`}
+                label="ML predicted delay"
+                value={
+                  payload.predicted_delay_minutes != null
+                    ? `${formatDelayDuration(payload.predicted_delay_minutes)} (${payload.predicted_delay_confidence || "n/a"} confidence)`
+                    : "—"
+                }
               />
-            )}
-            {payload.error ? <Text style={styles.errorText}>{payload.error}</Text> : null}
-          </SectionCard>
+              <InfoRow label="Position source" value={payload.position_source || "—"} />
+              <InfoRow label="Direction" value={payload.direction && payload.direction !== "UNKNOWN" ? payload.direction : "—"} />
+              <InfoRow
+                label="Current speed"
+                value={
+                  payload.recency_weighted_speed_kmph != null || payload.instant_speed_kmph != null
+                    ? `${payload.recency_weighted_speed_kmph ?? payload.instant_speed_kmph} km/h`
+                    : payload.display_speed_kmph != null ? `${payload.display_speed_kmph} km/h (est.)` : "—"
+                }
+              />
+              <InfoRow label="Avg. running speed" value={payload.avg_speed_kmph != null ? `${payload.avg_speed_kmph} km/h` : "—"} />
+              <InfoRow
+                label="Distance to next station"
+                value={payload.distance_remaining_to_next_km != null ? `${payload.distance_remaining_to_next_km} km` : "—"}
+              />
+              {/* FEATURE: Live delay-trend sparkline — text form (getting
+                  better/worse right now), fitting this already text-only
+                  screen rather than adding a chart library here. */}
+              {delaySparkline.length >= 2 && (
+                <InfoRow
+                  label={`Delay trend (last ${delaySparkline.length})`}
+                  value={`${delaySparkline.map((v) => (v > 0 ? `+${v}` : String(v))).join(", ")} ${
+                    delaySparkline[delaySparkline.length - 1] < delaySparkline[0] ? "(improving)"
+                    : delaySparkline[delaySparkline.length - 1] > delaySparkline[0] ? "(worsening)" : "(steady)"
+                  }`}
+                />
+              )}
+              {payload.error ? <Text style={styles.errorText}>{payload.error}</Text> : null}
+            </SectionCard>
+          )}
 
           <SectionCard title="Crowd prediction" subtitle={payload.crowd_disclaimer}>
             <InfoRow label="Level" value={payload.crowd_level || "—"} />
@@ -498,21 +535,17 @@ export default function LiveTrackingScreen() {
             )}
           </SectionCard>
 
-          <SectionCard title="Stop-by-stop timeline" subtitle={`${timeline.length} stops reported`}>
+          {/* RailYatri-style running status — vertical connecting line,
+              colored dots, a train-icon marker at the current stop, and
+              red/green delay pills on every Arrival/Departure line. */}
+          <SectionCard title="Running status — every station" subtitle={`${timeline.length} stops reported`}>
             {timeline.map((stop, idx) => (
-              <View key={`${stop.code}_${idx}`} style={styles.timelineRow}>
-                <View style={[styles.dot, { backgroundColor: STATUS_COLOR[stop.status] || colors.textMuted }]} />
-                <View style={styles.timelineTextWrap}>
-                  <Text style={styles.timelineName}>
-                    {stop.name} ({stop.code}){" "}
-                    <Text style={styles.timelineKind}>{stop.kind === "intermediate" ? "· passing" : ""}</Text>
-                  </Text>
-                  <Text style={styles.timelineTimes}>
-                    Arr {stop.arrival?.scheduled || "—"} · Dep {stop.departure?.scheduled || "—"}
-                    {stop.distance_km ? ` · ${stop.distance_km} km` : ""}
-                  </Text>
-                </View>
-              </View>
+              <TimelineStopRow
+                key={`${stop.code}_${idx}`}
+                stop={stop}
+                isFirst={idx === 0}
+                isLast={idx === timeline.length - 1}
+              />
             ))}
           </SectionCard>
         </>
@@ -547,6 +580,91 @@ function InfoRow({ label, value }) {
   );
 }
 
+// ============================================================
+// REDESIGN (RailYatri-style running status): a small red/green pill for a
+// delay figure — reused for the quick bar and every Arrival/Departure line
+// in the timeline below, same red-for-late/green-for-on-time convention
+// the web frontend's .live-timeline__delay classes use.
+// ============================================================
+function DelayPill({ minutes, small }) {
+  if (minutes == null) return null;
+  const late = minutes > 0;
+  const early = minutes < 0;
+  const bg = late ? colors.danger : colors.success;
+  const label = `${late ? "+" : ""}${formatDelayDuration(minutes)}${late ? " late" : early ? " early" : " on time"}`;
+  return (
+    <View style={[styles.delayPill, { backgroundColor: bg }, small && styles.delayPillSmall]}>
+      <Text style={[styles.delayPillText, small && styles.delayPillTextSmall]}>{label}</Text>
+    </View>
+  );
+}
+
+// One Arrival or Departure line for a timeline stop — "Exp HH:MM  Act
+// HH:MM  [delay pill]", matching the web frontend's timingRow().
+function TimingLine({ label, timing }) {
+  if (!timing || (!timing.scheduled && !timing.expected && !timing.actual)) return null;
+  const actLabel = timing.actual_is_predicted ? "Act (pred.)" : "Act";
+  return (
+    <View style={styles.timingLine}>
+      <Text style={styles.timingLabel}>{label}</Text>
+      <Text style={styles.timingVal}>Exp {timing.expected || timing.scheduled || "—"}</Text>
+      <Text style={styles.timingVal}>{actLabel} {timing.actual || "—"}</Text>
+      <DelayPill minutes={timing.delay_minutes} small />
+    </View>
+  );
+}
+
+// One row of the RailYatri-style running-status timeline: a connecting
+// vertical line + dot (train icon for the current stop) on the left, the
+// station name/meta/times on the right. Mirrors the web frontend's
+// .live-timeline__row structure closely enough to look like the same
+// feature on both platforms.
+function TimelineStopRow({ stop, isFirst, isLast }) {
+  const isCurrent = stop.status === "current";
+  const isPassed = stop.status === "passed";
+  const dotColor = isPassed ? colors.success : isCurrent ? colors.danger : colors.border;
+  const metaBits = [];
+  if (stop.halt_minutes != null && stop.halt_minutes !== "") metaBits.push(`Halt: ${stop.halt_minutes} min`);
+  if (stop.distance_km != null) metaBits.push(`${stop.distance_km} km`);
+  return (
+    <View style={styles.tlRow}>
+      <View style={styles.tlRail}>
+        <View style={[styles.tlLine, isFirst && styles.tlLineHidden]} />
+        {isCurrent ? (
+          <View style={styles.tlTrainIconWrap}>
+            <Ionicons name="train" size={13} color="#fff" />
+          </View>
+        ) : (
+          <View style={[styles.tlDot, { backgroundColor: dotColor }]} />
+        )}
+        <View style={[styles.tlLine, isLast && styles.tlLineHidden]} />
+      </View>
+      <View style={styles.tlBody}>
+        <Text style={styles.tlName}>
+          {stop.name} <Text style={styles.tlCode}>({stop.code})</Text>
+          {stop.kind === "intermediate" ? <Text style={styles.timelineKind}>  · passing</Text> : null}
+        </Text>
+        {metaBits.length > 0 && <Text style={styles.tlMeta}>{metaBits.join(" | ")}</Text>}
+        {isCurrent && (
+          <View style={styles.tlCurrentCallout}>
+            <Text style={styles.tlCurrentCalloutText}>
+              🚆 Train is currently here{stop.halt_minutes ? ` · halt ${stop.halt_minutes} min` : ""}
+            </Text>
+          </View>
+        )}
+        {stop.status === "upcoming" && stop.predicted_delay_minutes != null && (
+          <Text style={styles.tlPredicted}>
+            ~{formatDelayDuration(stop.predicted_delay_minutes)} late (predicted)
+            {stop.predicted_eta ? ` · ETA ~${stop.predicted_eta}` : ""}
+          </Text>
+        )}
+        <TimingLine label="Arrival" timing={stop.arrival} />
+        <TimingLine label="Departure" timing={stop.departure} />
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   content: { padding: spacing.lg },
@@ -554,6 +672,46 @@ const styles = StyleSheet.create({
   half: { flex: 1 },
   refreshRow: { flexDirection: "row", alignItems: "center", gap: 4 },
   refreshText: { fontSize: 12, color: colors.primary, fontWeight: "600" },
+
+  // REDESIGN (RailYatri-style quick bar + running-status timeline).
+  quickBar: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: "#eef4fb", borderWidth: 1, borderColor: "#cfe0f3",
+    borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12,
+    marginBottom: spacing.sm,
+  },
+  quickBarIcon: { fontSize: 16 },
+  quickBarText: { flex: 1, fontSize: 13, color: colors.text },
+  quickBarStation: { fontWeight: "700", color: colors.primary },
+  quickBarEta: { fontSize: 12, color: colors.textMuted },
+  moreStatsToggle: { alignSelf: "flex-start", marginBottom: spacing.sm, paddingVertical: 4 },
+  moreStatsToggleText: { fontSize: 12.5, fontWeight: "600", color: colors.primary },
+  delayPill: { borderRadius: 4, paddingVertical: 3, paddingHorizontal: 8 },
+  delayPillSmall: { paddingVertical: 1, paddingHorizontal: 5 },
+  delayPillText: { fontSize: 12, fontWeight: "700", color: "#fff" },
+  delayPillTextSmall: { fontSize: 10.5 },
+  timingLine: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 3, flexWrap: "wrap" },
+  timingLabel: { fontSize: 10.5, color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, width: 52 },
+  timingVal: { fontSize: 11.5, color: colors.text },
+  tlRow: { flexDirection: "row" },
+  tlRail: { width: 26, alignItems: "center" },
+  tlLine: { width: 2, flex: 1, backgroundColor: colors.border, minHeight: 8 },
+  tlLineHidden: { backgroundColor: "transparent" },
+  tlDot: { width: 10, height: 10, borderRadius: 5, marginVertical: 3 },
+  tlTrainIconWrap: {
+    width: 20, height: 20, borderRadius: 10, backgroundColor: colors.danger,
+    alignItems: "center", justifyContent: "center", marginVertical: 2,
+  },
+  tlBody: { flex: 1, paddingBottom: spacing.md, paddingLeft: spacing.sm },
+  tlName: { fontSize: 13, fontWeight: "700", color: colors.text },
+  tlCode: { fontWeight: "400", color: colors.textMuted, fontSize: 12 },
+  tlMeta: { fontSize: 10.5, color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginTop: 1 },
+  tlCurrentCallout: {
+    backgroundColor: "#fff4f3", borderWidth: 1, borderColor: colors.danger,
+    borderRadius: 6, paddingVertical: 5, paddingHorizontal: 8, marginTop: 4, alignSelf: "flex-start",
+  },
+  tlCurrentCalloutText: { fontSize: 11.5, color: colors.danger, fontWeight: "600" },
+  tlPredicted: { fontSize: 11, color: colors.warning, marginTop: 3 },
   badgeRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: spacing.sm },
   badgeText: { fontSize: 12, fontWeight: "600" },
   webNotice: { flexDirection: "row", gap: 6, marginTop: spacing.md, alignItems: "flex-start" },

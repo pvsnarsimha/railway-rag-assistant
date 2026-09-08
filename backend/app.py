@@ -3623,7 +3623,10 @@ def api_parcel_info():
 # FEATURE: Offline Route Maps & Station Information — bulk export of the
 # curated station coordinates + amenities for the frontend to cache
 # locally (localStorage/AsyncStorage) once, then look up without a
-# network call. Small (currently ~51 major stations), so one call is fine.
+# network call. Now all ~8,700 Indian Railways stations (~600KB JSON) —
+# a bigger one-time download than the old ~51-station bundle, but still a
+# single fetch-once-and-cache call, and it's what makes offline lookup
+# actually cover the whole country instead of just the majors.
 # =============================================================================
 @app.get("/api/advanced/offline-stations")
 def api_offline_stations():

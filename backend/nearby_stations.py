@@ -9,10 +9,11 @@ stations are near X" is answered with an actual haversine great-circle
 distance calculation from X to every other station in the table, sorted
 and radius-filtered - not a hardcoded "nearby list" per station.
 
-Same honesty rule as the rest of this project: our station_coordinates.json
-only covers ~50 major stations, not all ~7,000+ Indian Railways stations.
-If the anchor station isn't in that table, this says so plainly rather
-than inventing a location for it or silently returning an empty list.
+station_coordinates.json now covers all ~8,700 Indian Railways stations
+(see station_search.py's module docstring for where that data came from).
+If the anchor station still isn't in the table for some reason, this says
+so plainly rather than inventing a location for it or silently returning
+an empty list.
 """
 
 import json
