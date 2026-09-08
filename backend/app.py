@@ -4898,16 +4898,45 @@ def trip_summary_page(share_id: str):
 # =============================================================================
 _MOBILE_WEB_INDEX = os.path.join(MOBILE_WEB_DIR, "index.html")
 
+# FEATURE: stop the browser from silently serving a STALE frontend after a
+# fix is deployed. index.html/app.js/style.css have no cache-busted
+# filename (unlike the mobile Expo bundle, which gets a fresh content-hash
+# name like AppEntry-<hash>.js on every export - a new deploy is
+# automatically a new URL there). Without an explicit Cache-Control, a
+# browser applies HTTP's heuristic caching to these three and can keep
+# reusing an old cached copy for a while after a redeploy even on a normal
+# reload - which is exactly the "I copied the files and pushed but it
+# still behaves like before" symptom this project kept running into.
+# "no-cache" (NOT "no-store") means the browser still revalidates with the
+# server on every load (a fast 304 when nothing changed) but can never use
+# a copy the server hasn't confirmed is current - so a real fix always
+# shows up on the very next page load, no more guessing whether a stale
+# cache is hiding it. Only these three small, hand-edited files need this;
+# everything else (icons, vendored Leaflet, the hashed mobile bundle) is
+# left on normal caching since it either rarely changes or is inherently
+# cache-safe by filename.
+_NO_CACHE_FRONTEND_FILES = {"", "index.html", "app.js", "style.css"}
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if path in _NO_CACHE_FRONTEND_FILES:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
 
 @app.get("/")
 def home_page(request: Request):
     user_agent = request.headers.get("user-agent", "")
     if _looks_like_mobile(user_agent) and os.path.isfile(_MOBILE_WEB_INDEX):
         return RedirectResponse(url="/mobile-app/")
-    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+    response = FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 if os.path.isdir(MOBILE_WEB_DIR):
-    app.mount("/mobile-app", StaticFiles(directory=MOBILE_WEB_DIR, html=True), name="mobile_web")
+    app.mount("/mobile-app", _NoCacheStaticFiles(directory=MOBILE_WEB_DIR, html=True), name="mobile_web")
 
-app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+app.mount("/", _NoCacheStaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
