@@ -678,18 +678,11 @@ if (!alreadySeenTour) {
   let liveTrackRouteBoundsFit = false;
   let liveTrackChart = null;
   let liveTrackedTrainNumber = null;
-  // FEATURE: auto-scroll straight to the live position once, the first
-  // time real tracking data arrives for this session — see the reset in
-  // startLiveTrack() and the trigger point below where the quick bar is
-  // first revealed.
+  // FEATURE: auto-scroll straight to the live position (the current-station
+  // row inside the "Running status" list, once it exists — see
+  // scrollToLivePositionOnce()) once per tracking session — see the reset
+  // in startLiveTrack().
   let liveTrackAutoScrolled = false;
-  // FEATURE: separately, the "Running status — every station (IRCTC-style)"
-  // list is its OWN inner scroll box (.live-timeline has its own
-  // overflow-y: auto — see style.css) — reaching the quick bar/map doesn't
-  // reveal where the train actually is inside that list, since it always
-  // renders starting from station #1. Scrolled to the current-station row
-  // once per tracking session, same one-shot pattern as liveTrackAutoScrolled.
-  let liveTrackTimelineAutoScrolled = false;
   // Explainable AI + Crowd-Sourced Positions, overlaid on THIS live map —
   // see the handlers wired below liveTrackForm's submit listener.
   let lastKnownDelayMinutes = null;
@@ -1286,15 +1279,23 @@ if (!alreadySeenTour) {
     });
   }
 
-  // Scrolls the "Running status" list's OWN inner scrollbox to the
-  // is-current row (see stationRow()) the first time it has one for this
-  // tracking session — e.g. train 20708's list opens already scrolled to
-  // Annavaram instead of station #1, no manual scrolling needed.
-  function scrollTimelineToCurrentOnce() {
-    if (liveTrackTimelineAutoScrolled || !liveTrackTimeline) return;
+  // Single source of truth for "auto-scroll to where the train currently
+  // is" the first time real data arrives for a tracking session. Exactly
+  // ONE scrollIntoView call, targeting ONLY the is-current row inside the
+  // "Running status" list (see stationRow()) — e.g. train 20708 opens
+  // already scrolled to its actual current station, not station #1. No
+  // quick-bar fallback: an earlier version raced a quick-bar scroll
+  // against this one (two scrollIntoView calls back to back), which
+  // per user report didn't reliably land on the current row — and once it
+  // fell back to the quick bar it never got another chance to correct
+  // itself. This version simply waits: if the current-station row isn't
+  // in the DOM yet on a given message, the flag stays false and it
+  // retries on the next one, so it can only ever lock onto the real thing.
+  function scrollToLivePositionOnce() {
+    if (liveTrackAutoScrolled || !liveTrackTimeline) return;
     const currentRow = liveTrackTimeline.querySelector(".is-current");
     if (!currentRow) return;
-    liveTrackTimelineAutoScrolled = true;
+    liveTrackAutoScrolled = true;
     requestAnimationFrame(() => {
       currentRow.scrollIntoView({ behavior: "smooth", block: "center" });
     });
@@ -1418,7 +1419,6 @@ if (!alreadySeenTour) {
     if (!isSameTrainReconnect) {
       liveTrackRouteBoundsFit = false;
       liveTrackAutoScrolled = false;
-      liveTrackTimelineAutoScrolled = false;
     }
     if (liveTrackRouteLayer && liveTrackMap) {
       liveTrackMap.removeLayer(liveTrackRouteLayer);
@@ -1619,26 +1619,7 @@ if (!alreadySeenTour) {
 
         liveTrackStats.hidden = false;
         if (liveTrackQuickBar) liveTrackQuickBar.hidden = false;
-        // FEATURE: auto-scroll to the current-position quick bar (map sits
-        // right below it) the first time real data arrives for this train,
-        // instead of leaving the user stranded at the top of the modal to
-        // scroll down past the connect form/options themselves.
-        if (!liveTrackAutoScrolled && liveTrackQuickBar) {
-          liveTrackAutoScrolled = true;
-          requestAnimationFrame(() => {
-            liveTrackQuickBar.scrollIntoView({ behavior: "smooth", block: "start" });
-          });
-        }
-        // FEATURE: more specific than the quick-bar scroll above — once the
-        // "Running status (IRCTC-style)" list actually has a current-station
-        // row to show, jump straight to IT instead (e.g. train 20708 opens
-        // already scrolled to Annavaram). Called after the quick-bar scroll
-        // so, on the very first message where both are available, this one
-        // — being scheduled second in the same animation frame — is what
-        // the view actually lands on; if the current row isn't in the DOM
-        // yet on this particular message, it simply retries on the next one
-        // (see the early-return guard inside scrollTimelineToCurrentOnce).
-        scrollTimelineToCurrentOnce();
+        scrollToLivePositionOnce();
         // FEATURE: "RailRadar wins wherever it has live data" - current
         // station now prefers RailRadar's real GPS-sourced station code
         // over RailKit's own (possibly cache-lagged) pointer when

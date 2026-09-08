@@ -178,18 +178,18 @@ export default function LiveTrackingScreen() {
   // Reconnect for the SAME train) apart from actually switching to a
   // different train. See the same-train guard in connect() below.
   const lastConnectedTrainRef = useRef(null);
-  // FEATURE: auto-scroll straight down to the current-position quick bar
-  // the first time real tracking data arrives for a train, instead of
-  // leaving the connect form at the top and making the user scroll down
-  // manually to see where the train actually is.
+  // FEATURE: auto-scroll straight down to where the train currently is the
+  // first time real tracking data arrives for a train, instead of leaving
+  // the connect form at the top and making the user scroll down manually.
+  // Prefers the current-station row inside "Running status" (most
+  // specific — e.g. train 20708 lands right on its actual current
+  // station), falling back to the quick bar only if that row genuinely
+  // isn't in the DOM yet. See scrollToLivePositionOnce() below — a SINGLE
+  // scrollIntoView call, not two competing ones (an earlier version fired
+  // both back to back, which didn't reliably land on the current row).
   const quickBarRef = useRef(null);
-  const autoScrolledRef = useRef(false);
-  // More specific than the quick bar above: once the "Running status" list
-  // actually has a current-station row, scroll straight to IT instead (see
-  // the effect below, which runs after the quick-bar one so it wins when
-  // both are available on the same update).
   const currentStationRowRef = useRef(null);
-  const timelineAutoScrolledRef = useRef(false);
+  const autoScrolledRef = useRef(false);
 
   // FEATURE: Live delay-trend sparkline — shown as compact text on this
   // already text-only fallback screen, rather than a canvas/SVG chart.
@@ -347,30 +347,21 @@ export default function LiveTrackingScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showMap, payload?.lat, payload?.lng, payload?.current_station, payload?.train_number]);
 
-  // Fires once per train (see the autoScrolledRef reset in connect()) the
-  // first time a real payload arrives, scrolling the quick bar (map sits
-  // just above it) into view. quickBarRef is a <View ref> which, on this
-  // web build, forwards straight to the underlying DOM node — same
-  // ref-is-a-div pattern this file already relies on for the Leaflet map
-  // container above.
+  // Fires once per train (see the autoScrolledRef reset in connect()).
+  // Exactly ONE scrollIntoView call, targeting ONLY the current-station
+  // row inside "Running status" (currentStationRowRef, wired up via
+  // TimelineStopRow's rowRef prop below) — no quick-bar fallback. An
+  // earlier version raced a quick-bar scroll against this one, which per
+  // user report didn't reliably land on the current row, and a fallback
+  // that locked in early never got a chance to correct itself later. This
+  // version simply waits: if the row isn't in the DOM yet on a given
+  // payload, the flag stays false and it retries on the next one.
+  // currentStationRowRef is a <View ref> which, on this web build,
+  // forwards straight to the underlying DOM node — same ref-is-a-div
+  // pattern this file already relies on for the Leaflet map container.
   useEffect(() => {
-    if (!payload || autoScrolledRef.current || !quickBarRef.current) return;
+    if (!payload || autoScrolledRef.current || !currentStationRowRef.current) return;
     autoScrolledRef.current = true;
-    requestAnimationFrame(() => {
-      quickBarRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-    });
-  }, [payload]);
-
-  // Runs after the quick-bar effect above (declared later, so its
-  // rAF-scheduled scroll executes second on the same update and wins) —
-  // once the current-station row actually exists in the "Running status"
-  // list (currentStationRowRef, wired up via TimelineStopRow's rowRef
-  // prop below), jump straight to it instead of just the quick bar. If it
-  // isn't in the DOM yet on this particular payload, this simply retries
-  // on the next one.
-  useEffect(() => {
-    if (!payload || timelineAutoScrolledRef.current || !currentStationRowRef.current) return;
-    timelineAutoScrolledRef.current = true;
     requestAnimationFrame(() => {
       currentStationRowRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
     });
@@ -415,7 +406,6 @@ export default function LiveTrackingScreen() {
       trainMarkerLatLngRef.current = null;
       routeBoundsFitRef.current = false;
       autoScrolledRef.current = false;
-      timelineAutoScrolledRef.current = false;
     }
     lastConnectedTrainRef.current = trainNumber.trim();
 
