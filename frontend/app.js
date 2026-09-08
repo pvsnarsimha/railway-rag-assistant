@@ -666,6 +666,14 @@ if (!alreadySeenTour) {
   let liveTrackReconnectTimer = null;
   let liveTrackMap = null;
   let liveTrackMarker = null;
+  // FEATURE: 2D-animated train marker — see animateMarkerTo() below.
+  // Tracks the marker's own last real lat/lng (distinct from the map's
+  // pan/zoom state) so each new poll can tween smoothly FROM there instead
+  // of Leaflet's normal instant setLatLng() jump. Reset to null whenever a
+  // new tracking session starts (startLiveTrack) so the very first fix
+  // places the marker directly with no animation from nowhere.
+  let liveTrackMarkerAnimFrame = null;
+  let liveTrackMarkerLatLng = null;
   let liveTrackRouteLayer = null;
   let liveTrackRouteBoundsFit = false;
   let liveTrackChart = null;
@@ -846,6 +854,42 @@ if (!alreadySeenTour) {
     if (!img) return;
     img.style.transform = direction === "DOWN" ? "rotate(180deg)" : "rotate(0deg)";
     img.style.transformOrigin = "50% 50%";
+  }
+
+  // FEATURE: 2D-animated train movement. Without this, the marker just
+  // teleports from one lat/lng to the next on every ~5s poll — technically
+  // "live" but visually a jumping pin, not a moving train. This tweens the
+  // marker smoothly across the gap instead (requestAnimationFrame +
+  // ease-in-out), the same kind of sprite-along-a-path motion as a 2D game/
+  // animation, using the real reported positions as the animation's only
+  // two endpoints — never an invented intermediate point off the route.
+  function animateMarkerTo(marker, fromLatLng, toLatLng, durationMs) {
+    if (liveTrackMarkerAnimFrame) {
+      cancelAnimationFrame(liveTrackMarkerAnimFrame);
+      liveTrackMarkerAnimFrame = null;
+    }
+    if (!marker) return;
+    const noMove = fromLatLng && fromLatLng[0] === toLatLng[0] && fromLatLng[1] === toLatLng[1];
+    if (!fromLatLng || noMove) {
+      marker.setLatLng(toLatLng);
+      return;
+    }
+    const [fromLat, fromLng] = fromLatLng;
+    const [toLat, toLng] = toLatLng;
+    const start = performance.now();
+    function step(now) {
+      const t = Math.min(1, (now - start) / durationMs);
+      // easeInOutQuad — eases out of the last stop and into the new fix
+      // rather than moving at a robotic constant speed.
+      const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      marker.setLatLng([fromLat + (toLat - fromLat) * eased, fromLng + (toLng - fromLng) * eased]);
+      if (t < 1) {
+        liveTrackMarkerAnimFrame = requestAnimationFrame(step);
+      } else {
+        liveTrackMarkerAnimFrame = null;
+      }
+    }
+    liveTrackMarkerAnimFrame = requestAnimationFrame(step);
   }
 
   function ensureLiveTrackMap() {
@@ -1336,6 +1380,15 @@ if (!alreadySeenTour) {
       liveTrackMap.removeLayer(liveTrackRouteLayer);
       liveTrackRouteLayer = null;
     }
+    // A DIFFERENT train's last real fix is not a valid animation start
+    // point for this new one — without this reset, the marker would
+    // visibly "glide" across the whole map between two unrelated trains'
+    // positions the moment the new train's first update arrives.
+    if (liveTrackMarkerAnimFrame) {
+      cancelAnimationFrame(liveTrackMarkerAnimFrame);
+      liveTrackMarkerAnimFrame = null;
+    }
+    liveTrackMarkerLatLng = null;
     liveTrackedTrainNumber = trainNumber;
     initLiveTrackChart(trainNumber);
     loadLiveTrackRouteStats(trainNumber); // fire-and-forget; fills in distance fallback when it resolves
@@ -1469,8 +1522,14 @@ if (!alreadySeenTour) {
             liveTrackMarker = trainMarkerIcon
               ? L.marker([markerLat, markerLng], { icon: trainMarkerIcon }).addTo(liveTrackMap)
               : L.marker([markerLat, markerLng]).addTo(liveTrackMap);
+            liveTrackMarkerLatLng = [markerLat, markerLng];
           } else {
-            liveTrackMarker.setLatLng([markerLat, markerLng]);
+            // 2D-animated glide from the last real fix to this one, instead
+            // of an instant jump — see animateMarkerTo() above. 4s tween on
+            // a ~5s poll cadence means it's usually still gliding in as the
+            // next real update arrives, reading as continuous movement.
+            animateMarkerTo(liveTrackMarker, liveTrackMarkerLatLng, [markerLat, markerLng], 4000);
+            liveTrackMarkerLatLng = [markerLat, markerLng];
           }
           liveTrackMarker.bindPopup(`Train ${data.train_number}<br>${escapeHtml(data.current_station || "")}${data.direction ? `<br>Direction: ${escapeHtml(data.direction)}` : ""}`);
           // Rotate/flip the marker to face the auto-detected UP/DOWN

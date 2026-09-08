@@ -49,6 +49,41 @@ const LEAFLET_CSS_URL = "/assets/vendor/leaflet/leaflet.css";
 const LEAFLET_JS_URL = "/assets/vendor/leaflet/leaflet.js";
 const TRAIN_ICON_URL = "/assets/icons/train-marker.png";
 
+// FEATURE: 2D-animated train movement — same idea as the web frontend's
+// animateMarkerTo() in app.js (kept as a separate copy rather than shared,
+// same "this file is a separate Metro entry point" pattern the rest of
+// this module already follows). Tweens the marker smoothly between two
+// REAL reported positions instead of Leaflet's normal instant setLatLng()
+// jump, so the train reads as continuously moving rather than a pin that
+// teleports every ~5s poll.
+let liveMarkerAnimFrame = null;
+function animateMarkerTo(marker, fromLatLng, toLatLng, durationMs) {
+  if (liveMarkerAnimFrame) {
+    cancelAnimationFrame(liveMarkerAnimFrame);
+    liveMarkerAnimFrame = null;
+  }
+  if (!marker) return;
+  const noMove = fromLatLng && fromLatLng[0] === toLatLng[0] && fromLatLng[1] === toLatLng[1];
+  if (!fromLatLng || noMove) {
+    marker.setLatLng(toLatLng);
+    return;
+  }
+  const [fromLat, fromLng] = fromLatLng;
+  const [toLat, toLng] = toLatLng;
+  const start = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - start) / durationMs);
+    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    marker.setLatLng([fromLat + (toLat - fromLat) * eased, fromLng + (toLng - fromLng) * eased]);
+    if (t < 1) {
+      liveMarkerAnimFrame = requestAnimationFrame(step);
+    } else {
+      liveMarkerAnimFrame = null;
+    }
+  }
+  liveMarkerAnimFrame = requestAnimationFrame(step);
+}
+
 let leafletLoadPromise = null;
 function loadLeaflet() {
   if (typeof window === "undefined") return Promise.reject(new Error("no window"));
@@ -60,6 +95,27 @@ function loadLeaflet() {
       link.rel = "stylesheet";
       link.href = LEAFLET_CSS_URL;
       document.head.appendChild(link);
+    }
+    // FEATURE: 2D-animated "live" pulse on the train icon — same keyframes
+    // as the web frontend's .train-marker-icon (frontend/style.css), just
+    // inlined here since this Metro/web bundle has no shared CSS file with
+    // the frontend. Purely visual (the marker's actual movement between
+    // real positions is animated in JS via animateMarkerTo() above).
+    if (!document.getElementById("rn-train-marker-pulse-style")) {
+      const style = document.createElement("style");
+      style.id = "rn-train-marker-pulse-style";
+      style.textContent = `
+        .train-marker-icon {
+          border-radius: 5px; background: #fff; padding: 1px;
+          animation: rnTrainMarkerPulse 1.6s ease-in-out infinite;
+        }
+        @keyframes rnTrainMarkerPulse {
+          0%, 100% { box-shadow: 0 1px 3px rgba(11,37,69,0.45), 0 0 0 0 rgba(193,39,45,0.55); }
+          50% { box-shadow: 0 1px 3px rgba(11,37,69,0.45), 0 0 0 7px rgba(193,39,45,0); }
+        }
+        @media (prefers-reduced-motion: reduce) { .train-marker-icon { animation: none; } }
+      `;
+      document.head.appendChild(style);
     }
     const script = document.createElement("script");
     script.src = LEAFLET_JS_URL;
@@ -115,6 +171,7 @@ export default function LiveTrackingScreen() {
   const leafletMapRef = useRef(null);
   const routeLayerRef = useRef(null);
   const trainMarkerRef = useRef(null);
+  const trainMarkerLatLngRef = useRef(null);
   const routeBoundsFitRef = useRef(false);
 
   // FEATURE: Live delay-trend sparkline — shown as compact text on this
@@ -244,10 +301,17 @@ export default function LiveTrackingScreen() {
     }
     if (lat == null || lng == null) return;
     if (!trainMarkerRef.current) {
-      const icon = L.icon({ iconUrl: TRAIN_ICON_URL, iconSize: [26, 19], iconAnchor: [13, 9.5], popupAnchor: [0, -9] });
+      const icon = L.icon({
+        iconUrl: TRAIN_ICON_URL, iconSize: [26, 19], iconAnchor: [13, 9.5], popupAnchor: [0, -9],
+        className: "train-marker-icon",
+      });
       trainMarkerRef.current = L.marker([lat, lng], { icon }).addTo(leafletMapRef.current);
+      trainMarkerLatLngRef.current = [lat, lng];
     } else {
-      trainMarkerRef.current.setLatLng([lat, lng]);
+      // 2D-animated glide from the last real fix to this one — see
+      // animateMarkerTo() near the top of this file.
+      animateMarkerTo(trainMarkerRef.current, trainMarkerLatLngRef.current, [lat, lng], 4000);
+      trainMarkerLatLngRef.current = [lat, lng];
     }
     trainMarkerRef.current.bindPopup(
       `Train ${payload?.train_number || trainNumber}${payload?.current_station ? `<br>${payload.current_station}` : ""}`
@@ -279,6 +343,10 @@ export default function LiveTrackingScreen() {
     if (leafletMapRef.current) {
       if (routeLayerRef.current) { leafletMapRef.current.removeLayer(routeLayerRef.current); routeLayerRef.current = null; }
       if (trainMarkerRef.current) { leafletMapRef.current.removeLayer(trainMarkerRef.current); trainMarkerRef.current = null; }
+    }
+    if (liveMarkerAnimFrame) {
+      cancelAnimationFrame(liveMarkerAnimFrame);
+      liveMarkerAnimFrame = null;
     }
     routeBoundsFitRef.current = false;
 

@@ -776,12 +776,25 @@ html, body {
 /* ============================================================ */
 .train-marker-icon {
   border-radius: 5px;
-  box-shadow: 0 1px 3px rgba(11, 37, 69, 0.45);
   background: #fff;
   padding: 1px;
   /* transform is set dynamically per-tick by applyTrainMarkerDirection()
      in app.js, based on the backend's auto-detected UP/DOWN direction */
   transition: transform 0.25s ease;
+  /* FEATURE: 2D-animated "live" pulse — a soft expanding ring so the icon
+     visibly breathes/moves even between position updates, instead of
+     sitting as a static pin. The actual movement between real positions is
+     animated separately (see animateMarkerTo() in app.js); this pulse is
+     what makes it read as a live, animated train rather than a photo of
+     one, matching the lively feel of a 2D train animation. */
+  animation: trainMarkerPulse 1.6s ease-in-out infinite;
+}
+@keyframes trainMarkerPulse {
+  0%, 100% { box-shadow: 0 1px 3px rgba(11, 37, 69, 0.45), 0 0 0 0 rgba(193, 39, 45, 0.55); }
+  50% { box-shadow: 0 1px 3px rgba(11, 37, 69, 0.45), 0 0 0 7px rgba(193, 39, 45, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .train-marker-icon { animation: none; }
 }
 
 /* ============================================================ */
