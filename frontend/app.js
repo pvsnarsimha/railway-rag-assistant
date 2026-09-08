@@ -1357,6 +1357,14 @@ if (!alreadySeenTour) {
   }
 
   function startLiveTrack(trainNumber) {
+    // A dropped socket auto-reconnecting to the SAME train (Render's free
+    // tier idles/drops websockets periodically) must NOT be treated as
+    // "started tracking a new train" for view state — doing so re-ran
+    // fitBounds on every reconnect, snapping the whole map to a new
+    // pan/zoom around the train's now-different position instead of just
+    // letting the marker glide, which read as the map itself jumping
+    // around. Only reset view/animation state for an actual train change.
+    const isSameTrainReconnect = trainNumber === liveTrackedTrainNumber;
     closeLiveTrackSocket();
     liveTrackWantsConnection = true;
     setStatus(liveTrackStatus, `Connecting to live feed for train ${trainNumber}…`);
@@ -1375,7 +1383,9 @@ if (!alreadySeenTour) {
     if (ltExplainResultEl) ltExplainResultEl.hidden = true;
     const ltCrowdBadgeCardEl = document.getElementById("ltCrowdBadgeCard");
     if (ltCrowdBadgeCardEl) ltCrowdBadgeCardEl.hidden = true;
-    liveTrackRouteBoundsFit = false;
+    if (!isSameTrainReconnect) {
+      liveTrackRouteBoundsFit = false;
+    }
     if (liveTrackRouteLayer && liveTrackMap) {
       liveTrackMap.removeLayer(liveTrackRouteLayer);
       liveTrackRouteLayer = null;
@@ -1383,12 +1393,16 @@ if (!alreadySeenTour) {
     // A DIFFERENT train's last real fix is not a valid animation start
     // point for this new one — without this reset, the marker would
     // visibly "glide" across the whole map between two unrelated trains'
-    // positions the moment the new train's first update arrives.
-    if (liveTrackMarkerAnimFrame) {
-      cancelAnimationFrame(liveTrackMarkerAnimFrame);
-      liveTrackMarkerAnimFrame = null;
+    // positions the moment the new train's first update arrives. On a
+    // same-train reconnect, though, keep the anim state so the marker
+    // still glides smoothly into its next real fix instead of snapping.
+    if (!isSameTrainReconnect) {
+      if (liveTrackMarkerAnimFrame) {
+        cancelAnimationFrame(liveTrackMarkerAnimFrame);
+        liveTrackMarkerAnimFrame = null;
+      }
+      liveTrackMarkerLatLng = null;
     }
-    liveTrackMarkerLatLng = null;
     liveTrackedTrainNumber = trainNumber;
     initLiveTrackChart(trainNumber);
     loadLiveTrackRouteStats(trainNumber); // fire-and-forget; fills in distance fallback when it resolves

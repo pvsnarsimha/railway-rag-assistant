@@ -173,6 +173,11 @@ export default function LiveTrackingScreen() {
   const trainMarkerRef = useRef(null);
   const trainMarkerLatLngRef = useRef(null);
   const routeBoundsFitRef = useRef(false);
+  // Which train "Reconnect"/"Start tracking" last connected to — lets
+  // connect() tell a same-train reconnect (socket dropped, user tapped
+  // Reconnect for the SAME train) apart from actually switching to a
+  // different train. See the same-train guard in connect() below.
+  const lastConnectedTrainRef = useRef(null);
 
   // FEATURE: Live delay-trend sparkline — shown as compact text on this
   // already text-only fallback screen, rather than a canvas/SVG chart.
@@ -330,6 +335,12 @@ export default function LiveTrackingScreen() {
 
   function connect() {
     if (!trainNumber.trim()) return;
+    // Reconnecting to the SAME train (socket dropped, user tapped
+    // "Reconnect") must not be treated as switching trains — wiping the
+    // marker/route/fitBounds state here made the map visibly jump/re-fit
+    // to a new pan+zoom on every reconnect instead of just letting the
+    // marker glide onto its next real position on a static map.
+    const isSameTrainReconnect = trainNumber.trim() === lastConnectedTrainRef.current;
     disconnect();
     setPayload(null);
     setConnection("connecting");
@@ -338,17 +349,21 @@ export default function LiveTrackingScreen() {
     setTripSummary(null);
     setTripSummaryShareStatus(null);
 
-    // A stale route/marker from a PREVIOUSLY tracked train would be
-    // actively misleading pinned to the new train's map.
-    if (leafletMapRef.current) {
-      if (routeLayerRef.current) { leafletMapRef.current.removeLayer(routeLayerRef.current); routeLayerRef.current = null; }
-      if (trainMarkerRef.current) { leafletMapRef.current.removeLayer(trainMarkerRef.current); trainMarkerRef.current = null; }
+    if (!isSameTrainReconnect) {
+      // A stale route/marker from a PREVIOUSLY tracked train would be
+      // actively misleading pinned to the new train's map.
+      if (leafletMapRef.current) {
+        if (routeLayerRef.current) { leafletMapRef.current.removeLayer(routeLayerRef.current); routeLayerRef.current = null; }
+        if (trainMarkerRef.current) { leafletMapRef.current.removeLayer(trainMarkerRef.current); trainMarkerRef.current = null; }
+      }
+      if (liveMarkerAnimFrame) {
+        cancelAnimationFrame(liveMarkerAnimFrame);
+        liveMarkerAnimFrame = null;
+      }
+      trainMarkerLatLngRef.current = null;
+      routeBoundsFitRef.current = false;
     }
-    if (liveMarkerAnimFrame) {
-      cancelAnimationFrame(liveMarkerAnimFrame);
-      liveMarkerAnimFrame = null;
-    }
-    routeBoundsFitRef.current = false;
+    lastConnectedTrainRef.current = trainNumber.trim();
 
     const url = buildTrackingWsUrl(wsBaseUrl, trainNumber.trim(), {
       date: trackDate.trim() || undefined,
