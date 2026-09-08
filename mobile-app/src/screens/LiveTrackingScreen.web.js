@@ -178,6 +178,12 @@ export default function LiveTrackingScreen() {
   // Reconnect for the SAME train) apart from actually switching to a
   // different train. See the same-train guard in connect() below.
   const lastConnectedTrainRef = useRef(null);
+  // FEATURE: auto-scroll straight down to the current-position quick bar
+  // the first time real tracking data arrives for a train, instead of
+  // leaving the connect form at the top and making the user scroll down
+  // manually to see where the train actually is.
+  const quickBarRef = useRef(null);
+  const autoScrolledRef = useRef(false);
 
   // FEATURE: Live delay-trend sparkline — shown as compact text on this
   // already text-only fallback screen, rather than a canvas/SVG chart.
@@ -318,11 +324,31 @@ export default function LiveTrackingScreen() {
       animateMarkerTo(trainMarkerRef.current, trainMarkerLatLngRef.current, [lat, lng], 4000);
       trainMarkerLatLngRef.current = [lat, lng];
     }
+    // autoPan: false — Leaflet's default popup behaviour pans the whole
+    // map to fit the popup on open, which made tapping the train icon
+    // itself look like the map "moved" even though the train's actual
+    // position hadn't changed. Tapping the icon should only show its
+    // popup, never move the view.
     trainMarkerRef.current.bindPopup(
-      `Train ${payload?.train_number || trainNumber}${payload?.current_station ? `<br>${payload.current_station}` : ""}`
+      `Train ${payload?.train_number || trainNumber}${payload?.current_station ? `<br>${payload.current_station}` : ""}`,
+      { autoPan: false }
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showMap, payload?.lat, payload?.lng, payload?.current_station, payload?.train_number]);
+
+  // Fires once per train (see the autoScrolledRef reset in connect()) the
+  // first time a real payload arrives, scrolling the quick bar (map sits
+  // just above it) into view. quickBarRef is a <View ref> which, on this
+  // web build, forwards straight to the underlying DOM node — same
+  // ref-is-a-div pattern this file already relies on for the Leaflet map
+  // container above.
+  useEffect(() => {
+    if (!payload || autoScrolledRef.current || !quickBarRef.current) return;
+    autoScrolledRef.current = true;
+    requestAnimationFrame(() => {
+      quickBarRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    });
+  }, [payload]);
 
   const refreshNow = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -362,6 +388,7 @@ export default function LiveTrackingScreen() {
       }
       trainMarkerLatLngRef.current = null;
       routeBoundsFitRef.current = false;
+      autoScrolledRef.current = false;
     }
     lastConnectedTrainRef.current = trainNumber.trim();
 
@@ -550,7 +577,7 @@ export default function LiveTrackingScreen() {
           {/* RailYatri-style "Next: <station>  ETA <time>  <delay pill>"
               quick-glance bar — the headline element now, same idea as the
               web frontend's #liveTrackQuickBar. */}
-          <View style={styles.quickBar}>
+          <View ref={quickBarRef} style={styles.quickBar}>
             <Text style={styles.quickBarIcon}>🚆</Text>
             <Text style={styles.quickBarText}>
               Next: <Text style={styles.quickBarStation}>{payload.next_station || "—"}</Text>

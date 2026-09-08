@@ -678,6 +678,11 @@ if (!alreadySeenTour) {
   let liveTrackRouteBoundsFit = false;
   let liveTrackChart = null;
   let liveTrackedTrainNumber = null;
+  // FEATURE: auto-scroll straight to the live position once, the first
+  // time real tracking data arrives for this session — see the reset in
+  // startLiveTrack() and the trigger point below where the quick bar is
+  // first revealed.
+  let liveTrackAutoScrolled = false;
   // Explainable AI + Crowd-Sourced Positions, overlaid on THIS live map —
   // see the handlers wired below liveTrackForm's submit listener.
   let lastKnownDelayMinutes = null;
@@ -1385,6 +1390,7 @@ if (!alreadySeenTour) {
     if (ltCrowdBadgeCardEl) ltCrowdBadgeCardEl.hidden = true;
     if (!isSameTrainReconnect) {
       liveTrackRouteBoundsFit = false;
+      liveTrackAutoScrolled = false;
     }
     if (liveTrackRouteLayer && liveTrackMap) {
       liveTrackMap.removeLayer(liveTrackRouteLayer);
@@ -1545,7 +1551,12 @@ if (!alreadySeenTour) {
             animateMarkerTo(liveTrackMarker, liveTrackMarkerLatLng, [markerLat, markerLng], 4000);
             liveTrackMarkerLatLng = [markerLat, markerLng];
           }
-          liveTrackMarker.bindPopup(`Train ${data.train_number}<br>${escapeHtml(data.current_station || "")}${data.direction ? `<br>Direction: ${escapeHtml(data.direction)}` : ""}`);
+          // autoPan: false — Leaflet's default popup behaviour pans the
+          // whole map to fit the popup on open, which made tapping the
+          // train icon itself look like the map "moved" even though
+          // nothing about the train's actual position changed. Tapping
+          // the icon should only show its popup, never move the view.
+          liveTrackMarker.bindPopup(`Train ${data.train_number}<br>${escapeHtml(data.current_station || "")}${data.direction ? `<br>Direction: ${escapeHtml(data.direction)}` : ""}`, { autoPan: false });
           // Rotate/flip the marker to face the auto-detected UP/DOWN
           // direction — re-applied every tick since Leaflet may recreate
           // the marker's <img> element internally.
@@ -1580,6 +1591,16 @@ if (!alreadySeenTour) {
 
         liveTrackStats.hidden = false;
         if (liveTrackQuickBar) liveTrackQuickBar.hidden = false;
+        // FEATURE: auto-scroll to the current-position quick bar (map sits
+        // right below it) the first time real data arrives for this train,
+        // instead of leaving the user stranded at the top of the modal to
+        // scroll down past the connect form/options themselves.
+        if (!liveTrackAutoScrolled && liveTrackQuickBar) {
+          liveTrackAutoScrolled = true;
+          requestAnimationFrame(() => {
+            liveTrackQuickBar.scrollIntoView({ behavior: "smooth", block: "start" });
+          });
+        }
         // FEATURE: "RailRadar wins wherever it has live data" - current
         // station now prefers RailRadar's real GPS-sourced station code
         // over RailKit's own (possibly cache-lagged) pointer when
