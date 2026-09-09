@@ -458,7 +458,49 @@ def parse_full_timeline(track_data: dict, train_info_data: dict = None):
     # RailYatri-style "N km from <last reporting station>" for every small
     # passing/intermediate stop - see _annotate_distance_since_last_stoppage.
     _annotate_distance_since_last_stoppage(stops)
+    # BUGFIX: RailKit returns a literal sentinel word instead of a real
+    # clock time for the one event a station genuinely doesn't have -
+    # "SRC" for the ORIGIN's arrival (the train starts there, it never
+    # "arrives") and "DSTN" for the DESTINATION's departure (the train
+    # ends there, it never "departs" again). That sentinel was passed
+    # straight through into scheduled/expected/actual untouched, so the
+    # UI rendered it raw ("Exp DSTN Act DSTN") as if it were a real,
+    # unconfirmed time - reading as broken data rather than what it
+    # actually means. The origin and destination each genuinely only have
+    # ONE real clock event (the single arrival+departure pair recorded
+    # for that halt), so mirroring that one real event onto the
+    # placeholder side is honest, matches how a station board actually
+    # treats it, and means every downstream consumer (delay badges,
+    # formatting) just sees a normal real timing - no sentinel-specific
+    # handling needed anywhere else in the app.
+    if stops:
+        origin = stops[0]
+        if _timing_has_no_real_event(origin.arrival) and not _timing_has_no_real_event(origin.departure):
+            origin.arrival = StopTiming(
+                scheduled=origin.departure.scheduled, expected=origin.departure.expected,
+                actual=origin.departure.actual, delay_minutes=origin.departure.delay_minutes,
+            )
+        destination = stops[-1]
+        if _timing_has_no_real_event(destination.departure) and not _timing_has_no_real_event(destination.arrival):
+            destination.departure = StopTiming(
+                scheduled=destination.arrival.scheduled, expected=destination.arrival.expected,
+                actual=destination.arrival.actual, delay_minutes=destination.arrival.delay_minutes,
+            )
     return stops
+
+
+def _timing_has_no_real_event(timing: StopTiming) -> bool:
+    """True if none of this StopTiming's scheduled/expected/actual fields
+    parse as a real clock time - i.e. this event genuinely doesn't exist
+    for this station (RailKit's "SRC"/"DSTN" sentinels, missing data, etc.)
+    rather than just being momentarily unconfirmed. Reuses
+    _time_str_to_minutes so "is this a real time" is judged the exact same
+    way everywhere else in this file."""
+    return (
+        _time_str_to_minutes(timing.scheduled) is None
+        and _time_str_to_minutes(timing.expected) is None
+        and _time_str_to_minutes(timing.actual) is None
+    )
 
 
 def _interpolate_missing_distance_km(stops) -> None:
