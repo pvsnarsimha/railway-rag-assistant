@@ -939,7 +939,24 @@ if (!alreadySeenTour) {
     const actual = stations.map((s) =>
       (s.arrival && s.arrival.delay_minutes != null && !s.arrival.actual_is_predicted) ? s.arrival.delay_minutes : null
     );
-    const expected = stations.map((s) => (s.predicted_delay_minutes != null ? s.predicted_delay_minutes : null));
+    // FEATURE: predicted-vs-actual comparison. `predicted_delay_minutes`
+    // only exists on a station while it's still "upcoming" (the backend
+    // stops computing it the instant a station is actually reached), so
+    // once a station flips to passed/current this used to drop straight
+    // to a bare null - the "Expected delay" bar disappeared right when
+    // checking the prediction against reality would be most interesting.
+    // `final_predicted_delay_minutes` (see backend's
+    // _snapshot_prediction_before_arrival) is a snapshot of that same
+    // figure taken right before arrival and frozen there, so it's used as
+    // a fallback here - a just-reached station still shows its "Expected"
+    // bar (what was predicted right before arrival) right next to its now
+    // real "Actual" bar, letting the chart do the trust-building
+    // comparison the live badge already does station-by-station.
+    const expected = stations.map((s) => {
+      if (s.predicted_delay_minutes != null) return s.predicted_delay_minutes;
+      if (s.final_predicted_delay_minutes != null) return s.final_predicted_delay_minutes;
+      return null;
+    });
     return { labels, actual, expected };
   }
 
@@ -1168,19 +1185,33 @@ if (!alreadySeenTour) {
     const hasBand = s.predicted_delay_low_minutes != null && s.predicted_delay_high_minutes != null;
     const bandText = hasBand ? ` (${formatDelayDuration(s.predicted_delay_low_minutes)}\u2013${formatDelayDuration(s.predicted_delay_high_minutes)})` : "";
     const etaText = s.predicted_eta ? ` · ETA ~${escapeHtml(s.predicted_eta)}` : "";
-    // FEATURE: cross-method agreement tag - when the ML ensemble, the
-    // trend/speed/weather heuristic, and the real actual-vs-expected
-    // arithmetic all land close together (independently, not the same
-    // number restated), that's a genuinely higher-confidence prediction
-    // and gets flagged as such. There's no live API for other apps'
-    // numbers to compare against directly - this is the honest, buildable
-    // alternative: agreement across OUR OWN independently-computed methods.
-    const isVeryHigh = s.predicted_delay_confidence === "Very High";
-    const verified = isVeryHigh
-      ? `<span class="live-timeline__verified" title="${s.prediction_methods_compared || 0} independent methods agreed within ${s.prediction_agreement_minutes} min">✓ cross-verified</span>`
-      : "";
+    // FEATURE: "locked in" badge - once the nearest upcoming intermediate
+    // point right before this station has real, math-grounded evidence
+    // (not a model guess) for its own arrival, this station's prediction
+    // gets anchored to it and locked in for the rest of the journey (see
+    // backend's nearest-grounded-intermediate anchor pass and
+    // _lock_grounded_station_predictions) - real case: KAZIPET F CABIN,
+    // 6.8 km before WARANGAL, grounded within 2 min of WARANGAL's actual
+    // recorded arrival. This is a stronger, more literal signal than the
+    // cross-method-agreement badge below, so it takes priority and names
+    // the real station it's anchored to whenever there is one, rather
+    // than a vague "verified" claim.
+    const groundedVia = s.predicted_delay_grounded_via || s.predicted_delay_locked_via;
+    let confidenceBadge = "";
+    if (groundedVia) {
+      confidenceBadge = `<span class="live-timeline__verified" title="Anchored to ${escapeHtml(groundedVia)}'s own real-time-grounded arrival - locked in, won't change again this journey">✓ confirmed via ${escapeHtml(groundedVia)}</span>`;
+    } else if (s.predicted_delay_locked) {
+      confidenceBadge = `<span class="live-timeline__verified" title="This station's own real schedule vs. live position math grounded this prediction - locked in, won't change again this journey">✓ locked in</span>`;
+    } else if (s.predicted_delay_confidence === "Very High" && s.prediction_methods_compared) {
+      // Original cross-method-agreement signal - only shown when it
+      // actually came from that convergence check (prediction_methods_compared
+      // is set), not just because confidence happens to read "Very High"
+      // for some other honest reason, which would otherwise show a
+      // misleading "0 independent methods agreed" tooltip.
+      confidenceBadge = `<span class="live-timeline__verified" title="${s.prediction_methods_compared} independent methods agreed within ${s.prediction_agreement_minutes} min">✓ cross-verified</span>`;
+    }
     return `<span class="live-timeline__predicted ${cls}" title="Estimated, ${escapeHtml(s.predicted_delay_confidence || "?")} confidence">
-      ~${formatDelayDuration(s.predicted_delay_minutes)}${bandText} late (predicted)${etaText} ${verified}
+      ~${formatDelayDuration(s.predicted_delay_minutes)}${bandText} late (predicted)${etaText} ${confidenceBadge}
     </span>`;
   }
 

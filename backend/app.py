@@ -928,6 +928,33 @@ def _predict_delay_per_reporting_station(
             eta_speed = eta_speed_kmph or avg_speed_kmph
             stop["predicted_eta"] = gps_tracking.compute_live_eta(distance_ahead_km, eta_speed)
             stop["distance_ahead_km"] = round(distance_ahead_km, 1) if distance_ahead_km is not None else None
+            # FEATURE: ground an intermediate point's OWN delay too, purely
+            # as an internal anchor for the "nearest grounded intermediate"
+            # pass right after this loop - never exposed as this point's own
+            # predicted_delay_minutes (that stays reporting-stops-only, see
+            # the note above this block). Real case that motivated this: a
+            # small cabin/signal point (e.g. KAZIPET F CABIN) just a few km
+            # ahead of a real reporting halt (WARANGAL) often already HAS a
+            # real scheduled passing time from RailKit, so the same real
+            # "predicted_eta vs that real schedule" arithmetic used for
+            # reporting stations below is just as honest here - it's ONLY
+            # withheld from display because showing it as its own delay
+            # figure was confusing next to a real halt a few km away, not
+            # because the underlying math is any less real. When RailKit
+            # doesn't give this point its own schedule (most intermediate
+            # points don't), this simply stays ungrounded and is skipped by
+            # the anchor pass, exactly like today.
+            intermediate_anchor = (stop.get("arrival") or {}).get("expected") or (stop.get("arrival") or {}).get("scheduled")
+            intermediate_anchor_min = gps_tracking._time_str_to_minutes(intermediate_anchor)
+            intermediate_eta_min = gps_tracking._time_str_to_minutes(stop["predicted_eta"])
+            if intermediate_anchor_min is not None and intermediate_eta_min is not None:
+                i_diff = intermediate_eta_min - intermediate_anchor_min
+                if i_diff < -720:
+                    i_diff += 1440
+                elif i_diff > 720:
+                    i_diff -= 1440
+                stop["_intermediate_grounded_delay_minutes"] = max(0, min(400, round(i_diff)))
+                stop["_intermediate_grounded"] = True
             continue
 
         route_progress_ratio = None
@@ -1086,6 +1113,72 @@ def _predict_delay_per_reporting_station(
         stop["predicted_delay_low_minutes"] = max(0, low - extra)
         stop["predicted_delay_high_minutes"] = high + extra
 
+    # FEATURE: nearest-grounded-intermediate anchor pass. Request was to
+    # treat a reporting station's "final" predicted time as settled once
+    # the very last intermediate/non-reporting point immediately before it
+    # is itself grounded (real schedule vs. real-time ETA math, not a
+    # guess) — real case that motivated this: KAZIPET F CABIN, 6.8 km
+    # before WARANGAL, showed a grounded +10 min (predicted arrival 16:45)
+    # while the train was still en route; WARANGAL's own real recorded
+    # arrival came in at 16:47 — a 2-minute miss over the whole remaining
+    # gap, far tighter than the blended ML/heuristic figure. A point this
+    # close, with real math behind it (not the ML ensemble/heuristic
+    # blend), is about as good a predictor of the NEXT halt's arrival as
+    # this app can produce, so it now WINS outright for that one next
+    # reporting station — not just a floor like the neighbor-consistency
+    # pass below (which only ever raises a number, and only within 25 km
+    # of ANY grounded reporting station, not specifically the immediately
+    # preceding intermediate one). Only the single nearest grounded
+    # intermediate point since the LAST reporting station counts (never
+    # reaches past an earlier reporting halt to "borrow" a stale anchor),
+    # and only for a station that isn't already grounded by its own real
+    # schedule - a station's own real grounding always outranks a
+    # borrowed one. Runs BEFORE the neighbor-consistency pass so a station
+    # anchored this way also counts as a legitimate grounded neighbor for
+    # it, the same as if it had grounded itself.
+    last_intermediate_grounded_delay = None
+    last_intermediate_grounded_name = None
+    for s in timeline_json:
+        if s.get("status") != "upcoming":
+            # A passed/current stop (reporting or not) marks the boundary
+            # of "since the last reporting station" - whatever intermediate
+            # anchor was seen before it no longer applies further ahead.
+            last_intermediate_grounded_delay = None
+            last_intermediate_grounded_name = None
+            continue
+        if s.get("kind") == "intermediate":
+            if s.get("_intermediate_grounded"):
+                last_intermediate_grounded_delay = s["_intermediate_grounded_delay_minutes"]
+                last_intermediate_grounded_name = s.get("name")
+            continue
+        # Reporting station reached: apply the pending anchor (if any),
+        # then the anchor resets - it's consumed by the very next
+        # reporting station only, never carried past it.
+        if (last_intermediate_grounded_delay is not None
+                and not s.get("predicted_delay_is_grounded")
+                and s.get("predicted_delay_minutes") is not None):
+            anchor_delay = last_intermediate_grounded_delay
+            s["predicted_delay_minutes"] = anchor_delay
+            s["predicted_delay_confidence"] = "Very High"
+            s["predicted_delay_is_grounded"] = True
+            s["predicted_delay_grounded_via"] = last_intermediate_grounded_name
+            low, high = delay_prediction._confidence_band(anchor_delay, "Very High")
+            s["predicted_delay_low_minutes"] = max(0, low)
+            s["predicted_delay_high_minutes"] = high
+            # Keep predicted_eta consistent with the anchored delay: real
+            # schedule (expected/scheduled) + the anchored delay, same
+            # arithmetic pattern used everywhere else in this function -
+            # only when this station has its own real schedule to add it
+            # to; otherwise the existing real-time-distance ETA is left as
+            # the best available figure.
+            own_anchor_time = (s.get("arrival") or {}).get("expected") or (s.get("arrival") or {}).get("scheduled")
+            own_anchor_min = gps_tracking._time_str_to_minutes(own_anchor_time)
+            if own_anchor_min is not None:
+                eta_dt = datetime.strptime(f"{own_anchor_min // 60:02d}:{own_anchor_min % 60:02d}", "%H:%M") + timedelta(minutes=anchor_delay)
+                s["predicted_eta"] = eta_dt.strftime("%H:%M")
+        last_intermediate_grounded_delay = None
+        last_intermediate_grounded_name = None
+
     # FEATURE: neighbor-consistency pass. A station without its own real
     # schedule (common for signalling cabins / small halts RailKit's
     # timetable doesn't carry a time for - e.g. "F Cabin" points) falls
@@ -1227,6 +1320,153 @@ def _predict_delay_per_reporting_station(
             else:
                 event["delay_minutes"] = final_delay
             event["actual_is_predicted"] = True  # tells the frontend this is OUR model's estimate, not RailKit's own recorded value
+
+
+def _lock_grounded_station_predictions(timeline_json: list, locked_predictions: dict) -> None:
+    """
+    FEATURE: once a reporting station's predicted delay becomes GROUNDED
+    (real schedule-vs-ETA math, or inherited from the nearest grounded
+    intermediate point right before it — see the anchor pass above), lock
+    that number in for the rest of the journey instead of letting it keep
+    changing poll to poll. Request was specifically about user trust: a
+    predicted time that visibly shifts between refreshes (even if each
+    individual figure was defensible) reads as the app not really knowing
+    what it's doing, even when the underlying math is sound. Once real
+    evidence has spoken for a station, there's no good reason to let a
+    LATER, less-certain recomputation replace it with something different.
+
+    `locked_predictions` is a plain dict the caller owns and passes back in
+    every poll — for the live WebSocket feed that's a local variable living
+    for the lifetime of one connection (same pattern as delay_tracker/
+    speed_tracker in ws_track_train), so a fresh connection/tab starts with
+    no locks and a station only ever locks in once real/grounded evidence
+    for THAT run has actually been seen.
+
+    A station is unlocked (and its stale lock, if any, is dropped) the
+    moment it's actually reached (status != "upcoming") - real recorded
+    arrival/departure data always wins outright and is never touched here,
+    matching every other pass in this file.
+    """
+    for stop in timeline_json:
+        if stop.get("kind") == "intermediate":
+            continue
+        code = (stop.get("code") or "").strip().upper()
+        if not code:
+            continue
+        if stop.get("status") != "upcoming":
+            locked_predictions.pop(code, None)
+            continue
+
+        arrival = stop.get("arrival") if isinstance(stop.get("arrival"), dict) else None
+        departure = stop.get("departure") if isinstance(stop.get("departure"), dict) else None
+        # Real provider data (RailRadar's own confirmed value, flagged
+        # actual_is_predicted=False - see rr_actual above) always wins
+        # outright, same rule as everywhere else in this file: it's never
+        # blocked by a stale lock, and it drops any existing lock rather
+        # than being overwritten by an older, less-accurate model guess.
+        arrival_is_real = bool(arrival) and arrival.get("actual_is_predicted") is False
+        departure_is_real = bool(departure) and departure.get("actual_is_predicted") is False
+        if arrival_is_real or departure_is_real:
+            locked_predictions.pop(code, None)
+            continue
+
+        existing_lock = locked_predictions.get(code)
+        if existing_lock is not None:
+            stop["predicted_delay_minutes"] = existing_lock["predicted_delay_minutes"]
+            stop["predicted_eta"] = existing_lock["predicted_eta"]
+            stop["predicted_delay_confidence"] = existing_lock["predicted_delay_confidence"]
+            stop["predicted_delay_low_minutes"] = existing_lock["predicted_delay_low_minutes"]
+            stop["predicted_delay_high_minutes"] = existing_lock["predicted_delay_high_minutes"]
+            stop["predicted_delay_is_grounded"] = True
+            stop["predicted_delay_locked"] = True
+            stop["predicted_delay_locked_via"] = existing_lock.get("locked_via")
+            if arrival is not None and existing_lock.get("arrival_actual") is not None:
+                arrival["actual"] = existing_lock["arrival_actual"]
+                arrival["delay_minutes"] = existing_lock["arrival_delay_minutes"]
+                arrival["actual_is_predicted"] = True
+            if departure is not None and existing_lock.get("departure_actual") is not None:
+                departure["actual"] = existing_lock["departure_actual"]
+                departure["delay_minutes"] = existing_lock["departure_delay_minutes"]
+                departure["actual_is_predicted"] = True
+        elif stop.get("predicted_delay_is_grounded") and stop.get("predicted_delay_minutes") is not None:
+            locked_predictions[code] = {
+                "predicted_delay_minutes": stop.get("predicted_delay_minutes"),
+                "predicted_eta": stop.get("predicted_eta"),
+                "predicted_delay_confidence": stop.get("predicted_delay_confidence"),
+                "predicted_delay_low_minutes": stop.get("predicted_delay_low_minutes"),
+                "predicted_delay_high_minutes": stop.get("predicted_delay_high_minutes"),
+                # None (not a fallback string) when this station grounded
+                # ITSELF (its own real schedule vs. its own live ETA) rather
+                # than inheriting from a nearby intermediate point - the
+                # frontend badge only names a specific "via" station when
+                # this is actually set, and shows a plain "locked in" badge
+                # otherwise, so it never claims to have verified against a
+                # station it didn't.
+                "locked_via": stop.get("predicted_delay_grounded_via"),
+                "arrival_actual": arrival.get("actual") if arrival else None,
+                "arrival_delay_minutes": arrival.get("delay_minutes") if arrival else None,
+                "departure_actual": departure.get("actual") if departure else None,
+                "departure_delay_minutes": departure.get("delay_minutes") if departure else None,
+            }
+            stop["predicted_delay_locked"] = True
+            stop["predicted_delay_locked_via"] = locked_predictions[code]["locked_via"]
+
+
+def _snapshot_prediction_before_arrival(timeline_json: list, final_predictions: dict) -> None:
+    """
+    FEATURE: "predicted vs. actual" comparison on the per-station delay
+    chart. Request was specifically to build user trust by letting people
+    SEE how close a prediction came once a station is actually reached —
+    right now the chart only ever shows one bar per station (the live
+    predicted_delay_minutes while it's still "upcoming", which flips to
+    None the instant the station becomes "passed"/"current" since
+    _predict_delay_per_reporting_station only computes that field for
+    still-upcoming stops - the prediction is silently thrown away right
+    when it would be most interesting to check against reality).
+
+    This keeps a running snapshot of each reporting station's freshest
+    predicted delay while it's still upcoming (naturally picking up
+    whatever _lock_grounded_station_predictions has already locked in, so
+    a station's "final" comparison figure is the same trustworthy number
+    shown right before arrival, not a stale early guess) - written onto
+    `final_predicted_delay_minutes` / `final_predicted_delay_confidence`
+    every poll. The moment the station is actually reached, this stops
+    updating (the snapshot is only refreshed while status == "upcoming"),
+    so those two fields naturally freeze at "whatever we predicted right
+    before arrival" while the station's own real `arrival`/`departure`
+    events carry the genuine actual delay alongside it - giving the chart
+    everything it needs to show both bars side by side for a
+    just-reached station.
+
+    `final_predictions` is a plain dict the caller owns and passes back
+    every poll (same per-connection-lifetime pattern as
+    locked_predictions in _lock_grounded_station_predictions) - a fresh
+    connection starts empty, so a station already passed before this
+    session started simply has nothing to compare (there was no chance to
+    see its pre-arrival prediction), which is the honest answer rather
+    than a guess.
+    """
+    for stop in timeline_json:
+        if stop.get("kind") == "intermediate":
+            continue
+        code = (stop.get("code") or "").strip().upper()
+        if not code:
+            continue
+        if stop.get("status") == "upcoming" and stop.get("predicted_delay_minutes") is not None:
+            final_predictions[code] = {
+                "predicted_delay_minutes": stop.get("predicted_delay_minutes"),
+                "predicted_delay_confidence": stop.get("predicted_delay_confidence"),
+                "predicted_delay_low_minutes": stop.get("predicted_delay_low_minutes"),
+                "predicted_delay_high_minutes": stop.get("predicted_delay_high_minutes"),
+                "predicted_delay_locked": bool(stop.get("predicted_delay_locked")),
+            }
+        snapshot = final_predictions.get(code)
+        if snapshot is not None:
+            stop["final_predicted_delay_minutes"] = snapshot["predicted_delay_minutes"]
+            stop["final_predicted_delay_confidence"] = snapshot["predicted_delay_confidence"]
+            stop["final_predicted_delay_low_minutes"] = snapshot["predicted_delay_low_minutes"]
+            stop["final_predicted_delay_high_minutes"] = snapshot["predicted_delay_high_minutes"]
+            stop["final_predicted_delay_was_locked"] = snapshot["predicted_delay_locked"]
 
 
 def _mirror_origin_destination_timing(timeline_json: list) -> None:
@@ -4084,6 +4324,17 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     # a real, uncached RailKit fetch right when the station change is
     # actually expected, instead of waiting out the rest of the cache TTL.
     force_refresh_next_poll = False
+    # FEATURE: per-station predicted-delay "lock-in" — see
+    # _lock_grounded_station_predictions. Lives for the lifetime of THIS
+    # connection only, same reasoning as the trackers above: a fresh
+    # connection/tab has no prior grounded evidence to carry over, so every
+    # station starts unlocked and only locks once real evidence for this
+    # specific run has actually been seen this session.
+    locked_station_predictions = {}
+    # FEATURE: per-station "predicted vs. actual" snapshot for the delay
+    # chart - see _snapshot_prediction_before_arrival. Same connection-
+    # lifetime pattern as locked_station_predictions above.
+    final_predictions_by_station = {}
 
     try:
         while True:
@@ -4478,6 +4729,8 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     weather_component_minutes=weather_component_minutes, rr_stops=rr_stops,
                 )
                 _mirror_origin_destination_timing(timeline_json)
+                _lock_grounded_station_predictions(timeline_json, locked_station_predictions)
+                _snapshot_prediction_before_arrival(timeline_json, final_predictions_by_station)
                 # BUGFIX: reconcile the headline "ML-predicted delay" card
                 # with the Live Tracking timeline's very next reporting
                 # station whenever THAT station's figure is GROUNDED (real
