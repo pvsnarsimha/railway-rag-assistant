@@ -474,13 +474,20 @@ def parse_full_timeline(track_data: dict, train_info_data: dict = None):
     # formatting) just sees a normal real timing - no sentinel-specific
     # handling needed anywhere else in the app.
     if stops:
-        origin = stops[0]
+        # ROBUSTNESS: use the first/last REPORTING (kind != "intermediate")
+        # stop rather than stops[0]/stops[-1] - RailKit's raw timeline can
+        # carry a small passing/signalling point before the real origin or
+        # after the real destination's own entry, which would otherwise
+        # make this mirror check (and set) the wrong stop entirely, leaving
+        # the actual origin/destination halt's sentinel untouched.
+        reporting_stops = [s for s in stops if s.kind != "intermediate"]
+        origin = reporting_stops[0] if reporting_stops else stops[0]
         if _timing_has_no_real_event(origin.arrival) and not _timing_has_no_real_event(origin.departure):
             origin.arrival = StopTiming(
                 scheduled=origin.departure.scheduled, expected=origin.departure.expected,
                 actual=origin.departure.actual, delay_minutes=origin.departure.delay_minutes,
             )
-        destination = stops[-1]
+        destination = reporting_stops[-1] if reporting_stops else stops[-1]
         if _timing_has_no_real_event(destination.departure) and not _timing_has_no_real_event(destination.arrival):
             destination.departure = StopTiming(
                 scheduled=destination.arrival.scheduled, expected=destination.arrival.expected,

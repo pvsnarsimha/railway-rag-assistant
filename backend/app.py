@@ -691,6 +691,7 @@ def _fetch_timeline_with_predictions(train_number: str, date: Optional[str], tra
         avg_speed_kmph, avg_speed_basis, date, travel_class,
         train_info_data=train_info_data, rr_stops=rr_stops,
     )
+    _mirror_origin_destination_timing(timeline_json)
     return timeline_json, position
 
 
@@ -779,6 +780,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
         avg_speed_kmph, avg_speed_basis, date, travel_class,
         train_info_data=train_info_data, rr_stops=rr_stops,
     )
+    _mirror_origin_destination_timing(timeline_json)
 
     target = matched
     if target is None:
@@ -1225,6 +1227,78 @@ def _predict_delay_per_reporting_station(
             else:
                 event["delay_minutes"] = final_delay
             event["actual_is_predicted"] = True  # tells the frontend this is OUR model's estimate, not RailKit's own recorded value
+
+
+def _mirror_origin_destination_timing(timeline_json: list) -> None:
+    """
+    BUGFIX: a train's ORIGIN never has a real "arrival" (it starts there)
+    and its DESTINATION never has a real "departure" (it ends there) - a
+    station board would never show two different confidence levels for
+    the same halt's arriving-and-departing-the-same-place event, yet this
+    app's pipeline could: RailKit's own literal "SRC"/"DSTN" sentinel
+    strings, a schedule-only `expected` with no real `actual`, or (once a
+    station's status is stuck on "upcoming") the ML/heuristic prediction
+    pass above flagging its OWN guess "Not confirmed by provider" - even
+    though the station's real, confirmed side (the actual arrival at the
+    final stop, or the actual departure from the first stop) is sitting
+    right there. Reported live: SECUNDERABAD JN as train 20833's last
+    station showed a real "Arrival Exp 14:20 Act 14:23 +3m" right next to
+    a raw, unmirrored "Departure Exp DSTN Act DSTN"; another train's final
+    station showed "Departure Exp 23:35 ... Not confirmed by provider"
+    even though that "23:35" is just the same padded schedule time RailKit
+    lists for both sides of a stop it will never actually depart again.
+    gps_tracking.parse_full_timeline() already mirrors the raw SRC/DSTN
+    sentinel case early (so downstream time-diff arithmetic never trips on
+    a literal "DSTN" string), but that early pass can't see this app's own
+    later RailRadar-merge / ML-prediction reconciliation loop above, which
+    runs ONLY for "upcoming" stations and can re-clobber event["actual"]
+    with a fresh guess after the early mirror already ran. Running this
+    pass LAST - after every other pass above - means nothing downstream
+    can undo it again: whichever side (arrival or destination's departure,
+    departure or origin's arrival) already has a real recorded `actual`
+    wins outright, copied onto the placeholder side including its
+    confidence flags, so the frontend shows ONE consistent, correctly-
+    confident time for both events at these two special stops. Every
+    OTHER station's real arrival and departure are left completely alone.
+    """
+    if not timeline_json:
+        return
+    reporting = [s for s in timeline_json if s.get("kind") != "intermediate"]
+    origin = reporting[0] if reporting else timeline_json[0]
+    destination = reporting[-1] if reporting else timeline_json[-1]
+
+    def _mirror(dst_event, src_event):
+        if not isinstance(dst_event, dict) or not isinstance(src_event, dict):
+            return
+        # Only mirror once the SOURCE side itself has a real, confirmed
+        # actual time - never copy a guess onto a guess, and never copy a
+        # literal sentinel ("SRC"/"DSTN") that somehow survived this far.
+        if gps_tracking._time_str_to_minutes(src_event.get("actual")) is None:
+            return
+        dst_event["scheduled"] = src_event.get("scheduled")
+        dst_event["expected"] = src_event.get("expected")
+        dst_event["actual"] = src_event.get("actual")
+        dst_event["delay_minutes"] = src_event.get("delay_minutes")
+        if "actual_is_predicted" in src_event:
+            dst_event["actual_is_predicted"] = src_event.get("actual_is_predicted")
+        else:
+            dst_event.pop("actual_is_predicted", None)
+        if "actual_source" in src_event:
+            dst_event["actual_source"] = src_event.get("actual_source")
+        else:
+            dst_event.pop("actual_source", None)
+        dst_event["mirrored_from_sibling_event"] = True
+
+    # Both mirrors always run, even for a degenerate single-stop timeline
+    # where origin and destination are the SAME stop (origin is destination):
+    # the arrival<-departure mirror only fires if departure already has a
+    # real actual, and the departure<-arrival mirror only fires if arrival
+    # already has a real actual, so a stop that's already fully sentinel on
+    # both sides is safely left untouched either way.
+    if origin is not None:
+        _mirror(origin.get("arrival"), origin.get("departure"))
+    if destination is not None:
+        _mirror(destination.get("departure"), destination.get("arrival"))
 
 
 def _find_stop(route, code):
@@ -3307,6 +3381,7 @@ def api_journey_timeline(train_number: str, date: Optional[str] = None):
     except railway_api.RailwayAPIError as e:
         return {"train_number": train_number, "date": date, "stops": [], "error": str(e)}
     stops_json = gps_tracking.timeline_to_json(stops)
+    _mirror_origin_destination_timing(stops_json)
     return {
         "train_number": train_number,
         "date": date,
@@ -4402,6 +4477,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     eta_speed_kmph=eta_speed_kmph, train_info_data=train_info_data,
                     weather_component_minutes=weather_component_minutes, rr_stops=rr_stops,
                 )
+                _mirror_origin_destination_timing(timeline_json)
                 # BUGFIX: reconcile the headline "ML-predicted delay" card
                 # with the Live Tracking timeline's very next reporting
                 # station whenever THAT station's figure is GROUNDED (real
