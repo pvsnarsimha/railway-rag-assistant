@@ -194,12 +194,29 @@ def fetch_railradar_timeline(train_number: str, date_ddmmyyyy: Optional[str] = N
     route = data.get("route") or []
 
     stops: List[TimelineStop] = []
-    for point in route:
+    for idx, point in enumerate(route):
         code = point.get("stationCode")
         # RailRadar tells us directly whether the train has "departed" this
         # stop or it's still "upcoming" - real status, not inferred.
         raw_status = point.get("status")
-        if current_code and code == current_code:
+        # BUGFIX: the FINAL destination never gets raw_status "departed" -
+        # a train doesn't depart its own terminus - RailRadar instead marks
+        # it "arrived" once the journey is genuinely, completely over (this
+        # matches RailRadar's own site, which shows "Arrived at <station>"
+        # for a finished run). That "arrived" status used to fall through
+        # to the current_code check below, which for a COMPLETED journey
+        # is very often still pointing at this same terminus (it's the
+        # train's real last known position) - so the destination kept
+        # coming out "current" forever, never "passed", and so never
+        # qualified for the real-recorded-data merge in app.py's
+        # rr_by_code (which only trusts an rr stop whose OWN status is
+        # "passed"). Checked first and scoped to the LAST route point only,
+        # so every other station's current/departed/upcoming logic below is
+        # completely unaffected.
+        is_terminus = idx == len(route) - 1
+        if is_terminus and raw_status == "arrived":
+            status = "passed"
+        elif current_code and code == current_code:
             status = "current"
         elif raw_status == "departed":
             status = "passed"
