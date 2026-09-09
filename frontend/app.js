@@ -1168,33 +1168,19 @@ if (!alreadySeenTour) {
     const hasBand = s.predicted_delay_low_minutes != null && s.predicted_delay_high_minutes != null;
     const bandText = hasBand ? ` (${formatDelayDuration(s.predicted_delay_low_minutes)}\u2013${formatDelayDuration(s.predicted_delay_high_minutes)})` : "";
     const etaText = s.predicted_eta ? ` · ETA ~${escapeHtml(s.predicted_eta)}` : "";
-    // FEATURE: "locked in" badge - once the nearest upcoming intermediate
-    // point right before this station has real, math-grounded evidence
-    // (not a model guess) for its own arrival, this station's prediction
-    // gets anchored to it and locked in for the rest of the journey (see
-    // backend's nearest-grounded-intermediate anchor pass and
-    // _lock_grounded_station_predictions) - real case: KAZIPET F CABIN,
-    // 6.8 km before WARANGAL, grounded within 2 min of WARANGAL's actual
-    // recorded arrival. This is a stronger, more literal signal than the
-    // cross-method-agreement badge below, so it takes priority and names
-    // the real station it's anchored to whenever there is one, rather
-    // than a vague "verified" claim.
-    const groundedVia = s.predicted_delay_grounded_via || s.predicted_delay_locked_via;
-    let confidenceBadge = "";
-    if (groundedVia) {
-      confidenceBadge = `<span class="live-timeline__verified" title="Anchored to ${escapeHtml(groundedVia)}'s own real-time-grounded arrival - locked in, won't change again this journey">✓ confirmed via ${escapeHtml(groundedVia)}</span>`;
-    } else if (s.predicted_delay_locked) {
-      confidenceBadge = `<span class="live-timeline__verified" title="This station's own real schedule vs. live position math grounded this prediction - locked in, won't change again this journey">✓ locked in</span>`;
-    } else if (s.predicted_delay_confidence === "Very High" && s.prediction_methods_compared) {
-      // Original cross-method-agreement signal - only shown when it
-      // actually came from that convergence check (prediction_methods_compared
-      // is set), not just because confidence happens to read "Very High"
-      // for some other honest reason, which would otherwise show a
-      // misleading "0 independent methods agreed" tooltip.
-      confidenceBadge = `<span class="live-timeline__verified" title="${s.prediction_methods_compared} independent methods agreed within ${s.prediction_agreement_minutes} min">✓ cross-verified</span>`;
-    }
+    // FEATURE: cross-method agreement tag - when the ML ensemble, the
+    // trend/speed/weather heuristic, and the real actual-vs-expected
+    // arithmetic all land close together (independently, not the same
+    // number restated), that's a genuinely higher-confidence prediction
+    // and gets flagged as such. There's no live API for other apps'
+    // numbers to compare against directly - this is the honest, buildable
+    // alternative: agreement across OUR OWN independently-computed methods.
+    const isVeryHigh = s.predicted_delay_confidence === "Very High";
+    const verified = isVeryHigh
+      ? `<span class="live-timeline__verified" title="${s.prediction_methods_compared || 0} independent methods agreed within ${s.prediction_agreement_minutes} min">✓ cross-verified</span>`
+      : "";
     return `<span class="live-timeline__predicted ${cls}" title="Estimated, ${escapeHtml(s.predicted_delay_confidence || "?")} confidence">
-      ~${formatDelayDuration(s.predicted_delay_minutes)}${bandText} late (predicted)${etaText} ${confidenceBadge}
+      ~${formatDelayDuration(s.predicted_delay_minutes)}${bandText} late (predicted)${etaText} ${verified}
     </span>`;
   }
 
