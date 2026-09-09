@@ -200,21 +200,43 @@ def fetch_railradar_timeline(train_number: str, date_ddmmyyyy: Optional[str] = N
         # stop or it's still "upcoming" - real status, not inferred.
         raw_status = point.get("status")
         # BUGFIX: the FINAL destination never gets raw_status "departed" -
-        # a train doesn't depart its own terminus - RailRadar instead marks
-        # it "arrived" once the journey is genuinely, completely over (this
-        # matches RailRadar's own site, which shows "Arrived at <station>"
-        # for a finished run). That "arrived" status used to fall through
-        # to the current_code check below, which for a COMPLETED journey
-        # is very often still pointing at this same terminus (it's the
-        # train's real last known position) - so the destination kept
-        # coming out "current" forever, never "passed", and so never
-        # qualified for the real-recorded-data merge in app.py's
-        # rr_by_code (which only trusts an rr stop whose OWN status is
-        # "passed"). Checked first and scoped to the LAST route point only,
-        # so every other station's current/departed/upcoming logic below is
-        # completely unaffected.
+        # a train doesn't depart its own terminus. A prior attempt at this
+        # fix guessed RailRadar uses the literal string "arrived" for a
+        # completed terminus (based on their own site's "Arrived at
+        # <station>" wording) - that guess didn't hold up against a real
+        # completed run (train 20834), where the destination kept showing
+        # "Not confirmed by provider" even after that fix shipped, meaning
+        # either the real field uses different wording/casing or isn't
+        # reliably set at all. Rather than guess a second string, this
+        # keys off the one thing that can't be ambiguous: whether RailRadar
+        # has actually recorded a real `actualArrival` timestamp for this
+        # stop. A genuine recorded arrival time IS the journey having
+        # completed there, regardless of what (if anything) the separate
+        # `status` field says - and unlike a guessed status string, this
+        # can't silently stop matching if RailRadar's wording differs.
+        # Without this, the terminus falls through to the current_code
+        # check below, which for a COMPLETED journey is very often still
+        # pointing at this same terminus (it's the train's real last known
+        # position) - so the destination kept coming out "current" forever,
+        # never "passed", and so never qualified for the real-recorded-data
+        # merge in app.py's rr_by_code (which only trusts an rr stop whose
+        # OWN status is "passed"). Checked first and scoped to the LAST
+        # route point only, so every other station's current/departed/
+        # upcoming logic below is completely unaffected.
         is_terminus = idx == len(route) - 1
-        if is_terminus and raw_status == "arrived":
+        terminus_has_real_arrival = bool(point.get("actualArrival"))
+        terminus_status_says_done = (raw_status or "").strip().lower() in ("arrived", "departed", "completed", "reached", "terminated")
+        # Third, guess-proof signal: a train can only ever BE at the
+        # terminus by having already departed the stop right before it -
+        # there's no other way to get there. So if the immediately
+        # preceding stop is already confirmed "passed" (real, not
+        # inferred - RailRadar's own "departed"), the terminus logically
+        # MUST have been reached too, regardless of what its own status
+        # field says or whether actualArrival happens to be populated.
+        # `stops` already holds every earlier point in route order at
+        # this point in the loop, so this never looks ahead.
+        terminus_prev_stop_departed = is_terminus and bool(stops) and stops[-1].status == "passed"
+        if is_terminus and (terminus_has_real_arrival or terminus_status_says_done or terminus_prev_stop_departed):
             status = "passed"
         elif current_code and code == current_code:
             status = "current"
