@@ -40,6 +40,22 @@ import requests
 from api_cache import cached
 from gps_tracking import StopTiming, TimelineStop
 
+
+def _ddmmyyyy_to_iso(date_ddmmyyyy: Optional[str]) -> Optional[str]:
+    """Converts this app's own DD-MM-YYYY date convention (used everywhere
+    else in the codebase, e.g. railway_api.get_live_train_status) into the
+    YYYY-MM-DD RailRadar's own `date` query parameter expects. Returns None
+    (never a guess) for anything that isn't a real, parseable date, so a
+    caller passing a bad/empty value just falls back to RailRadar's own
+    "auto-detect current run" behavior rather than sending a malformed
+    query param."""
+    if not date_ddmmyyyy:
+        return None
+    try:
+        return datetime.strptime(date_ddmmyyyy.strip(), "%d-%m-%Y").strftime("%Y-%m-%d")
+    except (ValueError, AttributeError):
+        return None
+
 API_BASE = "https://api.railradar.in/v1/trains"
 TIMEOUT_SECONDS = 8
 
@@ -70,12 +86,23 @@ def _api_key() -> Optional[str]:
 
 
 @cached(ttl_seconds=60, prefix="railradar_fallback_live")
-def _fetch_raw(train_number: str) -> dict:
-    """GET RailRadar's live-status endpoint. `date` is intentionally
-    omitted - per their docs, the API auto-detects the most recent journey
-    date from the train's own running days, which is more reliable than us
-    reformatting our dd-mm-yyyy into their yyyy-mm-dd and risking a
-    timezone/rollover mismatch."""
+def _fetch_raw(train_number: str, date_iso: Optional[str] = None) -> dict:
+    """GET RailRadar's live-status endpoint.
+
+    `date_iso` (YYYY-MM-DD) is RailRadar's own documented `date` query
+    parameter — "Journey start date. Omit to auto-detect current run."
+    (https://railradar.in/docs/live-train-status). This used to be left
+    out unconditionally on the theory that RailRadar's own auto-detection
+    would be more reliable than a reformatted date — but that only holds
+    for the CURRENT/live-running case. For a caller asking about a past
+    date (or a journey that's already finished), omitting it means this
+    always fetches whatever RailRadar considers the "most recent run"
+    (frequently today's, possibly not-yet-departed one) instead of the
+    actually-requested day's completed journey, so real per-station
+    actual/delay data for that requested day never gets matched. Passing
+    the real requested date fixes that; still perfectly safe to omit for
+    genuinely live polling of a train running today, which is the only
+    case that used to rely on the auto-detect behavior anyway."""
     global _last_error
 
     def _fail(msg: str):
@@ -88,8 +115,9 @@ def _fetch_raw(train_number: str) -> dict:
         _fail("RAILRADAR_API_KEY is not set in backend/.env.")
 
     url = f"{API_BASE}/{train_number}/live"
+    params = {"date": date_iso} if date_iso else None
     try:
-        resp = requests.get(url, headers={"Authorization": f"Bearer {key}"}, timeout=TIMEOUT_SECONDS)
+        resp = requests.get(url, headers={"Authorization": f"Bearer {key}"}, params=params, timeout=TIMEOUT_SECONDS)
     except requests.exceptions.RequestException as exc:
         _fail(f"Could not reach api.railradar.in ({exc}).")
 
@@ -140,16 +168,24 @@ def _day_offset_from_iso(raw: Optional[str], start_date: Optional[str]) -> str:
         return "1"
 
 
-def fetch_railradar_timeline(train_number: str) -> List[TimelineStop]:
+def fetch_railradar_timeline(train_number: str, date_ddmmyyyy: Optional[str] = None) -> List[TimelineStop]:
     """Fetches + parses RailRadar's live status into the SAME TimelineStop
     shape gps_tracking.py already uses for RailKit, so
     compute_avg_speed_kmph() / compute_recent_delay_trend() work on it
     completely unchanged.
 
+    `date_ddmmyyyy` is this app's own date convention (same format the
+    caller already has on hand for railway_api.get_live_train_status) —
+    converted to RailRadar's own YYYY-MM-DD and passed through so a
+    caller asking about a SPECIFIC (often past) date gets that date's real
+    journey instead of RailRadar's "most recent run" default. Omit it (or
+    pass None/unparseable) for genuinely live polling of today's running
+    train, where the auto-detect default is exactly what's wanted.
+
     Returns [] (never raises) on any failure - see module docstring.
     """
     try:
-        data = _fetch_raw(train_number)
+        data = _fetch_raw(train_number, _ddmmyyyy_to_iso(date_ddmmyyyy))
     except RailRadarFallbackError:
         return []
 

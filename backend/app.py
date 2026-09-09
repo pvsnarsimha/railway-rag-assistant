@@ -567,7 +567,7 @@ def _resolve_avg_speed(
     rr_stops = []
     live_speed, live_speed_note = None, None
     try:
-        rr_stops = railradar_fallback.fetch_railradar_timeline(train_number)
+        rr_stops = railradar_fallback.fetch_railradar_timeline(train_number, date_ddmmyyyy)
     except Exception:
         rr_stops = []
     try:
@@ -682,7 +682,7 @@ def _fetch_timeline_with_predictions(train_number: str, date: Optional[str], tra
         date, None, current_delay_minutes, trend.get("trend_per_stop"),
     )
     try:
-        rr_stops = railradar_fallback.fetch_railradar_timeline(train_number)
+        rr_stops = railradar_fallback.fetch_railradar_timeline(train_number, date)
     except Exception:
         rr_stops = []
     _predict_delay_per_reporting_station(
@@ -770,7 +770,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
         date, None, current_delay_minutes, trend.get("trend_per_stop"),
     )
     try:
-        rr_stops = railradar_fallback.fetch_railradar_timeline(train_number)
+        rr_stops = railradar_fallback.fetch_railradar_timeline(train_number, date)
     except Exception:
         rr_stops = []
     _predict_delay_per_reporting_station(
@@ -4119,7 +4119,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # anyway since this is best-effort and must never break
                 # live tracking if it somehow does.
                 try:
-                    rr_stops = await asyncio.to_thread(railradar_fallback.fetch_railradar_timeline, train_number)
+                    rr_stops = await asyncio.to_thread(railradar_fallback.fetch_railradar_timeline, train_number, date_ddmmyyyy)
                 except Exception:
                     rr_stops = []
 
