@@ -1064,13 +1064,31 @@ if (!alreadySeenTour) {
   }
   // Shared by renderLiveTimeline() and the WebSocket onmessage handler —
   // see the comment above parseRailTimestamp for the full reasoning.
+  //
+  // BUGFIX: querying an OLDER date (e.g. "yesterday") for a train whose
+  // journey is obviously long over by now — the whole point of asking for
+  // a past date — was still reading as "genuinely, actively tracked"
+  // whenever the provider's stuck "current" pointer happened to land
+  // mid-route (e.g. KAZIPET F CABIN) rather than exactly at the origin,
+  // because currentIdx > 0 unconditionally short-circuited the schedule
+  // check below. (An earlier version of this fix compared calendar DATES
+  // instead of elapsed time, but that misfires right at midnight — a
+  // destination scheduled 23:xx "yesterday" checked at 00:3x "today" is
+  // barely over an hour old, not a day-old completed run, yet a bare date
+  // comparison called it a past day regardless.) Elapsed real time avoids
+  // that edge case outright: a stuck-at-origin (or fully silent) provider
+  // only needs 3h past the destination's own schedule to call it stale,
+  // but a pointer stuck FURTHER ALONG the route could still be a
+  // genuinely very late, actively-tracked train, so it needs a much
+  // bigger overrun — 12h past its own scheduled arrival, comfortably
+  // longer than a real same-run delay — before being treated the same way.
   function computeJourneyLikelyComplete(timelineArr, lastStop) {
     if (!Array.isArray(timelineArr) || !timelineArr.length || !lastStop) return false;
     if (lastStop.status === "passed" || lastStop.status === "current") return false;
     const currentIdx = timelineArr.findIndex((s) => s.status === "current");
     if (currentIdx === -1) return true; // original signal: no live position anywhere
-    if (currentIdx > 0) return false; // genuinely, actively tracked somewhere along the route
-    return scheduleWellInPast(lastStop.arrival, 180) || scheduleWellInPast(lastStop.departure, 180);
+    const thresholdMinutes = currentIdx === 0 ? 180 : 720;
+    return scheduleWellInPast(lastStop.arrival, thresholdMinutes) || scheduleWellInPast(lastStop.departure, thresholdMinutes);
   }
 
   // FEATURE: show delay durations as "1h 10m" once they cross an hour,

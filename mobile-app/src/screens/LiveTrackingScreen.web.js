@@ -67,13 +67,30 @@ function scheduleWellInPast(timing, thresholdMinutes) {
   if (!d) return false;
   return Date.now() - d.getTime() > thresholdMinutes * 60000;
 }
+// BUGFIX: querying an OLDER date (e.g. "yesterday") for a train whose
+// journey is obviously long over by now was still reading as "genuinely,
+// actively tracked" whenever the provider's stuck "current" pointer
+// happened to land mid-route rather than exactly at the origin, because
+// currentIdx > 0 unconditionally short-circuited the schedule check
+// below. (An earlier version of this fix compared calendar DATES instead
+// of elapsed time, but that misfires right at midnight — a destination
+// scheduled 23:xx "yesterday" checked at 00:3x "today" is barely over an
+// hour old, not a day-old completed run, yet a bare date comparison
+// called it a past day regardless.) Elapsed real time avoids that edge
+// case outright: a stuck-at-origin (or fully silent) provider only needs
+// 3h past the destination's own schedule to call it stale, but a pointer
+// stuck FURTHER ALONG the route could still be a genuinely very late,
+// actively-tracked train, so it needs a much bigger overrun — 12h past
+// its own scheduled arrival, comfortably longer than a real same-run
+// delay — before being treated the same way. Mirrors the web frontend's
+// identical helper in app.js.
 function computeJourneyLikelyComplete(timelineArr, lastStop) {
   if (!Array.isArray(timelineArr) || !timelineArr.length || !lastStop) return false;
   if (lastStop.status === "passed" || lastStop.status === "current") return false;
   const currentIdx = timelineArr.findIndex((s) => s.status === "current");
   if (currentIdx === -1) return true;
-  if (currentIdx > 0) return false;
-  return scheduleWellInPast(lastStop.arrival, 180) || scheduleWellInPast(lastStop.departure, 180);
+  const thresholdMinutes = currentIdx === 0 ? 180 : 720;
+  return scheduleWellInPast(lastStop.arrival, thresholdMinutes) || scheduleWellInPast(lastStop.departure, thresholdMinutes);
 }
 
 // FEATURE: "Train on map" — a real Leaflet map on demand, shown/hidden by a
