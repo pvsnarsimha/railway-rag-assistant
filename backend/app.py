@@ -681,11 +681,15 @@ def _fetch_timeline_with_predictions(train_number: str, date: Optional[str], tra
         train_number, timeline_stops, route_progress_ratio, total_distance_km,
         date, None, current_delay_minutes, trend.get("trend_per_stop"),
     )
+    try:
+        rr_stops = railradar_fallback.fetch_railradar_timeline(train_number)
+    except Exception:
+        rr_stops = []
     _predict_delay_per_reporting_station(
         timeline_json, total_distance_km, current_delay_minutes,
         trend.get("trend_per_stop"), trend.get("basis"),
         avg_speed_kmph, avg_speed_basis, date, travel_class,
-        train_info_data=train_info_data,
+        train_info_data=train_info_data, rr_stops=rr_stops,
     )
     return timeline_json, position
 
@@ -765,11 +769,15 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
         train_number, timeline_stops, route_progress_ratio, total_distance_km,
         date, None, current_delay_minutes, trend.get("trend_per_stop"),
     )
+    try:
+        rr_stops = railradar_fallback.fetch_railradar_timeline(train_number)
+    except Exception:
+        rr_stops = []
     _predict_delay_per_reporting_station(
         timeline_json, total_distance_km, current_delay_minutes,
         trend.get("trend_per_stop"), trend.get("basis"),
         avg_speed_kmph, avg_speed_basis, date, travel_class,
-        train_info_data=train_info_data,
+        train_info_data=train_info_data, rr_stops=rr_stops,
     )
 
     target = matched
@@ -797,7 +805,7 @@ def _predict_delay_per_reporting_station(
     timeline_json: list, total_distance_km, current_delay_minutes,
     trend_per_stop, trend_basis, avg_speed_kmph, avg_speed_basis,
     date_ddmmyyyy, travel_class, eta_speed_kmph=None, train_info_data=None,
-    weather_component_minutes: float = 0.0,
+    weather_component_minutes: float = 0.0, rr_stops: Optional[list] = None,
 ) -> None:
     """
     FEATURE: per-station predicted delay for every upcoming REPORTING
@@ -846,6 +854,26 @@ def _predict_delay_per_reporting_station(
     current_delay_minutes = current_delay_minutes if current_delay_minutes is not None else 0
     trend = trend_per_stop if trend_per_stop is not None else 0.0
     typical_speed = getattr(delay_prediction, "_TYPICAL_EXPRESS_SPEED_KMPH", 55.0)
+
+    # FEATURE: use RailRadar's own REAL recorded arrival/departure for an
+    # "upcoming" station whenever it has one, instead of always falling
+    # through to this app's own ML/heuristic prediction. RailKit sometimes
+    # leaves a station's status stuck on "upcoming" long after the train
+    # has genuinely passed it (see the frontend's journeyLikelyComplete
+    # fallback), even though RailRadar independently marks that same stop
+    # "departed" with a real actualArrival/actualDeparture timestamp and
+    # its own real delayArrival/delayDeparture — a second, independently
+    # reporting provider, not a guess. rr_stops is fetched once per poll
+    # by the caller (see ws_track_train) and passed in here; matched by
+    # station CODE only (RailKit and RailRadar station names can differ
+    # slightly). A RailRadar entry only counts as real confirmation when
+    # its OWN status is "passed" (i.e. raw "departed") — an "upcoming"
+    # RailRadar entry is just as unconfirmed as RailKit's.
+    rr_by_code = {}
+    for rr in (rr_stops or []):
+        code = (getattr(rr, "code", None) or "").strip().upper()
+        if code and getattr(rr, "status", None) == "passed":
+            rr_by_code[code] = rr
 
     def _stop_distance_km(stop):
         d = gps_tracking._distance_km_value(stop.get("distance_km"))
@@ -1123,9 +1151,39 @@ def _predict_delay_per_reporting_station(
         final_delay = stop.get("predicted_delay_minutes")
         if final_delay is None:
             continue
+        rr_stop = rr_by_code.get((stop.get("code") or "").strip().upper())
         for event_key, extra_minutes in (("arrival", 0), ("departure", stop.get("halt_minutes") or 0)):
             event = stop.get(event_key)
             if not isinstance(event, dict):
+                continue
+            # FEATURE: RailRadar's own REAL recorded time for this exact
+            # event, when it has one (see rr_by_code above) — takes
+            # priority over our own model's prediction below, since it's
+            # an actually-recorded value from a second live provider, not
+            # an estimate. RailRadar's own delay_minutes is used directly
+            # when present; otherwise it's derived from RailRadar's real
+            # actual vs THIS event's own expected/scheduled time, same
+            # day-rollover-safe arithmetic as the predicted path below.
+            rr_event = getattr(rr_stop, event_key, None) if rr_stop is not None else None
+            rr_actual = getattr(rr_event, "actual", None) if rr_event is not None else None
+            if rr_actual:
+                event["actual"] = rr_actual
+                rr_delay = getattr(rr_event, "delay_minutes", None)
+                if rr_delay is not None:
+                    event["delay_minutes"] = rr_delay
+                else:
+                    rr_anchor = event.get("expected") or event.get("scheduled")
+                    rr_anchor_min = gps_tracking._time_str_to_minutes(rr_anchor)
+                    rr_actual_min = gps_tracking._time_str_to_minutes(rr_actual)
+                    if rr_anchor_min is not None and rr_actual_min is not None:
+                        rr_diff = rr_actual_min - rr_anchor_min
+                        if rr_diff < -720:
+                            rr_diff += 1440
+                        elif rr_diff > 720:
+                            rr_diff -= 1440
+                        event["delay_minutes"] = max(0, min(400, round(rr_diff)))
+                event["actual_is_predicted"] = False
+                event["actual_source"] = "railradar"
                 continue
             try:
                 extra = int(extra_minutes)
@@ -4047,6 +4105,23 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     distance_km, date_ddmmyyyy, datetime.now().strftime("%H:%M"),
                     position.delay_minutes, delay_trend.get("trend_per_stop"),
                 )
+                # FEATURE: RailRadar's own per-station real actual/delay
+                # data, fetched once per poll and handed to
+                # _predict_delay_per_reporting_station below so an
+                # "upcoming" station RailKit hasn't confirmed yet can still
+                # show RailRadar's own real recorded time instead of this
+                # app's model estimate — see that function's rr_by_code
+                # note. _fetch_raw is cached 60s, so this is a cache hit on
+                # most polls (poll interval is well under that), not a
+                # fresh RailRadar call every ~5s. Off the event loop since
+                # it's a blocking HTTP call; never raises (see
+                # railradar_fallback's module docstring), but wrapped
+                # anyway since this is best-effort and must never break
+                # live tracking if it somehow does.
+                try:
+                    rr_stops = await asyncio.to_thread(railradar_fallback.fetch_railradar_timeline, train_number)
+                except Exception:
+                    rr_stops = []
 
                 try:
                     delay_pred = delay_prediction.predict_delay(
@@ -4325,7 +4400,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     delay_trend.get("trend_per_stop"), delay_trend.get("basis"),
                     avg_speed_kmph, avg_speed_basis, date_ddmmyyyy, travel_class,
                     eta_speed_kmph=eta_speed_kmph, train_info_data=train_info_data,
-                    weather_component_minutes=weather_component_minutes,
+                    weather_component_minutes=weather_component_minutes, rr_stops=rr_stops,
                 )
                 # BUGFIX: reconcile the headline "ML-predicted delay" card
                 # with the Live Tracking timeline's very next reporting
