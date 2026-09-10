@@ -168,6 +168,17 @@ def health():
         "semantic_engine": engine.hybrid.semantic_engine_name,
         "kb_entries": len(engine.docs),
         "api_cache": cache_stats(),
+        # FEATURE: proves the predicted-vs-actual delay history store (see
+        # delay_accuracy_store.py) is actually alive on a deployed server
+        # you have no shell/file-browser access to (e.g. Render's free
+        # plan) - hit https://<your-render-url>/api/health in a browser
+        # and check this block instead of trying to find the .db file on
+        # disk yourself. row_count > 0 means real predicted-vs-actual
+        # pairs have genuinely been recorded; 0 just means nobody has
+        # live-tracked a train through to a reached station yet since the
+        # last time this service started (see that file's own docstring
+        # for why it resets on redeploy/restart on the free plan).
+        "delay_accuracy_db": delay_accuracy_store.db_diagnostics(),
     }
 
 

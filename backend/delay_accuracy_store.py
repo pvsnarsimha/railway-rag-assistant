@@ -171,4 +171,36 @@ def purge_old_records(max_age_days: int = 90) -> int:
         return cur.rowcount
 
 
+def db_diagnostics() -> dict:
+    """FEATURE: lets you confirm this store is actually alive on a deployed
+    server you have no shell/file-browser access to (e.g. Render's free
+    plan) - wired into /api/health in app.py. `file_exists`/`file_size_bytes`
+    prove the sqlite file itself got created (it's created lazily by
+    sqlite3.connect() the moment _init_db() runs at import time - see the
+    bottom of this file), and `row_count`/`distinct_runs` prove real writes
+    have actually happened, not just that the empty file/table exist.
+    Never raises - a broken db is exactly the kind of thing this exists to
+    surface, so a failure here is reported IN the result, not thrown."""
+    try:
+        exists = os.path.isfile(_DB_PATH)
+        size = os.path.getsize(_DB_PATH) if exists else 0
+        row_count = 0
+        distinct_runs = 0
+        if exists:
+            with _connect() as conn:
+                row_count = conn.execute("SELECT COUNT(*) FROM station_delay_records").fetchone()[0]
+                distinct_runs = conn.execute(
+                    "SELECT COUNT(DISTINCT train_number || '|' || date) FROM station_delay_records"
+                ).fetchone()[0]
+        return {
+            "db_path": _DB_PATH, "file_exists": exists, "file_size_bytes": size,
+            "row_count": row_count, "distinct_runs_recorded": distinct_runs, "error": None,
+        }
+    except Exception as e:
+        return {
+            "db_path": _DB_PATH, "file_exists": None, "file_size_bytes": None,
+            "row_count": None, "distinct_runs_recorded": None, "error": str(e),
+        }
+
+
 _init_db()
