@@ -1291,6 +1291,38 @@ def _predict_delay_per_reporting_station(
                         event["delay_minutes"] = max(0, min(400, round(rr_diff)))
                 event["actual_is_predicted"] = False
                 event["actual_source"] = "railradar"
+                # BUGFIX: this used to only patch THIS event dict, leaving
+                # the station-level predicted_delay_minutes/predicted_eta
+                # (what the "~Xm late (predicted)... ETA ~HH:MM" badge and
+                # its confidence chip are actually built from — see
+                # predictedDelayBadge() in app.js) still holding whatever
+                # the model guessed before RailRadar's real confirmation
+                # came in. Real case that motivated this: KHAMMAM showing
+                # "~1h 55m late (predicted) - ETA ~22:44" in the badge right
+                # above an arrival row that RailRadar had already REALLY
+                # recorded as +1h 7m — two disagreeing "how late" numbers
+                # for the same stop, one of them known-stale the moment
+                # real data arrived. Keyed off the ARRIVAL event specifically
+                # (not departure) since arrival is the real "the train
+                # reached this station" moment the badge's own wording is
+                # about, and it's the first of the two events to get a real
+                # confirmation. Same "real evidence beats a guess" rule
+                # already used everywhere else in this file (grounded_delay
+                # above, the neighbor-consistency pass, _lock_grounded_
+                # station_predictions dropping a lock the instant real data
+                # shows up) — now applied to the badge itself, not just the
+                # Exp/Act row. No band is set (low/high left None): a real
+                # recorded delay isn't a range anymore, so the frontend's
+                # hasBand check naturally stops rendering one.
+                if event_key == "arrival" and event.get("delay_minutes") is not None:
+                    stop["predicted_delay_minutes"] = event["delay_minutes"]
+                    stop["predicted_delay_low_minutes"] = None
+                    stop["predicted_delay_high_minutes"] = None
+                    stop["predicted_delay_confidence"] = "Very High"
+                    stop["predicted_delay_is_grounded"] = True
+                    stop["predicted_delay_locked"] = True
+                    stop["predicted_delay_grounded_via"] = "RailRadar"
+                    stop["predicted_eta"] = event["actual"]
                 continue
             try:
                 extra = int(extra_minutes)
