@@ -65,6 +65,7 @@ import reroute_suggestions
 import route_deviation
 import connection_risk
 import coach_crowd_store
+import delay_accuracy_store
 import public_share
 import alt_transport
 from deep_extract import top_level_keys
@@ -1459,6 +1460,14 @@ def _snapshot_prediction_before_arrival(timeline_json: list, final_predictions: 
                 "predicted_delay_low_minutes": stop.get("predicted_delay_low_minutes"),
                 "predicted_delay_high_minutes": stop.get("predicted_delay_high_minutes"),
                 "predicted_delay_locked": bool(stop.get("predicted_delay_locked")),
+                # Carried through so a downstream consumer (the durable
+                # history write in _sync_station_delay_history) can still
+                # credit the real anchor station once this stop itself has
+                # moved past "upcoming" and stopped carrying this field
+                # directly - without this it silently reverted to None the
+                # instant the station was reached.
+                "predicted_delay_grounded_via": stop.get("predicted_delay_grounded_via"),
+                "from_history": False,
             }
         snapshot = final_predictions.get(code)
         if snapshot is not None:
@@ -1467,6 +1476,115 @@ def _snapshot_prediction_before_arrival(timeline_json: list, final_predictions: 
             stop["final_predicted_delay_low_minutes"] = snapshot["predicted_delay_low_minutes"]
             stop["final_predicted_delay_high_minutes"] = snapshot["predicted_delay_high_minutes"]
             stop["final_predicted_delay_was_locked"] = snapshot["predicted_delay_locked"]
+            stop["final_predicted_delay_grounded_via"] = snapshot.get("predicted_delay_grounded_via")
+            # Carried from _sync_station_delay_history's cache (see there)
+            # so this stays correct on every poll after the first, not just
+            # the one poll where the historical backfill actually happened.
+            if snapshot.get("from_history"):
+                stop["final_predicted_delay_from_history"] = True
+
+
+def _sync_station_delay_history(
+    timeline_json: list, final_predictions: dict, train_number: str, date_ddmmyyyy: Optional[str],
+) -> None:
+    """
+    FEATURE: durable predicted-vs-actual history (see delay_accuracy_store.py).
+    `final_predictions` (from _snapshot_prediction_before_arrival) only
+    lives for the lifetime of ONE WebSocket connection, so re-opening Live
+    Tracking for a train that already finished its journey — or that a
+    DIFFERENT user tracked earlier — previously had nothing to compare
+    against even for stations someone genuinely watched go by live. This
+    closes that gap, every poll, two ways:
+
+      1. FILL: for a reached reporting station THIS connection never saw
+         "upcoming" itself (so it has no in-memory snapshot), check the
+         durable store for a comparison an EARLIER session already
+         recorded for this exact real-world run (same train number AND
+         date). If one exists, it's applied exactly like an in-memory
+         snapshot would be — the frontend chart needs no changes, it
+         already reads these same `final_predicted_delay_*` fields. If
+         none exists, nothing is fabricated to fill the gap — it honestly
+         means nobody was live-tracking this train when it passed that
+         station, same as an in-memory miss already meant.
+
+      2. WRITE: the moment a reporting station has BOTH a known
+         pre-arrival prediction (from this connection's own memory, or
+         just filled from the store above) AND a real recorded actual
+         delay (RailKit's own, or RailRadar's independently-confirmed one
+         — never this app's own predicted stand-in, checked via
+         actual_is_predicted), that pairing is persisted so the NEXT
+         person to open this exact train/date — even after this
+         connection closes — can see it too.
+
+    `date_ddmmyyyy` falls back to today (same convention already used for
+    crowd_date elsewhere in this handler) since a run has to be keyed by
+    calendar date — the same train number runs a fresh journey every day.
+    Best-effort throughout: a storage hiccup here must never break the
+    live feed itself.
+    """
+    record_date = (date_ddmmyyyy or "").strip() or datetime.now().strftime("%d-%m-%Y")
+    for idx, stop in enumerate(timeline_json):
+        if stop.get("kind") == "intermediate":
+            continue
+        code = (stop.get("code") or "").strip().upper()
+        if not code:
+            continue
+
+        # FILL — only when this connection's own memory has nothing yet.
+        if code not in final_predictions and stop.get("final_predicted_delay_minutes") is None:
+            try:
+                stored = delay_accuracy_store.get_station_record(train_number, record_date, code)
+            except Exception:
+                stored = None
+            if stored:
+                stop["final_predicted_delay_minutes"] = stored.get("predicted_delay_minutes")
+                stop["final_predicted_delay_confidence"] = stored.get("predicted_delay_confidence")
+                stop["final_predicted_delay_was_locked"] = bool(stored.get("predicted_delay_locked"))
+                stop["final_predicted_delay_grounded_via"] = stored.get("predicted_delay_grounded_via")
+                stop["final_predicted_delay_from_history"] = True
+                # PERF: cache the fill into this connection's own in-memory
+                # map too, same shape _snapshot_prediction_before_arrival
+                # writes - without this, a station backfilled from history
+                # re-queries SQLite on EVERY single poll for the rest of
+                # this connection's lifetime (every _TRACK_POLL_INTERVAL_SECONDS,
+                # indefinitely), which is pure waste once we already know
+                # the answer for this station on this exact run.
+                final_predictions[code] = {
+                    "predicted_delay_minutes": stored.get("predicted_delay_minutes"),
+                    "predicted_delay_confidence": stored.get("predicted_delay_confidence"),
+                    "predicted_delay_low_minutes": stored.get("predicted_delay_minutes"),
+                    "predicted_delay_high_minutes": stored.get("predicted_delay_minutes"),
+                    "predicted_delay_locked": bool(stored.get("predicted_delay_locked")),
+                    "predicted_delay_grounded_via": stored.get("predicted_delay_grounded_via"),
+                    "from_history": True,
+                }
+
+        # WRITE — only once this station is reached, with a real actual.
+        if stop.get("status") == "upcoming":
+            continue
+        arrival = stop.get("arrival") if isinstance(stop.get("arrival"), dict) else None
+        if not arrival:
+            continue
+        actual_is_real = arrival.get("actual_is_predicted") is False
+        actual_delay = arrival.get("delay_minutes")
+        predicted_delay = stop.get("final_predicted_delay_minutes")
+        if not (actual_is_real and actual_delay is not None and predicted_delay is not None):
+            continue
+        try:
+            delay_accuracy_store.record_station_prediction_vs_actual(
+                train_number=train_number, date=record_date, station_code=code,
+                station_name=stop.get("name"),
+                predicted_delay_minutes=predicted_delay,
+                predicted_delay_confidence=stop.get("final_predicted_delay_confidence"),
+                predicted_delay_locked=bool(stop.get("final_predicted_delay_was_locked")),
+                predicted_delay_grounded_via=stop.get("final_predicted_delay_grounded_via"),
+                actual_delay_minutes=actual_delay,
+                scheduled_time=arrival.get("expected") or arrival.get("scheduled"),
+                actual_time=arrival.get("actual"),
+                sequence_index=idx,
+            )
+        except Exception:
+            pass
 
 
 def _mirror_origin_destination_timing(timeline_json: list) -> None:
@@ -4731,6 +4849,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 _mirror_origin_destination_timing(timeline_json)
                 _lock_grounded_station_predictions(timeline_json, locked_station_predictions)
                 _snapshot_prediction_before_arrival(timeline_json, final_predictions_by_station)
+                _sync_station_delay_history(timeline_json, final_predictions_by_station, train_number, date_ddmmyyyy)
                 # BUGFIX: reconcile the headline "ML-predicted delay" card
                 # with the Live Tracking timeline's very next reporting
                 # station whenever THAT station's figure is GROUNDED (real
