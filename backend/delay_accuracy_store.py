@@ -32,6 +32,7 @@ duplicates and a later write only ever replaces an earlier one with a
 more final real actual for that exact run, never a worse guess.
 """
 
+import logging
 import os
 import sqlite3
 import time
@@ -39,6 +40,50 @@ from contextlib import contextmanager
 from typing import List, Optional
 
 _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delay_accuracy_data.db")
+
+# FEATURE: query-execution visibility in Render's console. Render's free
+# plan has no Shell/file-browser access (see the db_diagnostics() docstring
+# below and app.py's /api/health wiring - both exist for the exact same
+# "I can't see what's happening on the server" reason), but it DOES stream
+# stdout/stderr live to its Logs tab, same as any `print()`/logging call
+# anywhere else in this app already shows up there. Using Python's stdlib
+# `logging` (not bare print) so these lines get the same timestamp/level
+# formatting as uvicorn's own request logs, and so they can be silenced
+# later (LOG_SQL_QUERIES=0) without touching this file again.
+#
+# Two independent layers, both opt-out via env var, both print()-simple:
+#   1. A human-readable one-line summary per call (WRITE/READ/DELETE, the
+#      train+date+station it was for, and the outcome) - this is what you
+#      actually want to eyeball in the log stream to confirm "yes, a real
+#      write just happened for train 20833".
+#   2. The literal SQL text SQLite actually ran, via sqlite3's own
+#      set_trace_callback - the raw ground truth, one level more detailed
+#      than (1), useful if something looks wrong and you need to see the
+#      exact statement rather than trust this file's own summary of it.
+_logger = logging.getLogger("delay_accuracy_store")
+if not _logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s [delay_accuracy_store] %(message)s"))
+    _logger.addHandler(_handler)
+    _logger.setLevel(logging.INFO)
+    _logger.propagate = False
+
+_LOG_QUERIES = (os.environ.get("LOG_SQL_QUERIES", "1").strip() != "0")
+
+
+def _sql_trace(statement: str) -> None:
+    """Registered per-connection via set_trace_callback - called by SQLite
+    itself for every statement it actually executes (CREATE TABLE, INSERT,
+    SELECT, everything), not just the ones this file's own functions log a
+    summary for. Kept as its own tiny function (rather than a bare lambda)
+    so a bug in logging itself can never break a real query - printing is
+    wrapped defensively since this runs inside SQLite's own C callback."""
+    if not _LOG_QUERIES:
+        return
+    try:
+        _logger.info("[SQL] %s", " ".join(statement.split()))
+    except Exception:
+        pass
 
 
 def _init_db():
@@ -73,6 +118,8 @@ def _init_db():
 def _connect():
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
+    if _LOG_QUERIES:
+        conn.set_trace_callback(_sql_trace)
     try:
         yield conn
         conn.commit()
@@ -127,6 +174,12 @@ def record_station_prediction_vs_actual(
                 now,
             ),
         )
+    if _LOG_QUERIES:
+        _logger.info(
+            "WRITE upsert train=%s date=%s station=%s(%s) predicted=%s%s actual=%s scheduled=%s actual_time=%s",
+            train_number, date, station_code, station_name or "?", predicted_delay_minutes,
+            " [locked]" if predicted_delay_locked else "", actual_delay_minutes, scheduled_time, actual_time,
+        )
 
 
 def get_run_records(train_number: str, date: str) -> List[dict]:
@@ -145,18 +198,29 @@ def get_run_records(train_number: str, date: str) -> List[dict]:
             """,
             (train_number, date),
         ).fetchall()
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+    if _LOG_QUERIES:
+        _logger.info("READ get_run_records train=%s date=%s -> %d row(s)", train_number, date, len(result))
+    return result
 
 
 def get_station_record(train_number: str, date: str, station_code: str) -> Optional[dict]:
     """One station's recorded comparison for one real-world run, or None
     if nobody was live-tracking this train when it passed that station."""
+    train_number_n, date_n, station_code_n = str(train_number).strip(), str(date).strip(), str(station_code).strip().upper()
     with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM station_delay_records WHERE train_number = ? AND date = ? AND station_code = ?",
-            (str(train_number).strip(), str(date).strip(), str(station_code).strip().upper()),
+            (train_number_n, date_n, station_code_n),
         ).fetchone()
-    return dict(row) if row else None
+    result = dict(row) if row else None
+    if _LOG_QUERIES:
+        _logger.info(
+            "READ get_station_record train=%s date=%s station=%s -> %s",
+            train_number_n, date_n, station_code_n,
+            f"predicted={result['predicted_delay_minutes']} actual={result['actual_delay_minutes']}" if result else "not found",
+        )
+    return result
 
 
 def purge_old_records(max_age_days: int = 90) -> int:
@@ -168,7 +232,10 @@ def purge_old_records(max_age_days: int = 90) -> int:
     cutoff = time.time() - max_age_days * 86400
     with _connect() as conn:
         cur = conn.execute("DELETE FROM station_delay_records WHERE recorded_at < ?", (cutoff,))
-        return cur.rowcount
+        removed = cur.rowcount
+    if _LOG_QUERIES:
+        _logger.info("DELETE purge_old_records max_age_days=%s -> %d row(s) removed", max_age_days, removed)
+    return removed
 
 
 def db_diagnostics() -> dict:

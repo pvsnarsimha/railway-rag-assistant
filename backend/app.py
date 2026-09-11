@@ -1628,9 +1628,28 @@ def _sync_station_delay_history(
                     "from_history": True,
                 }
 
-        # WRITE — only once this station is reached, with a real actual.
-        if stop.get("status") == "upcoming":
-            continue
+        # WRITE — only once this station has a real recorded actual.
+        # BUGFIX: this used to bail out here whenever RailKit's own raw
+        # `status` field still said "upcoming", on the assumption that
+        # "upcoming" == "not reached yet". That's not always true: RailRadar
+        # (a second, independent live provider) can confirm a station's
+        # real arrival/departure BEFORE RailKit gets around to flipping its
+        # own status field — that's exactly the KHAMMAM case (see the
+        # RailRadar-reconciliation block above, and predicted_delay_minutes'
+        # own "RailRadar" grounded_via) — so a station could sit there with
+        # a fully real, confirmed arrival/departure and STILL get skipped
+        # here forever, because `status` never changed even though the
+        # actual data genuinely arrived. That silently starved this whole
+        # table: zero rows ever written, with no error anywhere, because
+        # every station that got its real confirmation this way (rather
+        # than via RailKit itself) never reached the actual_is_real check
+        # below at all. The check two lines down (`actual_is_predicted is
+        # False`) is already the correct, more precise "has this genuinely
+        # happened yet" signal — a station truly still upcoming with no
+        # real data will always fail THAT check anyway (actual_is_predicted
+        # stays True/absent), so this status-based pre-check was redundant
+        # when right and actively wrong here — removed rather than fixed in
+        # place.
         arrival = stop.get("arrival") if isinstance(stop.get("arrival"), dict) else None
         if not arrival:
             continue
