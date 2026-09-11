@@ -24,6 +24,7 @@ Then open http://localhost:8000 in a browser.
 
 import asyncio
 import json
+import math
 import os
 import re
 import time
@@ -841,6 +842,64 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
     }
 
 
+# FEATURE: physics-based lock-confidence gate. Request was that a reporting
+# station's predicted delay should stop defaulting to "locked in" the
+# instant it's merely GROUNDED (its own real schedule vs. real-time ETA
+# arithmetic already matching, which can happen many stops out — that's
+# what made every upcoming station in a live run show "locked in" right
+# away). Locking should instead only happen once the train is genuinely
+# close enough — physically, given its real current speed and the real
+# remaining distance to that station — that the number is very unlikely to
+# move again before arrival.
+#
+# HONEST NOTE: there's no labeled dataset of "was this locked prediction
+# actually right" to train a real ML classifier on, so this is a
+# statistical approximation in the same spirit, not a trained model: it
+# assumes the train's speed over the remaining gap can plausibly vary by
+# +/- _LOCK_SPEED_VARIABILITY_CV around its current real reading, turns
+# that into an uncertainty on the remaining travel time, and asks (via the
+# standard normal two-sided probability) how likely the true arrival is to
+# land within _LOCK_TOLERANCE_MINUTES of what's predicted right now. That
+# probability, as a percentage, is the "confidence" — a station only ever
+# gets frozen ("locked in") once it clears LOCK_CONFIDENCE_THRESHOLD_PCT.
+# Because both remaining distance and travel time shrink together as the
+# train approaches a station, this naturally clears the bar right around
+# the last non-reporting (intermediate) waypoint before that station — a
+# fast train "locks in" a bit further out in km than a slow one, since
+# what actually matters is the remaining TIME, not the raw distance.
+LOCK_CONFIDENCE_THRESHOLD_PCT = 99.5
+_LOCK_SPEED_VARIABILITY_CV = 0.12   # assumed +/-12% real-world speed variability over the final approach
+_LOCK_TOLERANCE_MINUTES = 1.0       # the arrival-time tolerance the confidence score is computed against
+
+
+def _lock_confidence_from_speed_distance(gap_km, speed_kmph):
+    """
+    Numeric 0-100 confidence that a station's CURRENT predicted delay will
+    still hold once the train actually gets there, derived only from real
+    inputs: `gap_km` (real remaining distance to that station) and
+    `speed_kmph` (the train's real current/average running speed). See the
+    module-level comment above this function for the full method and why
+    it's an honest statistical approximation rather than a trained model.
+    Returns None when there isn't enough real data to compute it (unknown
+    distance, or no positive speed reading) — callers must treat None as
+    "not eligible to lock", never as 0% (0% would wrongly claim we know
+    it's UNTRUSTWORTHY, when really we just don't have the inputs yet).
+    """
+    if gap_km is None or speed_kmph is None or speed_kmph <= 0 or gap_km < 0:
+        return None
+    travel_time_min = gap_km / speed_kmph * 60.0
+    if travel_time_min <= 0:
+        return 100.0  # already effectively there
+    uncertainty_min = travel_time_min * _LOCK_SPEED_VARIABILITY_CV
+    if uncertainty_min <= 0:
+        return 100.0
+    z = _LOCK_TOLERANCE_MINUTES / uncertainty_min
+    # erf(z / sqrt(2)) is P(|X| <= z*sigma) for X ~ Normal(0, sigma) — the
+    # two-sided "within tolerance" probability, expressed as a percentage.
+    confidence = 100.0 * math.erf(z / math.sqrt(2.0))
+    return round(min(100.0, max(0.0, confidence)), 2)
+
+
 def _predict_delay_per_reporting_station(
     timeline_json: list, total_distance_km, current_delay_minutes,
     trend_per_stop, trend_basis, avg_speed_kmph, avg_speed_basis,
@@ -1217,6 +1276,36 @@ def _predict_delay_per_reporting_station(
         last_intermediate_grounded_delay = None
         last_intermediate_grounded_name = None
 
+    # FEATURE: lock-confidence pass. Runs AFTER the anchor pass above (so it
+    # sees every station that just got grounded via the last non-reporting
+    # waypoint, not just self-grounded ones) and BEFORE the
+    # neighbor-consistency pass (which only ever touches still-ungrounded
+    # stations, so ordering relative to it doesn't matter for correctness,
+    # but doing this first keeps every already-grounded station's numbers
+    # final before that pass runs). For every still-upcoming reporting
+    # station that's grounded (by either mechanism), computes the real
+    # speed/distance lock-confidence score (see
+    # _lock_confidence_from_speed_distance above `_predict_delay_per_
+    # reporting_station`) using `distance_ahead_km` — the real remaining
+    # distance from the train's actual current position to THIS station,
+    # already computed per-stop earlier in this function — and the
+    # freshest real speed reading. `_lock_grounded_station_predictions`
+    # (below, in the caller) only ever freezes a station's prediction once
+    # this score clears LOCK_CONFIDENCE_THRESHOLD_PCT; being merely
+    # "grounded" is no longer enough by itself.
+    lock_speed_kmph = eta_speed_kmph or avg_speed_kmph
+    for s in timeline_json:
+        if s.get("status") != "upcoming" or s.get("kind") == "intermediate":
+            continue
+        if not s.get("predicted_delay_is_grounded") or s.get("predicted_delay_minutes") is None:
+            s["predicted_delay_lock_eligible"] = False
+            continue
+        confidence_pct = _lock_confidence_from_speed_distance(s.get("distance_ahead_km"), lock_speed_kmph)
+        s["predicted_delay_lock_confidence_pct"] = confidence_pct
+        s["predicted_delay_lock_eligible"] = bool(
+            confidence_pct is not None and confidence_pct >= LOCK_CONFIDENCE_THRESHOLD_PCT
+        )
+
     # FEATURE: neighbor-consistency pass. A station without its own real
     # schedule (common for signalling cabins / small halts RailKit's
     # timetable doesn't carry a time for - e.g. "F Cabin" points) falls
@@ -1396,14 +1485,33 @@ def _lock_grounded_station_predictions(timeline_json: list, locked_predictions: 
     """
     FEATURE: once a reporting station's predicted delay becomes GROUNDED
     (real schedule-vs-ETA math, or inherited from the nearest grounded
-    intermediate point right before it — see the anchor pass above), lock
-    that number in for the rest of the journey instead of letting it keep
-    changing poll to poll. Request was specifically about user trust: a
-    predicted time that visibly shifts between refreshes (even if each
-    individual figure was defensible) reads as the app not really knowing
-    what it's doing, even when the underlying math is sound. Once real
-    evidence has spoken for a station, there's no good reason to let a
-    LATER, less-certain recomputation replace it with something different.
+    intermediate point right before it — see the anchor pass above) AND
+    physically close enough, in real remaining time, for that grounding to
+    be trustworthy (see the lock-confidence pass right after the anchor
+    pass, and LOCK_CONFIDENCE_THRESHOLD_PCT), lock that number in for the
+    rest of the journey instead of letting it keep changing poll to poll.
+
+    BUGFIX: being merely "grounded" used to be enough on its own to lock —
+    but a station's own schedule-vs-ETA arithmetic can come out "grounded"
+    many stops out (as soon as it has a real expected time and a computable
+    ETA at all), which meant almost every upcoming reporting station showed
+    "locked in" immediately, freezing an early, less-reliable guess for the
+    whole rest of the approach. Locking now additionally requires the
+    predicted_delay_lock_eligible flag set by the lock-confidence pass —
+    which only turns true once the real remaining distance and the train's
+    real current speed put the station well within reach (>=
+    LOCK_CONFIDENCE_THRESHOLD_PCT confidence) — so in practice a station
+    settles into "locked in" right around when the train reaches the last
+    non-reporting waypoint before it, not the moment a distant guess
+    happens to line up.
+
+    Request was specifically about user trust: a predicted time that
+    visibly shifts between refreshes (even if each individual figure was
+    defensible) reads as the app not really knowing what it's doing, even
+    when the underlying math is sound. Once real evidence has spoken for a
+    station AND the train is genuinely close enough for that evidence to be
+    trustworthy, there's no good reason to let a LATER, less-certain
+    recomputation replace it with something different.
 
     `locked_predictions` is a plain dict the caller owns and passes back in
     every poll — for the live WebSocket feed that's a local variable living
@@ -1458,7 +1566,11 @@ def _lock_grounded_station_predictions(timeline_json: list, locked_predictions: 
                 departure["actual"] = existing_lock["departure_actual"]
                 departure["delay_minutes"] = existing_lock["departure_delay_minutes"]
                 departure["actual_is_predicted"] = True
-        elif stop.get("predicted_delay_is_grounded") and stop.get("predicted_delay_minutes") is not None:
+        elif (
+            stop.get("predicted_delay_is_grounded")
+            and stop.get("predicted_delay_minutes") is not None
+            and stop.get("predicted_delay_lock_eligible")
+        ):
             locked_predictions[code] = {
                 "predicted_delay_minutes": stop.get("predicted_delay_minutes"),
                 "predicted_eta": stop.get("predicted_eta"),
