@@ -182,6 +182,94 @@ def record_station_prediction_vs_actual(
         )
 
 
+def record_station_prediction(
+    train_number: str, date: str, station_code: str, station_name: Optional[str],
+    predicted_delay_minutes: Optional[int], predicted_delay_confidence: Optional[str],
+    predicted_delay_locked: bool, predicted_delay_grounded_via: Optional[str],
+    sequence_index: Optional[int] = None,
+) -> None:
+    """
+    FEATURE: durably record a station's PREDICTION the moment it's known —
+    before the station has been reached, before there's any actual to pair
+    it with yet.
+
+    HONEST NOTE on why this exists: record_station_prediction_vs_actual()
+    above only ever gets called once a station is BOTH predicted AND
+    reached with a real actual, which — before this function existed —
+    meant the prediction only ever survived in the caller's own in-memory
+    `final_predictions` dict (see app.py's _snapshot_prediction_before_arrival/
+    _sync_station_delay_history) for the lifetime of ONE WebSocket
+    connection. In practice, real connections drop and reconnect
+    constantly — a closed tab, a flaky network, Render's own free-tier
+    idle behavior — so a station's prediction was routinely computed
+    correctly while it was "upcoming", then lost the moment THAT specific
+    connection dropped, before the station was actually reached. The next
+    connection (even seconds later) would see the station already
+    "reached" with no in-memory snapshot of its own, check history via
+    get_station_record(), and find nothing — because nothing had ever been
+    WRITTEN yet, only held in a now-gone connection's memory. Real symptom
+    this caused: on a multi-hour journey with many reconnects, only the
+    rare station whose full "upcoming -> reached" transition happened to
+    fall entirely inside one unbroken connection ever got durably
+    recorded — every other station, despite genuinely having a real
+    predicted-vs-actual comparison computed for it at some point, stayed
+    permanently unrecorded.
+
+    This function closes that gap: call it every poll for every
+    currently-"upcoming" reporting station with a known prediction (cheap,
+    idempotent upsert — see record_station_prediction_vs_actual's own same
+    reasoning). Once persisted, ANY future connection — even a brand new
+    one — can pick up this prediction via get_station_record() once the
+    station is finally reached, and pair it with the real actual.
+
+    SAFETY: deliberately does NOT touch actual_delay_minutes/scheduled_time/
+    actual_time on conflict (unlike record_station_prediction_vs_actual,
+    which always overwrites them). This is what makes it safe to call
+    on every single poll while a station is upcoming: even in an
+    unexpected ordering (e.g. this fires again after a real actual was
+    already recorded for this exact station), it can never clobber a real
+    recorded actual with NULLs — it only ever refines the predicted half
+    of the row, leaving whatever actual data already exists untouched.
+    """
+    train_number = str(train_number).strip()
+    date = str(date).strip()
+    station_code = str(station_code).strip().upper()
+    if not train_number or not date or not station_code:
+        return
+    now = time.time()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO station_delay_records (
+                train_number, date, station_code, station_name, sequence_index,
+                predicted_delay_minutes, predicted_delay_confidence, predicted_delay_locked,
+                predicted_delay_grounded_via, actual_delay_minutes, scheduled_time, actual_time,
+                recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+            ON CONFLICT(train_number, date, station_code) DO UPDATE SET
+                station_name = excluded.station_name,
+                sequence_index = excluded.sequence_index,
+                predicted_delay_minutes = excluded.predicted_delay_minutes,
+                predicted_delay_confidence = excluded.predicted_delay_confidence,
+                predicted_delay_locked = excluded.predicted_delay_locked,
+                predicted_delay_grounded_via = excluded.predicted_delay_grounded_via,
+                recorded_at = excluded.recorded_at
+            """,
+            (
+                train_number, date, station_code, station_name, sequence_index,
+                predicted_delay_minutes, predicted_delay_confidence, 1 if predicted_delay_locked else 0,
+                predicted_delay_grounded_via, now,
+            ),
+        )
+    if _LOG_QUERIES:
+        _logger.info(
+            "WRITE pending-prediction upsert train=%s date=%s station=%s(%s) predicted=%s%s",
+            train_number, date, station_code, station_name or "?", predicted_delay_minutes,
+            " [locked]" if predicted_delay_locked else "",
+        )
+
+
 def get_run_records(train_number: str, date: str) -> List[dict]:
     """All recorded station comparisons for one specific real-world run,
     in route order (sequence_index) where known. An empty list is a

@@ -1576,14 +1576,32 @@ def _sync_station_delay_history(
          means nobody was live-tracking this train when it passed that
          station, same as an in-memory miss already meant.
 
-      2. WRITE: the moment a reporting station has BOTH a known
-         pre-arrival prediction (from this connection's own memory, or
-         just filled from the store above) AND a real recorded actual
-         delay (RailKit's own, or RailRadar's independently-confirmed one
-         — never this app's own predicted stand-in, checked via
-         actual_is_predicted), that pairing is persisted so the NEXT
-         person to open this exact train/date — even after this
-         connection closes — can see it too.
+      2. PERSIST: the moment a still-"upcoming" reporting station's OWN
+         prediction becomes known (from this connection's live model
+         computation), it's durably written too — via
+         delay_accuracy_store.record_station_prediction(), predicted half
+         only, actual left NULL. BUGFIX: without this, that prediction
+         only ever lived in THIS connection's own `final_predictions`
+         dict — real connections drop and reconnect constantly (a closed
+         tab, a flaky network, Render's free-tier idle behavior), so a
+         station's prediction was routinely computed correctly, then lost
+         the instant that connection dropped, before the station was
+         actually reached. The NEXT connection (even seconds later) would
+         see it already reached with nothing to fill from either, since
+         nothing had ever been written — only held in a now-gone
+         connection's memory. Persisting the prediction as soon as it's
+         known means step 3 below can pair it up later regardless of how
+         many reconnects happen in between.
+
+      3. WRITE: the moment a reporting station has BOTH a known
+         pre-arrival prediction (from this connection's own memory, just
+         filled from the store above, or just persisted by step 2 on an
+         earlier poll — possibly from a DIFFERENT connection entirely) AND
+         a real recorded actual delay (RailKit's own, or RailRadar's
+         independently-confirmed one — never this app's own predicted
+         stand-in, checked via actual_is_predicted), that pairing is
+         persisted so the NEXT person to open this exact train/date — even
+         after this connection closes — can see it too.
 
     `date_ddmmyyyy` falls back to today (same convention already used for
     crowd_date elsewhere in this handler) since a run has to be keyed by
@@ -1627,6 +1645,37 @@ def _sync_station_delay_history(
                     "predicted_delay_grounded_via": stored.get("predicted_delay_grounded_via"),
                     "from_history": True,
                 }
+
+        # PERSIST — the moment THIS station's own pre-arrival prediction is
+        # known, durably record it (predicted half only, actual left NULL)
+        # so it survives even if this exact connection drops before the
+        # station is reached. See this function's own docstring (step 2)
+        # and record_station_prediction()'s docstring in
+        # delay_accuracy_store.py for the full reasoning — in short: this
+        # is what makes the WRITE step below succeed even when the
+        # "upcoming -> reached" transition for a station spans a
+        # reconnect, rather than requiring one unbroken connection to have
+        # witnessed both halves itself. Harmless/idempotent to call every
+        # poll while upcoming (same "safe to re-upsert" reasoning as
+        # elsewhere in this file) — record_station_prediction() never
+        # touches actual_delay_minutes, so it can never race with or
+        # clobber the WRITE step below, whichever order polls happen to
+        # run in.
+        if stop.get("status") == "upcoming":
+            snapshot = final_predictions.get(code)
+            if snapshot is not None and snapshot.get("predicted_delay_minutes") is not None:
+                try:
+                    delay_accuracy_store.record_station_prediction(
+                        train_number=train_number, date=record_date, station_code=code,
+                        station_name=stop.get("name"),
+                        predicted_delay_minutes=snapshot.get("predicted_delay_minutes"),
+                        predicted_delay_confidence=snapshot.get("predicted_delay_confidence"),
+                        predicted_delay_locked=bool(snapshot.get("predicted_delay_locked")),
+                        predicted_delay_grounded_via=snapshot.get("predicted_delay_grounded_via"),
+                        sequence_index=idx,
+                    )
+                except Exception:
+                    pass
 
         # WRITE — only once this station has a real recorded actual.
         # BUGFIX: this used to bail out here whenever RailKit's own raw
