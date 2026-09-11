@@ -182,6 +182,32 @@ def health():
     }
 
 
+@app.get("/api/delay-history/{train_number}/{date}")
+def api_delay_history_records(train_number: str, date: str):
+    """
+    FEATURE: same "no shell/file-browser access on Render's free plan"
+    problem as /api/health above, one level deeper — /api/health can only
+    tell you a row COUNT exists, not what's actually IN it. This exposes
+    delay_accuracy_store.get_run_records() (already written, never wired
+    to a route — see that file's own docstring) as plain JSON so the
+    actual predicted-vs-actual rows for one real-world run can be
+    inspected straight from a browser: hit
+    https://<your-render-url>/api/delay-history/<train_number>/<DD-MM-YYYY>
+    (e.g. .../api/delay-history/20833/11-09-2026) instead of needing a
+    paid plan's Shell tab or a local copy of the .db file, which is a
+    DIFFERENT file from whatever's actually on the server (see the
+    "which delay_accuracy_data.db am I even looking at" mixup this was
+    added to resolve). An empty `records` list is the honest, correct
+    answer when nobody's live-tracked this exact train+date combination
+    through to a reached station yet - not an error.
+    """
+    records = delay_accuracy_store.get_run_records(train_number, date)
+    return {
+        "train_number": train_number, "date": date,
+        "count": len(records), "records": records,
+    }
+
+
 class ChatRequest(BaseModel):
     message: str
     image_base64: Optional[str] = None
