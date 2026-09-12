@@ -12,6 +12,11 @@ export default function SectionCard({ title, subtitle, children, style }) {
   );
 }
 
+// REDESIGN NOTE: added a soft shadow/elevation to the app's single shared
+// card component (used by nearly every screen) so the whole app reads as
+// one polished, "real" product rather than flat bordered boxes — a single
+// change here lifts every screen that already uses SectionCard, without
+// needing to touch each one individually.
 const styles = StyleSheet.create({
   card: {
     backgroundColor: colors.card,
@@ -20,6 +25,11 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
+    shadowColor: "#0B3D91",
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
   },
   title: {
     fontSize: 16,

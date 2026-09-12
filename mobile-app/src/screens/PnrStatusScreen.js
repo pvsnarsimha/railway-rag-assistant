@@ -66,7 +66,14 @@ export default function PnrStatusScreen() {
           <Row label="Date of Journey" value={result.date_of_journey || "Not available"} />
           <Row label="Class" value={result.class || "Not available"} />
           <Row label="Chart Prepared" value={result.chart_prepared === null || result.chart_prepared === undefined ? "Not available" : result.chart_prepared ? "Yes" : "No"} />
-          <Row label="Overall Status" value={result.overall_status_text || "Not available"} highlight />
+
+          {result.overall_status_text ? (
+            <View style={[styles.statusPill, statusPillStyle(result.overall_status_text)]}>
+              <Text style={[styles.statusPillText, statusPillTextStyle(result.overall_status_text)]}>{result.overall_status_text}</Text>
+            </View>
+          ) : (
+            <Row label="Overall Status" value="Not available" />
+          )}
 
           {result.passengers?.length ? (
             <View style={styles.passengerBlock}>
@@ -101,6 +108,26 @@ function Row({ label, value, highlight }) {
   );
 }
 
+// REDESIGN NOTE: the overall PNR status now reads as a colored pill (green
+// confirmed / amber RAC / red waitlisted-or-cancelled) instead of plain
+// text, matching how every real IRCTC-adjacent app surfaces this — the
+// single most important field on the whole screen deserves to be scannable
+// at a glance, not just another row in a list.
+function statusPillStyle(text) {
+  const t = String(text).toUpperCase();
+  if (t.includes("CNF") || t.includes("CONFIRM")) return { backgroundColor: "#E8F8F0" };
+  if (t.includes("RAC")) return { backgroundColor: "#FFF6E5" };
+  if (t.includes("WL") || t.includes("CAN")) return { backgroundColor: "#FDECEC" };
+  return { backgroundColor: colors.chip };
+}
+function statusPillTextStyle(text) {
+  const t = String(text).toUpperCase();
+  if (t.includes("CNF") || t.includes("CONFIRM")) return { color: colors.success };
+  if (t.includes("RAC")) return { color: colors.warning };
+  if (t.includes("WL") || t.includes("CAN")) return { color: colors.danger };
+  return { color: colors.primary };
+}
+
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   content: { padding: spacing.lg },
@@ -113,6 +140,8 @@ const styles = StyleSheet.create({
   rowLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
   rowValue: { fontSize: 13, color: colors.text, fontWeight: "600", flexShrink: 1, textAlign: "right" },
   rowValueHighlight: { color: colors.primary },
+  statusPill: { borderRadius: radius.md, paddingVertical: spacing.md, alignItems: "center", marginTop: spacing.sm },
+  statusPillText: { fontSize: 16, fontWeight: "700" },
   passengerBlock: { marginTop: spacing.md },
   passengerHeading: { fontSize: 12, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: spacing.sm },
   passengerRow: {

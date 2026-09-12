@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { ScrollView, View, Text, StyleSheet } from "react-native";
+import { ScrollView, View, Text, StyleSheet, TouchableOpacity } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";
@@ -84,7 +85,16 @@ export default function FareEnquiryScreen() {
       </SectionCard>
 
       {result ? (
-        <SectionCard title={`${result.train_number} — ${source.trim()} → ${dest.trim()}`} subtitle={`${result.travel_class} · ${result.quota} · ${result.date}`}>
+        <View style={styles.resultCard}>
+          <View style={styles.resultHeaderRow}>
+            <View>
+              <Text style={styles.resultTrain}>{result.train_number}</Text>
+              <Text style={styles.resultRoute}>{source.trim()} <Ionicons name="arrow-forward" size={11} /> {dest.trim()} · {result.date}</Text>
+            </View>
+            <TouchableOpacity onPress={calculate} style={styles.refreshBtn} activeOpacity={0.7}>
+              <Ionicons name="refresh" size={16} color={colors.primary} />
+            </TouchableOpacity>
+          </View>
           {result.fare != null ? (
             <View style={styles.fareBox}>
               <Text style={styles.fareAmount}>₹{result.fare}</Text>
@@ -93,7 +103,7 @@ export default function FareEnquiryScreen() {
           ) : (
             <Text style={styles.note}>No fare figure returned for this combination — the class/quota may not run on this train.</Text>
           )}
-        </SectionCard>
+        </View>
       ) : null}
     </ScrollView>
   );
@@ -107,6 +117,15 @@ const styles = StyleSheet.create({
   error: { color: colors.danger, fontSize: 12, marginTop: spacing.sm },
   note: { color: colors.textMuted, fontSize: 12 },
   chipLabel: { fontSize: 11, fontWeight: "700", color: colors.textMuted, marginTop: spacing.sm, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.3 },
+  resultCard: {
+    backgroundColor: colors.card, borderRadius: radius.lg, padding: spacing.lg,
+    borderWidth: 1, borderColor: colors.border,
+    shadowColor: "#0B3D91", shadowOpacity: 0.06, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2,
+  },
+  resultHeaderRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: spacing.md },
+  resultTrain: { fontSize: 16, fontWeight: "700", color: colors.text },
+  resultRoute: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  refreshBtn: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.chip, alignItems: "center", justifyContent: "center" },
   fareBox: { backgroundColor: colors.chip, borderRadius: radius.md, padding: spacing.lg, alignItems: "center" },
   fareAmount: { fontSize: 28, fontWeight: "700", color: colors.primary },
   fareNote: { fontSize: 12, color: colors.textMuted, marginTop: 4 },
