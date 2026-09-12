@@ -35,13 +35,10 @@ const TOOLS = [
   { key: "seat", label: "💺 Seat Picker" },
   { key: "compare", label: "⚖️ Route Compare" },
   { key: "refund", label: "💸 Refund" },
-  { key: "heatmap", label: "🗓️ Fare Heatmap" },
   { key: "alerts", label: "🔔 Delay Alerts" },
   { key: "crowd", label: "👥 Station Crowd" },
-  { key: "parcel", label: "📦 Parcel Tracking" },
   { key: "offline", label: "📴 Offline Stations" },
   { key: "gantt", label: "📊 Journey Timeline" },
-  { key: "profile", label: "🙋 Travel Profile" },
   { key: "nearme", label: "📍 Near Me" },
   { key: "journeyplanner", label: "🗺️ Journey Planner" },
   { key: "delayhistory", label: "📈 Delay History" },
@@ -50,10 +47,20 @@ const TOOLS = [
   { key: "platformnav", label: "🧭 Indoor Navigation" },
   { key: "smartalarm", label: "⏰ Smart Alarm" },
   { key: "transitoptimizer", label: "🚄 Transit Optimizer" },
-  { key: "timelapse", label: "🎞️ Route Time-Lapse" },
   { key: "bookingwindow", label: "🎟️ Smart Booking" },
   { key: "stationnav", label: "🧭 Station Navigator" },
 ];
+// REFORM: trimmed from the original 27 tools down to 23. Removed —
+// "Parcel Tracking" (a different service line entirely, freight not
+// passenger travel — RailYatri itself doesn't put this in its main
+// passenger app either), "Fare Heatmap" (a full multi-day fare calendar
+// is a power-user/deal-hunter feature; an ordinary passenger picks one
+// date), "Route Time-Lapse" (a novelty route animation, not something a
+// passenger needs to decide anything), and "Travel Profile" (a
+// preferences-bookkeeping screen, not itself an answer to a trip
+// question). Their backend endpoints and render branches below are left
+// untouched — only the menu entry is gone — so nothing breaks and any of
+// these can come back with a one-line revert if wanted later.
 // NOTE: "Live Crowd Map for Train Coaches" and "Water/Restroom Availability
 // Live Check" were removed — neither RailKit (RapidAPI) nor RailRadar
 // exposes any real per-coach occupancy or water/restroom sensor feed.
