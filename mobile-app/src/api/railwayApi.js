@@ -55,7 +55,16 @@ export async function searchStations(baseUrl, { query, topK = 5 }) {
  * structured form endpoint instead of free-text chat.
  */
 export async function searchTrains(baseUrl, { source, dest, date, time, travelClass, quota, limit = 10, page = 1 }) {
-  const client = makeClient(baseUrl, { timeoutMs: 15000 });
+  // BUGFIX: picking a real class (not "Any") together with a date makes
+  // the backend run up to ~36 real per-train availability/fare checks
+  // against RapidAPI (now parallelized server-side, but still real
+  // network round trips) — the old 15s timeout here was tuned for the
+  // "Any" class path (which skips all of that and returns almost
+  // immediately) and was cutting the request off mid-flight the moment a
+  // specific class was picked, which showed up as a generic "couldn't
+  // reach the backend" error. Give the class-filtered path real headroom;
+  // "Any" still returns in well under this either way.
+  const client = makeClient(baseUrl, { timeoutMs: travelClass ? 45000 : 15000 });
   const { data } = await client.post("/api/trains/search", {
     source,
     dest,
@@ -521,7 +530,7 @@ export async function getTrainSchedule(baseUrl, trainNumber) {
  * Availability check for one train/route/date/class/quota.
  */
 export async function checkSeatAvailability(baseUrl, { trainNumber, source, dest, date, travelClass, quota }) {
-  const client = makeClient(baseUrl, { timeoutMs: 15000 });
+  const client = makeClient(baseUrl, { timeoutMs: 20000 });
   const { data } = await client.post("/api/train/seat-availability", {
     train_number: trainNumber, source, dest, date,
     travel_class: travelClass, quota: quota || "GN",
@@ -534,7 +543,7 @@ export async function checkSeatAvailability(baseUrl, { trainNumber, source, dest
  * train/route/date/class/quota.
  */
 export async function getTrainFare(baseUrl, { trainNumber, source, dest, date, travelClass, quota }) {
-  const client = makeClient(baseUrl, { timeoutMs: 15000 });
+  const client = makeClient(baseUrl, { timeoutMs: 20000 });
   const { data } = await client.post("/api/train/fare", {
     train_number: trainNumber, source, dest, date,
     travel_class: travelClass, quota: quota || "GN",

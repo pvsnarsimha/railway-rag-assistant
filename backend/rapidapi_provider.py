@@ -54,6 +54,24 @@ RAPIDAPI_HOST = os.environ.get("RAPIDAPI_HOST", "irctc1.p.rapidapi.com")
 BASE_URL = f"https://{RAPIDAPI_HOST}"
 TIMEOUT_SECONDS = 10
 
+# PERFORMANCE FIX: a bare `requests.get()` opens a brand new TCP+TLS
+# connection for every single call. app.py's Search Trains live
+# availability/fare check can make dozens of these calls back-to-back for
+# one search (see api_trains_search's ThreadPoolExecutor batches) — a
+# shared, connection-pooling Session (kept alive for the life of this
+# worker process) lets those reuse an already-open HTTPS connection to
+# RapidAPI instead of paying a fresh handshake every time, which matters
+# a lot once several calls happen concurrently across threads (Session is
+# thread-safe for this use — each thread gets its own connection from the
+# pool). Same headers/behavior as before, just not re-handshaking.
+_session = requests.Session()
+_session.headers.update({"x-rapidapi-host": RAPIDAPI_HOST})
+# Default pool size (10) is right at the edge of api_trains_search's
+# 8-worker thread pool plus any other concurrent caller (e.g. the /ws/track
+# loop) — widen it so a burst of concurrent calls gets a pooled connection
+# instead of blocking on the pool itself.
+_session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20))
+
 
 class RapidAPIProviderError(Exception):
     pass
@@ -74,7 +92,7 @@ def _headers():
 def _get(path: str, params: dict) -> dict:
     url = f"{BASE_URL}{path}"
     try:
-        resp = requests.get(url, headers=_headers(), params=params, timeout=TIMEOUT_SECONDS)
+        resp = _session.get(url, headers=_headers(), params=params, timeout=TIMEOUT_SECONDS)
     except requests.exceptions.RequestException as exc:
         raise RapidAPIProviderError(f"Could not reach RapidAPI ({exc}).")
 

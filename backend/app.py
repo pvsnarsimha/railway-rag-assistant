@@ -30,6 +30,7 @@ import re
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -2851,33 +2852,61 @@ def api_trains_search(req: TrainSearchRequest):
     if req.travel_class and req.date:
         checked = trains[:AVAILABILITY_CHECK_CAP]
         fare_candidates = checked[:FARE_CHECK_CAP]
-        for t in fare_candidates:
+
+        # PERFORMANCE FIX (BUGFIX): these used to be two plain sequential
+        # for-loops — up to FARE_CHECK_CAP (6) real get_fare() calls, then
+        # up to AVAILABILITY_CHECK_CAP (30) real get_seat_availability()
+        # calls, EACH its own blocking HTTPS round trip to RapidAPI, one
+        # after another. That's up to 36 serialized external calls for a
+        # single search — easily 20-40+ seconds of real wall-clock time
+        # even when every individual call is healthy, which blew straight
+        # past the mobile client's timeout (railwayApi.js's searchTrains)
+        # and surfaced as a generic "couldn't reach the backend" network
+        # error. "Any" class skips this whole block entirely (see the
+        # `elif not req.travel_class` branch below) — which is exactly
+        # why Trains Between Stations only ever worked with "Any" and
+        # broke the moment a real class like 1A/2A/3A was picked. Running
+        # each batch through a small thread pool instead of a for-loop
+        # cuts the wall-clock time roughly by the worker count, not the
+        # call count — same calls, same real data, just not serialized.
+        # (See also rapidapi_provider.py's module-level requests.Session,
+        # which reuses TCP/TLS connections across these calls instead of
+        # paying a fresh handshake per call.)
+        def _fetch_fare(t):
             try:
                 fare_data = railway_api.get_fare(
                     t.train_number, source_code, dest_code, req.date, req.travel_class, (req.quota or "GN").upper(),
                 )
                 amount = advanced_features.extract_fare_amount(fare_data)
-                fare_cache[t.train_number] = (amount, None if amount is not None else "Fare not returned for this class/quota.")
+                return t.train_number, (amount, None if amount is not None else "Fare not returned for this class/quota.")
             except railway_api.RailwayAPIError as e:
-                fare_cache[t.train_number] = (None, str(e))
-        if len(checked) > FARE_CHECK_CAP:
-            fare_note = f"Live fare checked for the {FARE_CHECK_CAP} closest-matching trains only; the rest show timing/availability only — open a train's details or use Journey Planner for its fare."
-        for t in checked:
+                return t.train_number, (None, str(e))
+
+        def _fetch_availability(t):
             try:
                 avail = railway_api.get_seat_availability(
                     t.train_number, source_code, dest_code, req.date, req.travel_class, (req.quota or "GN").upper(),
                 )
                 status_text = advanced_features.extract_status_text(avail, req.date)
-                availability_cache[t.train_number] = (status_text, None)
                 # If a call succeeded but no status could be extracted at
                 # all, keep one real sample of the response's actual key
                 # shape so a future mismatch (a shape this deep-search
                 # still doesn't cover) can be fixed from real evidence
                 # instead of another guess, same pattern as PNR/history.
-                if status_text is None and availability_raw_keys_sample is None:
-                    availability_raw_keys_sample = top_level_keys(avail)
+                raw_sample = top_level_keys(avail) if status_text is None else None
+                return t.train_number, (status_text, None), raw_sample
             except railway_api.RailwayAPIError as e:
-                availability_cache[t.train_number] = (None, str(e))
+                return t.train_number, (None, str(e)), None
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for train_number, result in pool.map(_fetch_fare, fare_candidates):
+                fare_cache[train_number] = result
+            if len(checked) > FARE_CHECK_CAP:
+                fare_note = f"Live fare checked for the {FARE_CHECK_CAP} closest-matching trains only; the rest show timing/availability only — open a train's details or use Journey Planner for its fare."
+            for train_number, result, raw_sample in pool.map(_fetch_availability, checked):
+                availability_cache[train_number] = result
+                if raw_sample and availability_raw_keys_sample is None:
+                    availability_raw_keys_sample = raw_sample
 
         # A train RailKit explicitly confirms doesn't run this class on
         # this leg is never a real match for what was asked for - drop it
@@ -4514,6 +4543,42 @@ def api_train_schedule(train_number: str):
     return {"train_number": train_number, "train_name": train_name, "stations": stations}
 
 
+def _lookup_real_classes(train_number: str, source_code: str, dest_code: str, date_ddmmyyyy: str) -> Optional[List[str]]:
+    """Best-effort REAL classes list for a specific train on this route/date,
+    via the exact same trains-between-stations search Search Trains uses
+    (trains_between.parse_trains_list already exposes each train's real
+    `classes`). Used to turn an opaque provider rejection like "Invalid
+    Journey Details" into something actionable: e.g. a Vande Bharat/
+    Shatabdi Express genuinely only offers CC/EC — asking for 1A/2A/3A/SL
+    on one of those isn't a bug, it's a real class that doesn't exist on
+    that train, and the raw provider error alone doesn't say so. Never a
+    guess — returns None if the train can't be found in a real search
+    result, and the caller falls back to showing the raw provider message
+    on its own."""
+    try:
+        live_data = railway_api.search_trains_between_stations(source_code, dest_code, date_ddmmyyyy)
+    except railway_api.RailwayAPIError:
+        return None
+    for t in trains_between.parse_trains_list(live_data):
+        if t.train_number == train_number:
+            return t.classes or None
+    return None
+
+
+def _class_mismatch_suffix(train_number: str, source_code: str, dest_code: str, date_ddmmyyyy: str, travel_class: str) -> str:
+    """Returns an extra sentence to append to a seat-availability/fare
+    error when the real class list for this train is known and doesn't
+    include the requested class — empty string if that can't be
+    confirmed (unknown train, lookup itself failed, or the class IS
+    listed and the failure is for some other real reason)."""
+    real_classes = _lookup_real_classes(train_number, source_code, dest_code, date_ddmmyyyy)
+    if not real_classes:
+        return ""
+    if travel_class.upper() in [c.strip().upper() for c in real_classes]:
+        return ""
+    return f" This train's real classes on this route are {', '.join(real_classes)} — {travel_class.upper()} isn't one of them."
+
+
 class TrainSeatAvailabilityRequest(BaseModel):
     train_number: str
     source: str
@@ -4552,7 +4617,11 @@ def api_train_seat_availability(req: TrainSeatAvailabilityRequest):
             req.train_number, source_code, dest_code, req.date, req.travel_class.upper(), quota,
         )
     except railway_api.RailwayAPIError as e:
-        return {"train_number": req.train_number, "travel_class": req.travel_class, "quota": quota, "date": req.date, "error": str(e)}
+        base_error = str(e)
+        if base_error and not base_error.rstrip().endswith((".", "!", "?")):
+            base_error = base_error.rstrip() + "."
+        error_text = base_error + _class_mismatch_suffix(req.train_number, source_code, dest_code, req.date, req.travel_class)
+        return {"train_number": req.train_number, "travel_class": req.travel_class, "quota": quota, "date": req.date, "error": error_text}
     return {
         "train_number": req.train_number,
         "travel_class": req.travel_class,
@@ -4595,7 +4664,11 @@ def api_train_fare(req: TrainFareRequest):
             req.train_number, source_code, dest_code, req.date, req.travel_class.upper(), quota,
         )
     except railway_api.RailwayAPIError as e:
-        return {"train_number": req.train_number, "travel_class": req.travel_class, "quota": quota, "date": req.date, "error": str(e)}
+        base_error = str(e)
+        if base_error and not base_error.rstrip().endswith((".", "!", "?")):
+            base_error = base_error.rstrip() + "."
+        error_text = base_error + _class_mismatch_suffix(req.train_number, source_code, dest_code, req.date, req.travel_class)
+        return {"train_number": req.train_number, "travel_class": req.travel_class, "quota": quota, "date": req.date, "error": error_text}
     return {
         "train_number": req.train_number,
         "travel_class": req.travel_class,
