@@ -75,7 +75,7 @@ def find_nearby_stations(anchor_code: Optional[str], radius_km: float = 150.0, l
             anchor_code=code or None, anchor_name=None, anchor_lat=None, anchor_lng=None,
             anchor_known=False, radius_km=radius_km,
             note=(
-                f"'{code}' isn't in my curated table of ~{len(_STATION_COORDS)} major stations, "
+                f"'{code}' isn't in my table of ~{len(_STATION_COORDS)} Indian Railways stations, "
                 "so I can't compute nearby stations for it. Try a major junction code (e.g. NDLS, BZA, SC)."
             ),
         )
@@ -102,7 +102,7 @@ def find_nearby_stations(anchor_code: Optional[str], radius_km: float = 150.0, l
         result.stations = all_distances[:limit]
         if all_distances:
             result.note = (
-                f"No major stations in my table are within {int(radius_km)} km of {anchor['name']} - "
+                f"No stations in my table are within {int(radius_km)} km of {anchor['name']} - "
                 f"showing the {min(limit, len(all_distances))} closest ones instead, "
                 f"the nearest being {all_distances[0].distance_km} km away."
             )

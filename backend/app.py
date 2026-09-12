@@ -110,6 +110,15 @@ def _startup_diagnostics():
     delay_prediction.get_model()
     print(f"[startup] Delay prediction model ready: {delay_prediction._model_name}")
 
+    # Warm up Station Search's semantic index (builds it over all ~8,700
+    # real Indian Railways stations, same as the RAG engine warm-up above)
+    # so the FIRST station search / _resolve_station_code call from a real
+    # user isn't the one that pays the one-time index-build cost (a few
+    # seconds at this station count) — matches this file's own established
+    # "warm expensive indexes at startup, not on first request" pattern.
+    station_search._ensure_index()
+    print(f"[startup] Station search index ready: {len(station_search._STATION_COORDS)} stations, engine {station_search._engine.name}")
+
     # Push notifications: same "reuse the real prediction pipeline" call
     # /api/advanced/alerts/check makes, just invoked on a timer instead of
     # on-demand. See push_notifications.py's status() for why this can be

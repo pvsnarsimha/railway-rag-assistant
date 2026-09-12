@@ -45,6 +45,7 @@ from typing import List, Optional
 
 import numpy as np
 
+import entity_gazetteer
 import semantic_engine
 
 _COORDS_PATH = os.path.join(os.path.dirname(__file__), "data", "station_coordinates.json")
@@ -92,9 +93,50 @@ _matrix = None
 # ============================================================
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# BUGFIX: found while expanding this table from ~50 majors to all ~8,700
+# real stations — real-world lineside/cabin halts often have names like
+# "A-Cabin Bondamunda" or "Daund A Mmr" that tokenize down to a standalone
+# single-letter token ("a"). At ~8,700 docs that token's document frequency
+# is tiny (only those few "A ..." names contain it), so its IDF score is
+# huge — big enough, on its own, to clear _MIN_TOKEN_SCORE below. The
+# result: a totally unrelated query that merely CONTAINS a standalone "a"
+# as one of its words (e.g. "not a place", "a" being an article, not a
+# place name) was matching those cabin halts as if it were a real,
+# confident name match — exactly the kind of silent-wrong-guess this
+# codebase's honesty rule exists to prevent. Real distinguishing station-
+# name words are essentially never 1-2 characters, so tokens that short are
+# dropped from the matching vocabulary entirely (station CODE matching
+# above this tier is unaffected — that still matches short codes exactly).
+_MIN_TOKEN_LEN = 3
+
+# BUGFIX #2 (same discovery, a deeper layer of it): _MIN_TOKEN_SCORE below
+# was tuned back when this table had ~50 stations, where a generic word
+# like "junction" showed up in a large enough SHARE of the tiny corpus to
+# get a low, safely-below-threshold IDF. At ~8,700 stations the whole IDF
+# scale shifts up — 91% of all distinct tokens in this corpus now appear in
+# exactly ONE station name, so almost every real word (generic or not) gets
+# a high IDF, and _MIN_TOKEN_LEN's fix above doesn't help here since these
+# are ordinary 5-8 letter words, not throwaway 1-2 letter ones. Concretely:
+# "station" has IDF 7.7 here (only 3 curated names literally contain the
+# word "station"), so ANY query containing the word "station" — including
+# an honest "is there a station near X" or a typo'd non-place phrase —
+# could single-handedly clear the threshold via that one word alone,
+# matching an unrelated station by coincidence rather than by the query
+# actually naming a place. Reusing entity_gazetteer's own curated English
+# stopword list (built for the analogous code-collision problem) plus a
+# few generic railway-infra words this corpus happens to under-use is the
+# same fix pattern already established there — never statistically
+# reliable to separate from a genuinely rare place name by IDF alone.
+_GENERIC_NAME_STOPWORDS = {w.lower() for w in entity_gazetteer._AMBIGUOUS_CODE_STOPWORDS} | {
+    "station", "stn", "flag", "colony", "block", "halt", "cabin", "railway", "railways",
+}
+
 
 def _tokenize(text: str) -> List[str]:
-    return _TOKEN_RE.findall((text or "").lower())
+    return [
+        t for t in _TOKEN_RE.findall((text or "").lower())
+        if len(t) >= _MIN_TOKEN_LEN and t not in _GENERIC_NAME_STOPWORDS
+    ]
 
 
 # Token set per station = the official name's words PLUS any known
@@ -203,29 +245,45 @@ def search_stations(query: str, top_k: int = 5) -> StationSearchResult:
                                          score=round(min(score / 10.0, 0.98), 3), matched_on="name_match"))
             seen.add(code)
 
-    query_vec = _engine.encode([q])[0]
-    sims = _engine.similarity(query_vec, _matrix)
-    order = np.argsort(-sims)
+    # BUGFIX (same root cause as the name-token stopword fix above, a
+    # different tier it hits): feeding the RAW query straight to the
+    # embedding engine let generic filler/infra words ("a", "station", ...)
+    # that are rare in THIS corpus (see the big comment above
+    # _GENERIC_NAME_STOPWORDS) dominate the query's embedding, not just the
+    # name-token tier's score — e.g. "is there a station near me" embedded
+    # close enough to "Hanuman Station" to score 0.97, an unrelated
+    # coincidence, not a real fuzzy match. Encoding the SAME cleaned token
+    # set the name-token tier already computed (instead of raw `q`) removes
+    # that noise before it ever reaches the embedding; if nothing
+    # meaningful survives the cleanup, there's honestly nothing to
+    # fuzzy-search for, so the semantic tier is skipped entirely rather
+    # than embedding an all-stopword string and risking another
+    # coincidental high score.
+    if query_tokens:
+        cleaned_query = " ".join(query_tokens)
+        query_vec = _engine.encode([cleaned_query])[0]
+        sims = _engine.similarity(query_vec, _matrix)
+        order = np.argsort(-sims)
 
-    for idx in order:
-        if len(matches) >= top_k:
-            break
-        code = _CODES[idx]
-        if code in seen:
-            continue
-        score = float(sims[idx])
-        if score < _MIN_SEMANTIC_SCORE:
-            continue
-        info = _STATION_COORDS[code]
-        matches.append(StationMatch(code=code, name=info["name"], lat=info["lat"], lng=info["lng"],
-                                     score=round(score, 3), matched_on="semantic"))
-        seen.add(code)
+        for idx in order:
+            if len(matches) >= top_k:
+                break
+            code = _CODES[idx]
+            if code in seen:
+                continue
+            score = float(sims[idx])
+            if score < _MIN_SEMANTIC_SCORE:
+                continue
+            info = _STATION_COORDS[code]
+            matches.append(StationMatch(code=code, name=info["name"], lat=info["lat"], lng=info["lng"],
+                                         score=round(score, 3), matched_on="semantic"))
+            seen.add(code)
 
     note = None
     if not matches:
         note = (
-            f"No close match found for '{q}' among the ~{len(_STATION_COORDS)} major stations in my "
-            "curated table. Try a major junction name or its station code (e.g. NDLS, BZA, SBC)."
+            f"No close match found for '{q}' among the ~{len(_STATION_COORDS)} Indian Railways stations "
+            "in my table. Try a major junction name or its station code (e.g. NDLS, BZA, SBC)."
         )
 
     return StationSearchResult(query=q, matches=matches, engine_name=_engine.name, note=note)
