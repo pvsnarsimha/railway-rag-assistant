@@ -19,7 +19,6 @@ backend/__pycache__/
 *.sqlite3
 
 # Node
-node_modules/
 railkit-service/node_modules/
 
 # Expo / React Native
