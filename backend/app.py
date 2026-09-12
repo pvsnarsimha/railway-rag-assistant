@@ -4622,14 +4622,24 @@ def api_train_seat_availability(req: TrainSeatAvailabilityRequest):
             base_error = base_error.rstrip() + "."
         error_text = base_error + _class_mismatch_suffix(req.train_number, source_code, dest_code, req.date, req.travel_class)
         return {"train_number": req.train_number, "travel_class": req.travel_class, "quota": quota, "date": req.date, "error": error_text}
-    return {
+    status_text = advanced_features.extract_status_text(avail, req.date)
+    result = {
         "train_number": req.train_number,
         "travel_class": req.travel_class,
         "quota": quota,
         "date": req.date,
-        "status_text": advanced_features.extract_status_text(avail, req.date),
+        "status_text": status_text,
         "prediction": advanced_features.extract_prediction_info(avail),
     }
+    # DIAGNOSTIC (same pattern as api_trains_search's availability_raw_keys_sample):
+    # the call succeeded but extract_status_text still couldn't find anything
+    # it recognizes - keep one real sample of the response's actual top-level
+    # key shape so a future parsing gap can be fixed from real evidence
+    # instead of another guess. Only appears when status_text is missing, and
+    # is purely diagnostic - never used to fabricate a status.
+    if status_text is None:
+        result["debug_raw_keys_sample"] = top_level_keys(avail)
+    return result
 
 
 class TrainFareRequest(BaseModel):
@@ -4669,13 +4679,18 @@ def api_train_fare(req: TrainFareRequest):
             base_error = base_error.rstrip() + "."
         error_text = base_error + _class_mismatch_suffix(req.train_number, source_code, dest_code, req.date, req.travel_class)
         return {"train_number": req.train_number, "travel_class": req.travel_class, "quota": quota, "date": req.date, "error": error_text}
-    return {
+    fare = advanced_features.extract_fare_amount(fare_data)
+    result = {
         "train_number": req.train_number,
         "travel_class": req.travel_class,
         "quota": quota,
         "date": req.date,
-        "fare": advanced_features.extract_fare_amount(fare_data),
+        "fare": fare,
     }
+    # DIAGNOSTIC - same reasoning as api_train_seat_availability above.
+    if fare is None:
+        result["debug_raw_keys_sample"] = top_level_keys(fare_data)
+    return result
 
 
 class PNRWatchEntry(BaseModel):

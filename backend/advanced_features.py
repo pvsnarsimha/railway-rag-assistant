@@ -889,21 +889,38 @@ def extract_status_text(data: dict, date_ddmmyyyy: Optional[str] = None) -> Opti
     .availabilityText / .rawStatus) instead. The flat check alone silently
     returns None for those even though real data came back, so we fall back
     to a deep search for that array (picking the entry matching the
-    requested date when we can tell dates apart) before giving up."""
+    requested date when we can tell dates apart) before giving up.
+
+    BUGFIX: this used to hard-require `payload` (data.get("data", data)) to
+    be a dict, and returned None immediately otherwise. RapidAPI's real
+    checkSeatAvailability response (used for the Home tab's Seat
+    Availability tile and Trains Between Stations' live-availability check)
+    wraps its per-date entries directly as a LIST under "data" for at
+    least some class/quota combinations - not a dict with an inner
+    "availability"/"availabilityList" key - so that early bailout was
+    silently discarding a real, successful response before ever reaching
+    the deep-search tiers below. Only the flat top-level check strictly
+    needs payload to be a dict; the nested/deep-search tiers already
+    tolerate a bare list (deep_find/deep_find_list_of_dicts walk both dicts
+    and lists), so they now run regardless of payload's own top-level type."""
     if not isinstance(data, dict):
         return None
     payload = data.get("data", data)
-    if not isinstance(payload, dict):
-        return None
 
     # 1) Flat top-level shape (GN quota etc.) - unchanged, backward compatible.
-    for key in ("availabilityStatus", "status", "availability_status", "currentStatus"):
-        if payload.get(key):
-            return str(payload[key])
+    if isinstance(payload, dict):
+        for key in ("availabilityStatus", "status", "availability_status", "currentStatus"):
+            if payload.get(key):
+                return str(payload[key])
 
     # 2) Nested per-date availability[] array (Tatkal-type quotas, 1A/other
-    #    low-inventory classes) - deep-search the whole response for it.
-    rows = deep_find_list_of_dicts(payload, ["availability", "availabilityList", "availability_list"])
+    #    low-inventory classes, AND RapidAPI shapes that put this list
+    #    directly at `data` with no wrapper key at all) - deep-search the
+    #    whole response for it, picking the entry matching the requested
+    #    date when we can tell dates apart.
+    rows = deep_find_list_of_dicts(payload, ["availability", "availabilityList", "availability_list", "avlDayList"])
+    if not rows and isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        rows = payload
     if rows:
         entry = None
         if date_ddmmyyyy:
@@ -915,33 +932,49 @@ def extract_status_text(data: dict, date_ddmmyyyy: Optional[str] = None) -> Opti
             except ValueError:
                 pass
             for row in rows:
-                row_date = str(row.get("date") or row.get("journeyDate") or row.get("doj") or "")
+                row_date = str(row.get("date") or row.get("journeyDate") or row.get("doj") or row.get("availabilityDate") or "")
                 if row_date in candidates:
                     entry = row
                     break
         if entry is None:
             entry = rows[0]
-        for key in ("status", "availabilityText", "rawStatus", "availability_status", "availabilityStatus"):
+        for key in ("status", "availabilityText", "rawStatus", "availability_status", "availabilityStatus", "current_status", "currentStatus"):
             if entry.get(key):
                 return str(entry[key])
 
     # 3) Last resort: a full deep scan for any status-shaped field anywhere
     #    in the response, so a real answer isn't lost to an unmatched shape.
-    return deep_find(payload, ["status", "availabilityStatus", "availabilityText", "rawStatus", "currentStatus"])
+    return deep_find(payload, ["status", "availabilityStatus", "availabilityText", "rawStatus", "currentStatus", "current_status"])
 
 
 def extract_prediction_info(data: dict) -> Optional[dict]:
     """When there's no direct status (e.g. an ARP-restricted quota that
     only offers a prediction), surface RailKit's real prediction fields
     instead of leaving the caller with nothing. Never fabricated - returns
-    None if none of these fields are actually present."""
+    None if none of these fields are actually present.
+
+    BUGFIX (same root cause as extract_status_text above): this used to
+    hard-require payload to be a dict and bail out with None otherwise.
+    RapidAPI's checkSeatAvailability response can wrap its per-date rows as
+    a bare LIST directly under "data", which is exactly the shape
+    deep_find_list_of_dicts/deep_find are already built to walk (they
+    recurse into lists at any depth - see deep_extract.py) - only the
+    initial `rows = ...` call needs a dict/list-tolerant `payload`, not a
+    dict-only one."""
     if not isinstance(data, dict):
         return None
     payload = data.get("data", data)
-    if not isinstance(payload, dict):
+    rows = deep_find_list_of_dicts(payload, ["availability", "availabilityList", "availability_list", "avlDayList"])
+    if not rows and isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        rows = payload
+    if rows:
+        source = rows[0]
+    elif isinstance(payload, dict):
+        source = payload
+    else:
+        # payload is a list but none of its entries looked like dict rows -
+        # nothing sane to search for prediction fields in.
         return None
-    rows = deep_find_list_of_dicts(payload, ["availability", "availabilityList", "availability_list"])
-    source = rows[0] if rows else payload
     prediction = deep_find(source, ["prediction", "predictionText"])
     percentage = deep_find(source, ["predictionPercentage", "prediction_percentage"])
     can_book = deep_find(source, ["canBook", "can_book"])
@@ -951,13 +984,21 @@ def extract_prediction_info(data: dict) -> Optional[dict]:
 
 
 def extract_fare_amount(data: dict) -> Optional[float]:
+    """BUGFIX (same root cause as extract_status_text/extract_prediction_info
+    above): this used to hard-require payload to be a dict and bail out with
+    None otherwise, AND only ever checked flat top-level keys with no deep
+    search fallback at all - so a real fare nested under a wrapper key, or a
+    response whose "data" is a bare list of fare rows, silently came back as
+    None even on a fully successful call. Now: flat keys are still checked
+    first (unchanged, fast path); if that misses, fall back to a real
+    deep_find scan of the whole payload (which walks dicts and lists both),
+    picking the first row when payload is a list."""
     if not isinstance(data, dict):
         return None
     payload = data.get("data", data)
-    if not isinstance(payload, dict):
-        return None
-    for key in ("totalFare", "total_fare", "fare", "baseFare", "amount", "totalAmount"):
-        val = payload.get(key)
+    fare_keys = ("totalFare", "total_fare", "fare", "baseFare", "amount", "totalAmount")
+
+    def _coerce(val):
         if isinstance(val, (int, float)):
             return float(val)
         if isinstance(val, str):
@@ -967,7 +1008,27 @@ def extract_fare_amount(data: dict) -> Optional[float]:
                     return float(m.group(0).replace(",", ""))
                 except ValueError:
                     pass
-    return None
+        return None
+
+    # 1) Flat top-level shape - unchanged, backward compatible fast path.
+    if isinstance(payload, dict):
+        for key in fare_keys:
+            coerced = _coerce(payload.get(key))
+            if coerced is not None:
+                return coerced
+
+    # 2) List-of-rows shape (e.g. a bare list of fare/class rows under
+    #    "data") - check the first row's flat keys directly.
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        for key in fare_keys:
+            coerced = _coerce(payload[0].get(key))
+            if coerced is not None:
+                return coerced
+
+    # 3) Last resort: a full deep scan for any fare-shaped field anywhere in
+    #    the response, so a real answer isn't lost to an unmatched/nested shape.
+    found = deep_find(payload, list(fare_keys))
+    return _coerce(found) if found is not None else None
 
 
 # =============================================================================
