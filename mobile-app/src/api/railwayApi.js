@@ -492,56 +492,6 @@ export async function getPnrStatus(baseUrl, pnr) {
   return data;
 }
 
-/**
- * GET /api/train/live-status/{train_number} — RailYatri-style plain
- * running-status enquiry (mobile Home tab's "Live Train Status" tile).
- * Same real timeline the Track tab's WebSocket is built from, just
- * without the map/ML prediction layered on top.
- */
-export async function getTrainLiveStatus(baseUrl, trainNumber, date) {
-  const client = makeClient(baseUrl, { timeoutMs: 15000 });
-  const { data } = await client.get(`/api/train/live-status/${encodeURIComponent(trainNumber)}`, {
-    params: date ? { date } : undefined,
-  });
-  return data;
-}
-
-/**
- * GET /api/train/schedule/{train_number} — RailYatri-style static Time
- * Table: day/distance/scheduled arrival & departure per station.
- */
-export async function getTrainSchedule(baseUrl, trainNumber) {
-  const client = makeClient(baseUrl, { timeoutMs: 15000 });
-  const { data } = await client.get(`/api/train/schedule/${encodeURIComponent(trainNumber)}`);
-  return data;
-}
-
-/**
- * POST /api/train/seat-availability — RailYatri-style single Seat
- * Availability check for one train/route/date/class/quota.
- */
-export async function checkSeatAvailability(baseUrl, { trainNumber, source, dest, date, travelClass, quota }) {
-  const client = makeClient(baseUrl, { timeoutMs: 15000 });
-  const { data } = await client.post("/api/train/seat-availability", {
-    train_number: trainNumber, source, dest, date,
-    travel_class: travelClass, quota: quota || "GN",
-  });
-  return data;
-}
-
-/**
- * POST /api/train/fare — RailYatri-style Fare Calculator for one
- * train/route/date/class/quota.
- */
-export async function getTrainFare(baseUrl, { trainNumber, source, dest, date, travelClass, quota }) {
-  const client = makeClient(baseUrl, { timeoutMs: 15000 });
-  const { data } = await client.post("/api/train/fare", {
-    train_number: trainNumber, source, dest, date,
-    travel_class: travelClass, quota: quota || "GN",
-  });
-  return data;
-}
-
 export async function checkPnrWatchlist(baseUrl, entries) {
   const client = makeClient(baseUrl, { timeoutMs: 20000 });
   const { data } = await client.post("/api/pnr/watchlist/check", { entries });

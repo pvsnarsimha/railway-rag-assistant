@@ -32,10 +32,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  primary: {
-    backgroundColor: colors.primary,
-    shadowColor: colors.primary, shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 }, elevation: 2,
-  },
+  primary: { backgroundColor: colors.primary },
   secondary: { backgroundColor: colors.chip, borderWidth: 1, borderColor: colors.primary },
   disabled: { opacity: 0.5 },
   primaryText: { color: colors.textInverse, fontWeight: "700", fontSize: 15 },
