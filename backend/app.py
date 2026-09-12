@@ -4439,6 +4439,150 @@ def api_pnr_status(pnr: str):
     return pnr_tracking.pnr_summary_to_dict(summary)
 
 
+# =============================================================================
+# FEATURE: mobile "Train Enquiry Center" Home tab — RailYatri-style
+# dedicated single-lookup endpoints for Live Train Status, Time Table, Seat
+# Availability and Fare Calculator (see mobile-app/src/screens/HomeScreen.js
+# and its sibling screens). Every one of these is a THIN wrapper around a
+# real data path this file already calls elsewhere for the exact same
+# provider fields — no new data source, no new fabricated field. Kept
+# scoped to enquiry only (no booking) since this project has no IRCTC
+# booking API access, same honesty rule TrainSearchScreen already follows
+# for its own "Book on IRCTC" hand-off.
+# =============================================================================
+@app.get("/api/train/live-status/{train_number}")
+def api_train_live_status(train_number: str, date: Optional[str] = None):
+    """
+    Plain IRCTC/NTES-style running-status list (station, sch/exp/act,
+    delay) for every reporting halt. A thin wrapper around the SAME
+    gps_tracking.parse_full_timeline()/timeline_to_json() parse the
+    /ws/track WebSocket uses to seed the Track tab's own timeline, so the
+    numbers here always agree with Track — just without the live map or
+    this app's own ML delay-prediction layer on top.
+    """
+    try:
+        track_data = railway_api.get_live_train_status(train_number, date)
+    except railway_api.RailwayAPIError as e:
+        return {"train_number": train_number, "error": str(e)}
+    try:
+        train_info_data = railway_api.get_train_info(train_number)
+    except railway_api.RailwayAPIError:
+        train_info_data = None  # timeline still builds fine without it, just no per-station coordinates
+    stops = gps_tracking.parse_full_timeline(track_data, train_info_data)
+    payload = track_data.get("data", track_data) if isinstance(track_data, dict) else {}
+    train_name = payload.get("trainName") or payload.get("train_name") or payload.get("name")
+    return {
+        "train_number": train_number,
+        "train_name": train_name,
+        "date": date or datetime.now().strftime("%d-%m-%Y"),
+        "stations": gps_tracking.timeline_to_json(stops),
+    }
+
+
+@app.get("/api/train/schedule/{train_number}")
+def api_train_schedule(train_number: str):
+    """
+    Static scheduled timetable (day/distance/scheduled arrival & departure
+    per station) — NOT live running status, see api_train_live_status
+    above for that. Parses the same RailKit getTrainInfo route list
+    gps_tracking.parse_route() already uses for the route map, but keeps
+    the real `day`/halt fields that parser drops (it only needs
+    coordinates + arrival/departure for drawing the map) — a real
+    timetable needs those too, and RailKit already provides them on every
+    route-list entry.
+    """
+    try:
+        info = railway_api.get_train_info(train_number)
+    except railway_api.RailwayAPIError as e:
+        return {"train_number": train_number, "error": str(e)}
+    payload = info.get("data", info) if isinstance(info, dict) else {}
+    train_name = payload.get("trainName") or payload.get("train_name") or payload.get("name")
+    raw_stops = payload.get("route") if isinstance(payload, dict) and isinstance(payload.get("route"), list) else (payload if isinstance(payload, list) else [])
+    stations = []
+    for stop in raw_stops:
+        code = gps_tracking._first_present(stop, ["stnCode", "station_code", "stationCode", "code"])
+        name = gps_tracking._first_present(stop, ["stnName", "station_name", "stationName", "name"], default=code)
+        stations.append({
+            "code": code or "?",
+            "name": name or (code or "Unknown"),
+            "day": gps_tracking._first_present(stop, ["day", "dayCount", "day_count"]),
+            "scheduled_arrival": gps_tracking._first_present(stop, ["arrival", "arrival_time", "arrivalTime"]),
+            "scheduled_departure": gps_tracking._first_present(stop, ["departure", "departure_time", "departureTime"]),
+            "distance_km": gps_tracking._first_present(stop, ["distance", "distanceFromSource"]),
+            "halt_minutes": gps_tracking._first_present(stop, ["halt", "haltMinutes", "halt_minutes"]),
+        })
+    return {"train_number": train_number, "train_name": train_name, "stations": stations}
+
+
+class TrainSeatAvailabilityRequest(BaseModel):
+    train_number: str
+    source: str
+    dest: str
+    date: str                              # dd-mm-yyyy
+    travel_class: str
+    quota: Optional[str] = "GN"
+
+
+@app.post("/api/train/seat-availability")
+def api_train_seat_availability(req: TrainSeatAvailabilityRequest):
+    """
+    Single-check real-time seat/berth availability for one train/route/
+    date/class/quota. A thin wrapper around the exact same
+    railway_api.get_seat_availability() + advanced_features status/
+    prediction extraction /api/trains/search already uses inline for each
+    of its result rows — this is just a dedicated single-lookup form for
+    it, not a new data source.
+    """
+    quota = (req.quota or "GN").upper()
+    try:
+        avail = railway_api.get_seat_availability(
+            req.train_number, req.source, req.dest, req.date, req.travel_class.upper(), quota,
+        )
+    except railway_api.RailwayAPIError as e:
+        return {"train_number": req.train_number, "travel_class": req.travel_class, "quota": quota, "date": req.date, "error": str(e)}
+    return {
+        "train_number": req.train_number,
+        "travel_class": req.travel_class,
+        "quota": quota,
+        "date": req.date,
+        "status_text": advanced_features.extract_status_text(avail, req.date),
+        "prediction": advanced_features.extract_prediction_info(avail),
+    }
+
+
+class TrainFareRequest(BaseModel):
+    train_number: str
+    source: str
+    dest: str
+    date: str                              # dd-mm-yyyy
+    travel_class: str
+    quota: Optional[str] = "GN"
+
+
+@app.post("/api/train/fare")
+def api_train_fare(req: TrainFareRequest):
+    """
+    Full real fare breakdown for one train/route/date/class/quota — a thin
+    wrapper around railway_api.get_fare() + advanced_features.
+    extract_fare_amount(), the same real fare source /api/trains/search
+    already uses inline for its own per-row fare badge.
+    """
+    quota = (req.quota or "GN").upper()
+    try:
+        fare_data = railway_api.get_fare(
+            req.train_number, req.source, req.dest, req.date, req.travel_class.upper(), quota,
+        )
+    except railway_api.RailwayAPIError as e:
+        return {"train_number": req.train_number, "travel_class": req.travel_class, "quota": quota, "date": req.date, "error": str(e)}
+    return {
+        "train_number": req.train_number,
+        "travel_class": req.travel_class,
+        "quota": quota,
+        "date": req.date,
+        "fare": advanced_features.extract_fare_amount(fare_data),
+    }
+
+
 class PNRWatchEntry(BaseModel):
     pnr: str
     last_known_status: Optional[str] = None
