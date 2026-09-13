@@ -807,10 +807,11 @@ export default function LiveTrackingScreen({ navigation }) {
   // REDESIGN (RailYatri-style bottom sticky bar): "Next: X in N mins
   // (delay)" plus two quick-action buttons that jump to the real Time
   // Table / "More tools" (Coach layout lives there) screens — see
-  // App.js's actual navigator structure. Neither screen currently accepts
-  // a pre-filled train number (confirmed — neither reads route.params),
-  // so this is a real navigation shortcut, not a fabricated deep link,
-  // just without pre-fill yet.
+  // App.js's actual navigator structure. Both now hand along the real
+  // train number already being tracked (see TrainScheduleScreen.js's
+  // route.params.trainNumber auto-fetch, and MoreToolsScreen.js's
+  // initialTab/trainNumber pre-fill for its Coach Layout tab) instead of
+  // making the user re-type it.
   const showBottomBar = !!payload && !ltJourneyLikelyComplete && !!payload.next_station;
 
   return (
@@ -1094,11 +1095,21 @@ export default function LiveTrackingScreen({ navigation }) {
           )}
         </View>
         <View style={styles.bottomBarActions}>
-          <TouchableOpacity style={styles.bottomBarBtn} onPress={() => navigation?.navigate?.("More")}>
+          {/* BUGFIX: both shortcuts now hand along the real train number
+              already being tracked, so the destination screen opens
+              pre-filled (and, for Time Table, auto-fetched) instead of
+              making the user re-type the same number a second time. */}
+          <TouchableOpacity
+            style={styles.bottomBarBtn}
+            onPress={() => navigation?.navigate?.("More", { initialTab: "coach", trainNumber: trainNumber.trim() })}
+          >
             <Ionicons name="grid-outline" size={13} color={colors.primary} />
             <Text style={styles.bottomBarBtnText}>Coach layout</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.bottomBarBtn} onPress={() => navigation?.navigate?.("Home", { screen: "TrainSchedule" })}>
+          <TouchableOpacity
+            style={styles.bottomBarBtn}
+            onPress={() => navigation?.navigate?.("Home", { screen: "TrainSchedule", params: { trainNumber: trainNumber.trim() } })}
+          >
             <Ionicons name="time-outline" size={13} color={colors.primary} />
             <Text style={styles.bottomBarBtnText}>Time Table</Text>
           </TouchableOpacity>
@@ -1235,10 +1246,18 @@ function DayPill({ label }) {
 // already computed for them (never invented here).
 function NoHaltGroupRow({ group, expanded, onToggle }) {
   const stations = group.stations || [];
+  // BUGFIX: each no-halt (non-reporting) station now carries its own real
+  // passed/current/upcoming status (see gps_tracking.py's
+  // group_timeline_for_display — it used to silently drop this field
+  // during grouping). Same green-for-passed/red-for-current/grey-for-
+  // upcoming convention as every reporting station's own dot below, so a
+  // no-halt station the train has genuinely already gone through reads
+  // the same way instead of always looking not-yet-reached.
+  const groupAllPassed = stations.length > 0 && stations.every((s) => s.status === "passed");
   return (
     <View style={styles.noHaltWrap}>
       <View style={styles.tlRail}>
-        <View style={styles.tlLine} />
+        <View style={[styles.tlLine, groupAllPassed && styles.tlLinePassed]} />
       </View>
       <View style={styles.noHaltBody}>
         <TouchableOpacity onPress={onToggle} style={styles.noHaltToggle}>
@@ -1256,12 +1275,17 @@ function NoHaltGroupRow({ group, expanded, onToggle }) {
             own arrival/departure times, only a passing distance. */}
         {expanded && (
           <View style={styles.noHaltExpanded}>
-            {stations.map((s, i) => (
+            {stations.map((s, i) => {
+              const passed = s.status === "passed";
+              const current = s.status === "current";
+              const dotColor = passed ? colors.success : current ? colors.danger : colors.border;
+              const linePassed = passed || (i > 0 && stations[i - 1].status === "passed");
+              return (
               <View key={s.code || i} style={styles.noHaltRow}>
                 <View style={styles.noHaltRail}>
-                  <View style={[styles.noHaltRailLine, i === 0 && styles.tlLineHidden]} />
-                  <View style={styles.noHaltDot} />
-                  <View style={[styles.noHaltRailLine, i === stations.length - 1 && styles.tlLineHidden]} />
+                  <View style={[styles.noHaltRailLine, i === 0 && styles.tlLineHidden, linePassed && styles.tlLinePassed]} />
+                  <View style={[styles.noHaltDot, { backgroundColor: dotColor }]} />
+                  <View style={[styles.noHaltRailLine, i === stations.length - 1 && styles.tlLineHidden, passed && styles.tlLinePassed]} />
                 </View>
                 <View style={styles.noHaltRowBody}>
                   <Text style={styles.noHaltStationText}>
@@ -1278,7 +1302,8 @@ function NoHaltGroupRow({ group, expanded, onToggle }) {
                   )}
                 </View>
               </View>
-            ))}
+              );
+            })}
           </View>
         )}
       </View>
@@ -1369,9 +1394,16 @@ function TimelineStopRow({
     <View ref={rowRef} style={styles.tlRow}>
       <TimeStack timing={stop.arrival} staleUnconfirmed={staleUnconfirmed} placeholder={isFirst ? "Src" : null} />
       <View style={styles.tlRail}>
-        <View style={[styles.tlLine, isFirst && styles.tlLineHidden]} />
+        {/* BUGFIX ("after visiting every station it should be green"): the
+            rail segment leading INTO an already-passed stop, and the one
+            LEAVING it (as long as the train has moved on beyond it), are
+            now colored green too — not just the dot — so the whole
+            already-traveled stretch reads as a continuous green trail
+            behind the train, same as the reference app, instead of a
+            uniform grey line regardless of what's actually been covered. */}
+        <View style={[styles.tlLine, isFirst && styles.tlLineHidden, isPassed && styles.tlLinePassed]} />
         {isCurrent ? <TrainMarkerIcon /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
-        <View style={[styles.tlLine, isLast && styles.tlLineHidden]} />
+        <View style={[styles.tlLine, isLast && styles.tlLineHidden, isPassed && !isCurrent && styles.tlLinePassed]} />
       </View>
       <View style={styles.tlBody}>
         <Text style={styles.tlName}>
@@ -1475,6 +1507,7 @@ const styles = StyleSheet.create({
   tlRail: { width: 26, alignItems: "center" },
   tlLine: { width: 2, flex: 1, backgroundColor: colors.border, minHeight: 8 },
   tlLineHidden: { backgroundColor: "transparent" },
+  tlLinePassed: { backgroundColor: colors.success },
   tlDot: { width: 10, height: 10, borderRadius: 5, marginVertical: 3 },
   tlTrainIconWrap: {
     width: 20, height: 20, borderRadius: 10, backgroundColor: colors.danger,

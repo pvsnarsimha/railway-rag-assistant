@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { View, Text, FlatList, StyleSheet } from "react-native";
 import { colors, spacing } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
@@ -16,16 +16,23 @@ import { describeApiError } from "../api/client";
  * gps_tracking.parse_route() already uses for the route map, just kept
  * as a plain list here (with halt/day fields the map parser drops).
  */
-export default function TrainScheduleScreen() {
+// BUGFIX: this screen used to always start blank, even when the user had
+// already typed a train number on the Live Tracking screen and tapped its
+// "Time Table" shortcut — forcing them to type the SAME train number again
+// here. `route.params.trainNumber` (passed by LiveTrackingScreen.web.js's
+// bottom bar — see its "Time Table" button) now pre-fills the field and
+// auto-runs the real lookup on arrival, same as if the user had typed it
+// and pressed the button themselves.
+export default function TrainScheduleScreen({ route }) {
   const { apiBaseUrl } = useSettings();
-  const [trainNumber, setTrainNumber] = useState("");
+  const prefillTrainNumber = route?.params?.trainNumber ? String(route.params.trainNumber).trim() : "";
+  const [trainNumber, setTrainNumber] = useState(prefillTrainNumber);
   const [header, setHeader] = useState(null);
   const [stations, setStations] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  async function lookup() {
-    const tn = trainNumber.trim();
+  async function runLookup(tn) {
     if (!/^\d{5}$/.test(tn)) {
       setError("Enter a valid 5-digit train number.");
       setStations(null);
@@ -48,6 +55,22 @@ export default function TrainScheduleScreen() {
       setLoading(false);
     }
   }
+
+  function lookup() {
+    runLookup(trainNumber.trim());
+  }
+
+  // Auto-fetch once on arrival when a train number was handed in via
+  // navigation params — intentionally NOT re-running if the user then
+  // edits the field by hand (that still requires pressing the button,
+  // same as always) or if they navigate here again with the SAME number
+  // already prefilled (no [prefillTrainNumber] dependency loop).
+  useEffect(() => {
+    if (prefillTrainNumber && /^\d{5}$/.test(prefillTrainNumber)) {
+      runLookup(prefillTrainNumber);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <FlatList

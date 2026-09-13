@@ -1062,7 +1062,7 @@ def group_timeline_for_display(timeline_json: list) -> list:
       {"display_type": "station", ...all fields from the station dict...}
       {"display_type": "no_halt_group", "count": N, "distance_km": <float|None>,
        "from_station": <name|None>, "to_station": <name|None>,
-       "stations": [{"code","name","distance_since_last_stoppage_km",
+       "stations": [{"code","name","status","distance_since_last_stoppage_km",
        "predicted_delay_minutes","predicted_delay_confidence","predicted_eta",
        "distance_ahead_km"}, ...]}
     """
@@ -1083,6 +1083,14 @@ def group_timeline_for_display(timeline_json: list) -> list:
             "to_station": None,  # filled in below, once the next stoppage is known
             "stations": [
                 {"code": p["code"], "name": p["name"],
+                 # BUGFIX: this station's own real passed/current/upcoming
+                 # status (already computed above in timeline_to_json — was
+                 # being silently dropped here, which left the mobile app's
+                 # expanded "+N No-Halt stations" rail with no way to color
+                 # an already-passed non-reporting station green like every
+                 # other passed stop, since it never got told which ones
+                 # were passed.
+                 "status": p.get("status"),
                  "distance_since_last_stoppage_km": p.get("distance_since_last_stoppage_km"),
                  # FEATURE: per-station predicted delay/ETA/distance now
                  # computed for non-reporting points too (see app.py's

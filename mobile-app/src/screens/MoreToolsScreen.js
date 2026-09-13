@@ -351,9 +351,11 @@ function DelayImpactTool({ apiBaseUrl }) {
 /* ---------------------------------------------------------------------
  * 6. Coach Layout (simplified text listing — no pixel-grid on mobile)
  * ------------------------------------------------------------------- */
-function CoachLayoutTool({ apiBaseUrl }) {
+function CoachLayoutTool({ apiBaseUrl, initialTrainNumber }) {
   const [travelClass, setTravelClass] = useState("SL");
-  const [trainNumber, setTrainNumber] = useState("");
+  // BUGFIX: pre-fill from the train number the user already typed on Live
+  // Tracking's "Coach layout" shortcut, instead of always starting blank.
+  const [trainNumber, setTrainNumber] = useState(initialTrainNumber || "");
   const [source, setSource] = useState("");
   const [dest, setDest] = useState("");
   const [dateText, setDateText] = useState("");
@@ -1998,9 +2000,18 @@ const TOOL_COMPONENTS = {
   bookingwindow: BookingWindowTool, stationnav: StationNavigatorTool,
 };
 
-export default function MoreToolsScreen() {
+// BUGFIX: jumping here from Live Tracking's "Coach layout" shortcut used
+// to always land on the first tab ("Platform") and a blank train number —
+// route.params (see LiveTrackingScreen.web.js's bottom bar) now opens
+// straight on the Coach Layout tab with the train number already filled
+// in, same real value the user already typed, not a second re-entry.
+export default function MoreToolsScreen({ route }) {
   const { apiBaseUrl } = useSettings();
-  const [active, setActive] = useState("platform");
+  const initialTab = route?.params?.initialTab && TOOLS.some((t) => t.key === route.params.initialTab)
+    ? route.params.initialTab
+    : "platform";
+  const initialTrainNumber = route?.params?.trainNumber ? String(route.params.trainNumber).trim() : "";
+  const [active, setActive] = useState(initialTab);
   const ActiveComponent = TOOL_COMPONENTS[active];
 
   return (
@@ -2013,7 +2024,12 @@ export default function MoreToolsScreen() {
         ))}
       </ScrollView>
       <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
-        {ActiveComponent && <ActiveComponent apiBaseUrl={apiBaseUrl} />}
+        {ActiveComponent && (
+          <ActiveComponent
+            apiBaseUrl={apiBaseUrl}
+            {...(active === "coach" ? { initialTrainNumber } : null)}
+          />
+        )}
       </ScrollView>
     </View>
   );
