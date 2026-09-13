@@ -672,15 +672,34 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
     setConnectionRiskResult(null);
     setShareLinkNote(null);
 
+    // BUGFIX: auto-reconnect — this card used to just sit on "closed" the
+    // moment its WebSocket dropped (a network blip, the phone locking, the
+    // free-tier host recycling the connection), leaving the train icon and
+    // timeline frozen until the whole card was removed and re-added.
+    // `manuallyClosed`/`reconnectTimer` are local to this run of the
+    // effect (a fresh pair every time trainNumber/date/source/dest/
+    // wsBaseUrl actually change) — an unexpected close schedules another
+    // attempt on the SAME train automatically; only the effect's own
+    // cleanup (a real prop change, or the card being removed) sets
+    // manuallyClosed and stops that from happening again.
+    let manuallyClosed = false;
+    let reconnectTimer = null;
+    let reconnectDelay = 3000;
+
     const url = buildTrackingWsUrl(wsBaseUrl, trainNumber, {
       date: date || undefined,
       source: source || undefined,
       dest: dest || undefined,
     });
+
+    function establish() {
     const socket = new WebSocket(url);
     wsRef.current = socket;
 
-    socket.onopen = () => setConnection("open");
+    socket.onopen = () => {
+      setConnection("open");
+      reconnectDelay = 3000;
+    };
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -791,9 +810,26 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
       }
     };
     socket.onerror = () => setConnection("error");
-    socket.onclose = () => setConnection((c) => (c === "error" ? c : "closed"));
+    socket.onclose = () => {
+      setConnection((c) => (c === "error" ? c : "closed"));
+      if (manuallyClosed) return;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      const delay = reconnectDelay;
+      reconnectDelay = Math.min(delay * 1.5, 20000);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        establish();
+      }, delay);
+    };
+    } // establish()
 
-    return disconnect;
+    establish();
+
+    return () => {
+      manuallyClosed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      disconnect();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trainNumber, date, source, dest, wsBaseUrl]);
 

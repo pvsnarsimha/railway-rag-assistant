@@ -93,6 +93,29 @@ function computeJourneyLikelyComplete(timelineArr, lastStop) {
   return scheduleWellInPast(lastStop.arrival, thresholdMinutes) || scheduleWellInPast(lastStop.departure, thresholdMinutes);
 }
 
+// REDESIGN (RailYatri-style running status): RailKit's own per-stop "day"
+// field (1-based day-of-run — see gps_tracking.py's `day`/`_day_offset`,
+// already flowing through both `timeline` and `timeline_grouped`) lets the
+// station list be split into "Day N: <date>" bands, same as RailYatri's own
+// page. The calendar date shown for each day is derived — never invented —
+// from the date this train was tracked from (the optional "Date" field
+// above, defaulting to today) plus (day - 1).
+function parseTrackDateInput(str) {
+  const m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec((str || "").trim());
+  if (!m) return new Date();
+  const d = new Date(parseInt(m[3], 10), parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+  return Number.isNaN(d.getTime()) ? new Date() : d;
+}
+function journeyDayNumber(entry) {
+  const n = parseInt(entry?.day, 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+function formatJourneyDayLabel(startDate, dayNumber) {
+  const d = new Date(startDate);
+  d.setDate(d.getDate() + (dayNumber - 1));
+  return d.toLocaleDateString("en-IN", { month: "short", day: "numeric" });
+}
+
 // FEATURE: "Train on map" — a real Leaflet map on demand, shown/hidden by a
 // toggle button rather than always rendered (matches the web frontend's own
 // "Train on map" / "Delay chart" collapsible sections). `react-native-maps`
@@ -222,6 +245,25 @@ export default function LiveTrackingScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const wsRef = useRef(null);
 
+  // BUGFIX: auto-reconnect so the timeline/marker keep updating on their
+  // own once tracking has started, instead of going stale the moment the
+  // socket drops (network blip, phone screen lock, tab backgrounded, the
+  // free-tier host recycling the connection) and requiring the user to tap
+  // "Reconnect" again by hand. manualStopRef distinguishes a real user
+  // action (the "Stop" button, or navigating away) from an unexpected
+  // close — only an unexpected close schedules a retry. activeParamsRef
+  // freezes the train/date/source/dest actually being tracked at the
+  // moment "Start tracking" was pressed, so a retry always reconnects to
+  // THAT train even if the input fields above have since been edited
+  // (they aren't re-submitted until the user presses Start again).
+  const manualStopRef = useRef(true);
+  const activeParamsRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
+  const reconnectDelayRef = useRef(3000);
+  // RailYatri-style collapsed "+N No-Halt stations" groups — which ones the
+  // user has tapped open, keyed by index within timelineGrouped below.
+  const [expandedGroups, setExpandedGroups] = useState({});
+
   // FEATURE: "Train on map" toggle — see the module-level comment above
   // loadLeaflet() for why a real Leaflet map is possible here despite
   // react-native-maps having no web target.
@@ -297,6 +339,11 @@ export default function LiveTrackingScreen() {
   }, [apiBaseUrl, tripSummary]);
 
   const disconnect = useCallback(() => {
+    manualStopRef.current = true;
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
     wsRef.current?.close();
     wsRef.current = null;
     setConnection("idle");
@@ -456,23 +503,39 @@ export default function LiveTrackingScreen() {
     }
   }, []);
 
-  useEffect(() => disconnect, [disconnect]);
+  useEffect(() => {
+    return () => {
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      disconnect();
+    };
+  }, [disconnect]);
 
-  function connect() {
-    if (!trainNumber.trim()) return;
-    // Reconnecting to the SAME train (socket dropped, user tapped
-    // "Reconnect") must not be treated as switching trains — wiping the
-    // marker/route/fitBounds state here made the map visibly jump/re-fit
-    // to a new pan+zoom on every reconnect instead of just letting the
-    // marker glide onto its next real position on a static map.
-    const isSameTrainReconnect = trainNumber.trim() === lastConnectedTrainRef.current;
-    disconnect();
-    setPayload(null);
+  // Does the actual work of opening the WebSocket for a fixed set of
+  // params (captured once in activeParamsRef when the user presses "Start
+  // tracking" / "Reconnect"). Called directly by the button, and again by
+  // itself — via a timer — on an unexpected disconnect, so the train icon
+  // and timeline keep updating on their own without the user having to
+  // tap anything. `isRetry` skips the parts of setup that should only
+  // happen on a genuine user-initiated (re)start (clearing old payload/
+  // stats so the screen doesn't flash empty on a brief, automatic blip).
+  function openSocket(params, isRetry) {
+    if (!params || !params.trainNumber) return;
+    // Reconnecting to the SAME train (socket dropped, auto-retry, or the
+    // user tapped "Reconnect") must not be treated as switching trains —
+    // wiping the marker/route/fitBounds state here made the map visibly
+    // jump/re-fit to a new pan+zoom on every reconnect instead of just
+    // letting the marker glide onto its next real position on a static map.
+    const isSameTrainReconnect = params.trainNumber === lastConnectedTrainRef.current;
+    wsRef.current?.close();
+    wsRef.current = null;
     setConnection("connecting");
-    setDelaySparkline([]);
-    tripSummaryShownKeyRef.current = null;
-    setTripSummary(null);
-    setTripSummaryShareStatus(null);
+    if (!isRetry) {
+      setPayload(null);
+      setDelaySparkline([]);
+      tripSummaryShownKeyRef.current = null;
+      setTripSummary(null);
+      setTripSummaryShareStatus(null);
+    }
 
     if (!isSameTrainReconnect) {
       // A stale route/marker from a PREVIOUSLY tracked train would be
@@ -489,17 +552,23 @@ export default function LiveTrackingScreen() {
       routeBoundsFitRef.current = false;
       autoScrolledRef.current = false;
     }
-    lastConnectedTrainRef.current = trainNumber.trim();
+    lastConnectedTrainRef.current = params.trainNumber;
 
-    const url = buildTrackingWsUrl(wsBaseUrl, trainNumber.trim(), {
-      date: trackDate.trim() || undefined,
-      source: source.trim() || undefined,
-      dest: dest.trim() || undefined,
+    const url = buildTrackingWsUrl(wsBaseUrl, params.trainNumber, {
+      date: params.date || undefined,
+      source: params.source || undefined,
+      dest: params.dest || undefined,
     });
 
     const socket = new WebSocket(url);
     wsRef.current = socket;
-    socket.onopen = () => setConnection("open");
+    socket.onopen = () => {
+      setConnection("open");
+      // A successful connection means whatever went wrong last time is
+      // over — back off from scratch next time, instead of the delay
+      // staying stretched out from an earlier stretch of bad connectivity.
+      reconnectDelayRef.current = 3000;
+    };
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -556,7 +625,45 @@ export default function LiveTrackingScreen() {
       }
     };
     socket.onerror = () => setConnection("error");
-    socket.onclose = () => setConnection((c) => (c === "error" ? c : "closed"));
+    // BUGFIX: auto-reconnect. Any close that wasn't the user pressing
+    // "Stop" (manualStopRef) schedules another attempt on the SAME train
+    // after a short, backed-off delay — this is what makes the train icon
+    // and timeline keep moving on their own as stations are crossed,
+    // instead of freezing the moment a connection drops until the user
+    // manually taps "Reconnect" again.
+    socket.onclose = () => {
+      setConnection((c) => (c === "error" ? c : "closed"));
+      if (manualStopRef.current) return;
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      const delay = reconnectDelayRef.current;
+      reconnectDelayRef.current = Math.min(delay * 1.5, 20000);
+      reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectTimeoutRef.current = null;
+        openSocket(activeParamsRef.current, true);
+      }, delay);
+    };
+  }
+
+  // Button handler — reads whatever's currently in the input fields,
+  // freezes it into activeParamsRef for any future auto-reconnect, and
+  // (re-)opens the socket for it. A fresh manual start always re-arms
+  // auto-reconnect (manualStopRef = false), even after a prior "Stop".
+  function connect() {
+    if (!trainNumber.trim()) return;
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    reconnectDelayRef.current = 3000;
+    manualStopRef.current = false;
+    const params = {
+      trainNumber: trainNumber.trim(),
+      date: trackDate.trim(),
+      source: source.trim(),
+      dest: dest.trim(),
+    };
+    activeParamsRef.current = params;
+    openSocket(params, false);
   }
 
   const timeline = payload?.timeline || [];
@@ -576,6 +683,21 @@ export default function LiveTrackingScreen() {
         ? ltLastStop.arrival.delay_minutes
         : (ltLastStop.departure ? ltLastStop.departure.delay_minutes : null))
     : payload?.delay_minutes;
+
+  // REDESIGN (RailYatri-style running status): prefer the backend's own
+  // pre-grouped timeline (consecutive non-reporting stations collapsed
+  // into a single "+N No-Halt stations" entry — see gps_tracking.py's
+  // group_timeline_for_display) — falling back to one "station" entry per
+  // flat timeline row (no grouping) if an older/cached payload doesn't
+  // have the grouped field yet.
+  const timelineGrouped = payload?.timeline_grouped && payload.timeline_grouped.length
+    ? payload.timeline_grouped
+    : timeline.map((s) => ({ display_type: "station", ...s }));
+  let ltLastStationIndex = -1;
+  for (let i = timelineGrouped.length - 1; i >= 0; i--) {
+    if (timelineGrouped[i].display_type !== "no_halt_group") { ltLastStationIndex = i; break; }
+  }
+  const journeyStartDate = parseTrackDateInput(trackDate);
 
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
@@ -689,20 +811,30 @@ export default function LiveTrackingScreen() {
 
       {payload && (
         <>
-          {/* RailYatri-style "Next: <station>  ETA <time>  <delay pill>"
-              quick-glance bar — the headline element now, same idea as the
-              web frontend's #liveTrackQuickBar. */}
-          <View ref={quickBarRef} style={styles.quickBar}>
-            <Text style={styles.quickBarIcon}>🚆</Text>
-            <Text style={styles.quickBarText}>
-              {ltJourneyLikelyComplete ? "Last known:" : "Next:"}{" "}
-              <Text style={styles.quickBarStation}>
-                {ltJourneyLikelyComplete ? (ltLastStop.name || ltLastStop.code || "—") : (payload.next_station || "—")}
-              </Text>
-              {!ltJourneyLikelyComplete && (
-                <Text style={styles.quickBarEta}>  ETA {payload.next_station_live_eta || payload.next_station_expected_arrival || "—"}</Text>
-              )}
+          {/* REDESIGN (RailYatri-style header): train number + real route
+              (first/last reported stops — never invented), then a plain-
+              English running-status line. When the journey is genuinely
+              done, this reads "Train has reached destination." exactly
+              like RailYatri's own completed-run page; otherwise it's the
+              same "Next station · ETA" summary as before. */}
+          {timeline.length >= 2 && (
+            <Text style={styles.routeHeaderText}>
+              Train {trainNumber.trim()} · {timeline[0].name || timeline[0].code} {"→"} {timeline[timeline.length - 1].name || timeline[timeline.length - 1].code}
             </Text>
+          )}
+          <View ref={quickBarRef} style={styles.quickBar}>
+            <View style={styles.quickBarIconWrap}>
+              <Ionicons name="train" size={16} color={colors.textInverse} />
+            </View>
+            {ltJourneyLikelyComplete ? (
+              <Text style={styles.quickBarText}>Train has reached destination.</Text>
+            ) : (
+              <Text style={styles.quickBarText}>
+                Next:{" "}
+                <Text style={styles.quickBarStation}>{payload.next_station || "—"}</Text>
+                <Text style={styles.quickBarEta}>  ETA {payload.next_station_live_eta || payload.next_station_expected_arrival || "—"}</Text>
+              </Text>
+            )}
             <DelayPill minutes={ltEffectiveDelay} />
           </View>
 
@@ -765,33 +897,63 @@ export default function LiveTrackingScreen() {
             )}
           </SectionCard>
 
-          {/* RailYatri-style running status — vertical connecting line,
-              colored dots, a train-icon marker at the current stop, and
-              red/green delay pills on every Arrival/Departure line. */}
+          {/* REDESIGN (RailYatri-style running status): Arrival | Station |
+              Departure columns, a "DayN: <date>" pill at each real day
+              boundary (RailKit's own per-stop day field), and consecutive
+              non-halting stations collapsed into a tappable
+              "+N No-Halt stations" row — same layout as the reference. */}
           <SectionCard title="Running status — every station" subtitle={`${timeline.length} stops reported`}>
-            {timeline.map((stop, idx) => (
-              <TimelineStopRow
-                key={`${stop.code}_${idx}`}
-                stop={stop}
-                isFirst={idx === 0}
-                isLast={idx === timeline.length - 1}
-                rowRef={
-                  // BUGFIX: once the journey looks likely complete, a raw
-                  // stop.status === "current" can be a stuck pointer (see
-                  // computeJourneyLikelyComplete's reasoning) rather than
-                  // the train's real position — scroll to the actual last
-                  // row instead of that stale "current" one.
-                  ltJourneyLikelyComplete
-                    ? (idx === timeline.length - 1 ? lastStationRowRef : undefined)
-                    : stop.status === "current"
-                      ? currentStationRowRef
-                      : idx === timeline.length - 1
-                        ? lastStationRowRef
-                        : undefined
+            <View style={styles.tlColHeaderRow}>
+              <Text style={styles.tlColHeaderSide}>Arrival</Text>
+              <Text style={styles.tlColHeaderMid}>Station</Text>
+              <Text style={[styles.tlColHeaderSide, styles.tlColHeaderRight]}>Departure</Text>
+            </View>
+            {(() => {
+              let lastDay = null;
+              return timelineGrouped.map((entry, idx) => {
+                if (entry.display_type === "no_halt_group") {
+                  return (
+                    <NoHaltGroupRow
+                      key={`group_${idx}`}
+                      group={entry}
+                      expanded={!!expandedGroups[idx]}
+                      onToggle={() => setExpandedGroups((prev) => ({ ...prev, [idx]: !prev[idx] }))}
+                    />
+                  );
                 }
-                journeyLikelyComplete={ltJourneyLikelyComplete}
-              />
-            ))}
+                const dayNum = journeyDayNumber(entry);
+                const showDayPill = lastDay !== dayNum;
+                lastDay = dayNum;
+                return (
+                  <React.Fragment key={`${entry.code}_${idx}`}>
+                    {showDayPill && (
+                      <DayPill label={`Day${dayNum}: ${formatJourneyDayLabel(journeyStartDate, dayNum)}`} />
+                    )}
+                    <TimelineStopRow
+                      stop={entry}
+                      isFirst={idx === 0}
+                      isLast={idx === ltLastStationIndex}
+                      rowRef={
+                        // BUGFIX: once the journey looks likely complete, a
+                        // raw stop.status === "current" can be a stuck
+                        // pointer (see computeJourneyLikelyComplete's
+                        // reasoning) rather than the train's real position
+                        // — scroll to the actual last row instead of that
+                        // stale "current" one.
+                        ltJourneyLikelyComplete
+                          ? (idx === ltLastStationIndex ? lastStationRowRef : undefined)
+                          : entry.status === "current"
+                            ? currentStationRowRef
+                            : idx === ltLastStationIndex
+                              ? lastStationRowRef
+                              : undefined
+                      }
+                      journeyLikelyComplete={ltJourneyLikelyComplete}
+                    />
+                  </React.Fragment>
+                );
+              });
+            })()}
           </SectionCard>
         </>
       )}
@@ -836,7 +998,9 @@ function DelayPill({ minutes, small }) {
   const late = minutes > 0;
   const early = minutes < 0;
   const bg = late ? colors.danger : colors.success;
-  const label = `${late ? "+" : ""}${formatDelayDuration(minutes)}${late ? " late" : early ? " early" : " on time"}`;
+  // minutes === 0 reads as a plain "Ontime" pill, same one-word wording as
+  // the RailYatri reference, rather than "0m on time".
+  const label = minutes === 0 ? "Ontime" : `${late ? "+" : ""}${formatDelayDuration(minutes)}${late ? " late" : " early"}`;
   return (
     <View style={[styles.delayPill, { backgroundColor: bg }, small && styles.delayPillSmall]}>
       <Text style={[styles.delayPillText, small && styles.delayPillTextSmall]}>{label}</Text>
@@ -844,41 +1008,109 @@ function DelayPill({ minutes, small }) {
   );
 }
 
-// One Arrival or Departure line for a timeline stop — "Exp HH:MM  Act
-// HH:MM  [delay pill]", matching the web frontend's timingRow().
-// BUGFIX: staleUnconfirmed (see TimelineStopRow's matching param) — when
-// the provider has gone stale for this stop (most often the destination,
-// once the provider stops updating altogether after the train has
-// genuinely reached it, sometimes days before this is viewed again), the
-// model-predicted "Act"/delay figures can be actively wrong rather than
-// a fair estimate — same reasoning as the web frontend's timingRow().
-function TimingLine({ label, timing, staleUnconfirmed }) {
-  if (!timing || (!timing.scheduled && !timing.expected && !timing.actual)) return null;
-  if (staleUnconfirmed && timing.actual_is_predicted) {
-    return (
-      <View style={styles.timingLine}>
-        <Text style={styles.timingLabel}>{label}</Text>
-        <Text style={styles.timingVal}>Exp {timing.expected || timing.scheduled || "—"}</Text>
-        <Text style={styles.timingValMuted}>Not confirmed by provider</Text>
-      </View>
-    );
-  }
-  const actLabel = timing.actual_is_predicted ? "Act (pred.)" : "Act";
+// REDESIGN (RailYatri-style): a centered "DayN: <date>" pill inserted at
+// each real day-boundary in the timeline (see journeyDayNumber above) —
+// only for multi-day journeys does more than one of these ever render.
+function DayPill({ label }) {
   return (
-    <View style={styles.timingLine}>
-      <Text style={styles.timingLabel}>{label}</Text>
-      <Text style={styles.timingVal}>Exp {timing.expected || timing.scheduled || "—"}</Text>
-      <Text style={styles.timingVal}>{actLabel} {timing.actual || "—"}</Text>
-      <DelayPill minutes={timing.delay_minutes} small />
+    <View style={styles.dayPillRow}>
+      <View style={styles.dayPill}>
+        <Text style={styles.dayPillText}>{label}</Text>
+      </View>
     </View>
   );
 }
 
-// One row of the RailYatri-style running-status timeline: a connecting
-// vertical line + dot (train icon for the current stop) on the left, the
-// station name/meta/times on the right. Mirrors the web frontend's
-// .live-timeline__row structure closely enough to look like the same
-// feature on both platforms.
+// REDESIGN (RailYatri-style): the collapsed "+N No-Halt stations" row for
+// a run of consecutive non-reporting stations between two real halts (see
+// gps_tracking.py's group_timeline_for_display) — tap to reveal each of
+// those stations with whatever real per-station figures the backend
+// already computed for them (never invented here).
+function NoHaltGroupRow({ group, expanded, onToggle }) {
+  return (
+    <View style={styles.noHaltWrap}>
+      <View style={styles.tlRail}>
+        <View style={styles.tlLine} />
+      </View>
+      <View style={styles.noHaltBody}>
+        <TouchableOpacity onPress={onToggle} style={styles.noHaltToggle}>
+          <Text style={styles.noHaltToggleText}>
+            + {group.count} No-Halt station{group.count === 1 ? "" : "s"}
+            {group.distance_km != null ? ` (${group.distance_km} km)` : ""}
+          </Text>
+          <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={13} color={colors.primary} />
+        </TouchableOpacity>
+        {expanded && (
+          <View style={styles.noHaltExpanded}>
+            {(group.stations || []).map((s, i) => (
+              <View key={s.code || i} style={styles.noHaltStationRow}>
+                <Text style={styles.noHaltStationText}>
+                  {s.name} <Text style={styles.tlCode}>({s.code})</Text>
+                  {s.distance_since_last_stoppage_km != null ? ` · ${s.distance_since_last_stoppage_km} km` : ""}
+                </Text>
+                {s.predicted_delay_minutes != null && (
+                  <Text style={styles.tlPredicted}>
+                    ~{formatDelayDuration(s.predicted_delay_minutes)} late (predicted)
+                    {s.predicted_eta ? ` · ETA ~${s.predicted_eta}` : ""}
+                  </Text>
+                )}
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
+// REDESIGN (RailYatri-style): the compact Arrival/Departure side column —
+// the scheduled/expected time in small grey text, the real "actual" time
+// in bold underneath (that top-grey/bottom-bold pairing is what stands in
+// for "Exp"/"Act" labels, same convention the reference uses) — or a
+// plain placeholder ("Src"/"Dest") for the one side that structurally
+// doesn't apply to an origin/destination stop.
+// BUGFIX: staleUnconfirmed (see TimelineStopRow's matching param) — when
+// the provider has gone stale for this stop (most often the destination,
+// once it stops updating altogether after the train has genuinely
+// reached it, sometimes days before this is viewed again), a model-
+// PREDICTED "actual" time can be actively wrong rather than a fair
+// estimate, so it's hidden rather than shown as if it were confirmed —
+// same reasoning the web frontend's timingRow() uses.
+function TimeStack({ timing, staleUnconfirmed, placeholder, align }) {
+  const textAlign = { textAlign: align === "right" ? "right" : "left" };
+  const hasData = timing && (timing.scheduled || timing.expected || timing.actual);
+  if (!hasData) {
+    return (
+      <View style={styles.tlTimeCol}>
+        <Text style={[styles.tlTimeExp, textAlign]}>{placeholder || "—"}</Text>
+      </View>
+    );
+  }
+  const hideActual = staleUnconfirmed && timing.actual_is_predicted;
+  return (
+    <View style={styles.tlTimeCol}>
+      <Text style={[styles.tlTimeExp, textAlign]}>{timing.expected || timing.scheduled || "—"}</Text>
+      {!hideActual && !!timing.actual && <Text style={[styles.tlTimeAct, textAlign]}>{timing.actual}</Text>}
+    </View>
+  );
+}
+
+// A single delay figure for a stop's status pill — prefers arrival (once
+// the train has actually arrived) and falls back to departure (the only
+// timing an origin stop has), same as the app already does for the quick
+// bar's ltEffectiveDelay. Respects staleUnconfirmed the same way TimeStack
+// does — a predicted-not-confirmed figure never becomes a status pill.
+function stopEffectiveDelay(stop, staleUnconfirmed) {
+  const arr = stop.arrival, dep = stop.departure;
+  if (arr && arr.delay_minutes != null && !(staleUnconfirmed && arr.actual_is_predicted)) return arr.delay_minutes;
+  if (dep && dep.delay_minutes != null && !(staleUnconfirmed && dep.actual_is_predicted)) return dep.delay_minutes;
+  return null;
+}
+
+// One row of the RailYatri-style running-status timeline: Arrival time
+// (left) | connecting vertical line + dot, train icon for the current
+// stop, station name/meta/status pill (middle) | Departure time (right).
+// Mirrors the reference's own Arrival | Station | Departure layout.
 function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete }) {
   // BUGFIX: once the journey looks likely complete (see
   // computeJourneyLikelyComplete near the top of this file), the train
@@ -892,7 +1124,7 @@ function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete 
   // anymore — same reasoning as the map marker and quick bar's "Last
   // known" fallback. staleUnconfirmed likewise applies to every row once
   // the journey looks done (harmless on a genuinely-passed row with a
-  // real recorded time, since TimingLine only acts on actual_is_predicted
+  // real recorded time, since TimeStack only acts on actual_is_predicted
   // rows).
   const staleUnconfirmed = !!journeyLikelyComplete;
   const isCurrent = stop.status === "current" && !journeyLikelyComplete;
@@ -901,8 +1133,14 @@ function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete 
   const metaBits = [];
   if (stop.halt_minutes != null && stop.halt_minutes !== "") metaBits.push(`Halt: ${stop.halt_minutes} min`);
   if (stop.distance_km != null) metaBits.push(`${stop.distance_km} km`);
+  const effectiveDelay = stopEffectiveDelay(stop, staleUnconfirmed);
+  // A status pill only means something once the stop has a real recorded
+  // arrival/departure (passed or current) — an "upcoming" stop gets the
+  // separate predicted-delay line below instead, never a confident pill.
+  const showStatusPill = (isPassed || isCurrent) && effectiveDelay != null;
   return (
     <View ref={rowRef} style={styles.tlRow}>
+      <TimeStack timing={stop.arrival} staleUnconfirmed={staleUnconfirmed} placeholder={isFirst ? "Src" : null} />
       <View style={styles.tlRail}>
         <View style={[styles.tlLine, isFirst && styles.tlLineHidden]} />
         {isCurrent ? (
@@ -920,6 +1158,7 @@ function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete 
           {stop.kind === "intermediate" ? <Text style={styles.timelineKind}>  · passing</Text> : null}
         </Text>
         {metaBits.length > 0 && <Text style={styles.tlMeta}>{metaBits.join(" | ")}</Text>}
+        {showStatusPill && <DelayPill minutes={effectiveDelay} />}
         {isCurrent && (
           <View style={styles.tlCurrentCallout}>
             <Text style={styles.tlCurrentCalloutText}>
@@ -927,7 +1166,7 @@ function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete 
             </Text>
           </View>
         )}
-        {/* BUGFIX: suppressed when staleUnconfirmed — see TimingLine's
+        {/* BUGFIX: suppressed when staleUnconfirmed — see TimeStack's
             matching comment above. A confident-looking predicted delay is
             worse than none once the provider has stopped updating this
             stop altogether (most often the destination, well after the
@@ -938,9 +1177,8 @@ function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete 
             {stop.predicted_eta ? ` · ETA ~${stop.predicted_eta}` : ""}
           </Text>
         )}
-        <TimingLine label="Arrival" timing={stop.arrival} staleUnconfirmed={staleUnconfirmed} />
-        <TimingLine label="Departure" timing={stop.departure} staleUnconfirmed={staleUnconfirmed} />
       </View>
+      <TimeStack timing={stop.departure} staleUnconfirmed={staleUnconfirmed} placeholder={isLast && journeyLikelyComplete ? "Dest" : null} align="right" />
     </View>
   );
 }
@@ -954,19 +1192,23 @@ const styles = StyleSheet.create({
   refreshText: { fontSize: 12, color: colors.primary, fontWeight: "600" },
 
   // REDESIGN (RailYatri-style quick bar + running-status timeline).
+  routeHeaderText: { fontSize: 12.5, fontWeight: "600", color: colors.textMuted, marginBottom: 6 },
   quickBar: {
     flexDirection: "row", alignItems: "center", gap: 8,
     backgroundColor: "#eef4fb", borderWidth: 1, borderColor: "#cfe0f3",
     borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12,
     marginBottom: spacing.sm,
   },
-  quickBarIcon: { fontSize: 16 },
+  quickBarIconWrap: {
+    width: 26, height: 26, borderRadius: 13, backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
+  },
   quickBarText: { flex: 1, fontSize: 13, color: colors.text },
   quickBarStation: { fontWeight: "700", color: colors.primary },
   quickBarEta: { fontSize: 12, color: colors.textMuted },
   moreStatsToggle: { alignSelf: "flex-start", marginBottom: spacing.sm, paddingVertical: 4 },
   moreStatsToggleText: { fontSize: 12.5, fontWeight: "600", color: colors.primary },
-  delayPill: { borderRadius: 4, paddingVertical: 3, paddingHorizontal: 8 },
+  delayPill: { borderRadius: 4, paddingVertical: 3, paddingHorizontal: 8, alignSelf: "flex-start", marginTop: 4 },
   delayPillSmall: { paddingVertical: 1, paddingHorizontal: 5 },
   delayPillText: { fontSize: 12, fontWeight: "700", color: "#fff" },
   delayPillTextSmall: { fontSize: 10.5 },
@@ -974,7 +1216,36 @@ const styles = StyleSheet.create({
   timingLabel: { fontSize: 10.5, color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, width: 52 },
   timingVal: { fontSize: 11.5, color: colors.text },
   timingValMuted: { fontSize: 11.5, color: colors.textMuted, fontStyle: "italic" },
-  tlRow: { flexDirection: "row" },
+
+  // REDESIGN (RailYatri-style): Arrival | Station | Departure column
+  // header, the per-stop time stacks either side of the rail, and the
+  // centered "DayN: <date>" / collapsible "+N No-Halt stations" rows.
+  tlColHeaderRow: {
+    flexDirection: "row", justifyContent: "space-between",
+    marginBottom: spacing.sm, paddingHorizontal: 2,
+  },
+  tlColHeaderSide: { fontSize: 11, fontWeight: "700", color: colors.textMuted, width: 56 },
+  tlColHeaderMid: { fontSize: 11, fontWeight: "700", color: colors.textMuted, flex: 1, textAlign: "center" },
+  tlColHeaderRight: { textAlign: "right" },
+  tlTimeCol: { width: 56 },
+  tlTimeExp: { fontSize: 11, color: colors.textMuted },
+  tlTimeAct: { fontSize: 13, fontWeight: "700", color: colors.text, marginTop: 1 },
+  dayPillRow: { alignItems: "center", marginVertical: spacing.sm },
+  dayPill: {
+    borderWidth: 1, borderColor: colors.primary, borderRadius: radius.pill,
+    paddingVertical: 4, paddingHorizontal: 14, backgroundColor: colors.bg,
+  },
+  dayPillText: { fontSize: 11.5, fontWeight: "700", color: colors.primary },
+  noHaltWrap: { flexDirection: "row" },
+  noHaltBody: { flex: 1, paddingLeft: spacing.sm, paddingVertical: 4 },
+  noHaltToggle: { flexDirection: "row", alignItems: "center", gap: 4 },
+  noHaltToggleText: { fontSize: 12, fontWeight: "600", color: colors.primary },
+  noHaltExpanded: {
+    marginTop: 6, paddingLeft: spacing.sm, borderLeftWidth: 2, borderLeftColor: colors.border,
+  },
+  noHaltStationRow: { marginBottom: 6 },
+  noHaltStationText: { fontSize: 12, color: colors.text },
+  tlRow: { flexDirection: "row", alignItems: "flex-start" },
   tlRail: { width: 26, alignItems: "center" },
   tlLine: { width: 2, flex: 1, backgroundColor: colors.border, minHeight: 8 },
   tlLineHidden: { backgroundColor: "transparent" },
