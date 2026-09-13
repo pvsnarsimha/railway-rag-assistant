@@ -3795,6 +3795,28 @@ def api_coach_layout(
 
 
 # =============================================================================
+# FEATURE: real per-train Coach Composition (RailRadar passthrough).
+#
+# HONEST NOTE: unlike the rest of this app's RailKit/RailRadar integrations,
+# this endpoint's real response shape has not yet been verified against a
+# live call — see the matching notes in railway_api.get_coach_composition()
+# and railkit-service/server.js's fetchRailRadarCoaches(). This raw
+# passthrough itself is safe either way (nothing invented, real error
+# surfaced honestly), but the mobile app does NOT yet render this data —
+# that comes next, once a real response has actually been inspected. Hit
+# this directly (e.g. /api/advanced/coach-composition/12951) with a real,
+# currently-running train number to see the genuine RailRadar response.
+# =============================================================================
+@app.get("/api/advanced/coach-composition/{train_number}")
+def api_coach_composition(train_number: str, station: Optional[str] = None):
+    try:
+        result = railway_api.get_coach_composition(train_number, station)
+        return {"train_number": train_number, "station": station, "ok": True, "data": result}
+    except railway_api.RailwayAPIError as e:
+        return {"train_number": train_number, "station": station, "ok": False, "error": str(e)}
+
+
+# =============================================================================
 # FEATURE: Coach & Seat "Find My Coach" Guide
 # =============================================================================
 class FindMyCoachRequest(BaseModel):

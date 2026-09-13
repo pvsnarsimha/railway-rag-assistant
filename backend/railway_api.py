@@ -137,6 +137,30 @@ def get_live_train_status(train_number: str, date_ddmmyyyy: str = None) -> dict:
     return _call(f"/track/{train_number}", {"date": date_ddmmyyyy})
 
 
+@cached(ttl_seconds=1800, prefix="coach_composition")
+def get_coach_composition(train_number: str, station_code: str = None) -> dict:
+    """Real per-train coach/rake composition from RailRadar (railkit-service's
+    /coach-composition passthrough — see server.js). Optionally scoped to a
+    specific `station_code` for RailRadar's direction-aware platform
+    alignment variant.
+
+    HONEST NOTE: RailRadar documents this endpoint (railradar.in/docs) as
+    returning "complete rake formation, cabin schematics, and reversals",
+    but that response has not yet been inspected from a live call (the
+    sandbox this was built in cannot reach api.railradar.in — see the
+    matching note in railkit-service/server.js). Raises RailwayAPIError the
+    same as every other method here if RailRadar has nothing for this
+    train — callers MUST treat that as "not available for this train" and
+    fall back to the existing generic coach-layout tool
+    (advanced_features.py's find_my_coach/coach_layout), never invent a
+    composition. Whatever RailRadar's `data` actually looks like is
+    returned here completely unparsed — do not assume field names without
+    having inspected a real response first."""
+    train_number = _validate_train_number(train_number)
+    params = {"station": station_code.strip().upper()} if station_code else None
+    return _call(f"/coach-composition/{train_number}", params)
+
+
 @cached(ttl_seconds=86400, prefix="train_info")
 def get_train_info(train_number: str) -> dict:
     """Route + per-station coordinates for a train (RailKit's getTrainInfo).

@@ -149,6 +149,61 @@ async function fetchRailRadarLive(trainNumber) {
   }
 }
 
+// 3c. Coach Composition - RailRadar's documented `/v1/trains/{number}/coaches`
+// and `/v1/trains/{number}/coaches/{station}` endpoints (per its own docs at
+// railradar.in/docs: "Complete rake formation, cabin schematics, and
+// reversals" / "Direction-aware platform coach alignment for specific
+// station halts"). Same passthrough discipline as every other endpoint in
+// this file - the exact real {success, data}/{success, error} response,
+// nothing transformed or invented.
+//
+// HONEST NOTE: unlike RailKit and RailRadar's own /live endpoint (both
+// already proven working in this app's live GPS tracking), this specific
+// endpoint's real response shape has NOT yet been verified against a live
+// call from Claude's own sandbox - outbound requests to api.railradar.in
+// are blocked by that sandbox's network egress allowlist. This passthrough
+// itself is safe (it forwards whatever RailRadar actually returns,
+// verbatim, with no guessed field parsing), but nothing downstream should
+// assume specific field names until a real response has been inspected -
+// see coach_composition() in backend/advanced_features.py.
+async function fetchRailRadarCoaches(trainNumber, station) {
+  if (!RAILRADAR_API_KEY) {
+    return { ok: false, error: "RAILRADAR_API_KEY is not configured on the railkit-service (set it in railkit-service/.env)." };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), RAILRADAR_TIMEOUT_MS);
+  try {
+    const path = station
+      ? `${RAILRADAR_BASE}/${trainNumber}/coaches/${station}`
+      : `${RAILRADAR_BASE}/${trainNumber}/coaches`;
+    const resp = await fetch(path, {
+      headers: { Authorization: `Bearer ${RAILRADAR_API_KEY}` },
+      signal: controller.signal,
+    });
+    if (resp.status === 401) return { ok: false, error: "RailRadar rejected the API key (401)." };
+    if (resp.status === 404) return { ok: false, error: `RailRadar has no coach-composition data for train ${trainNumber} (404).` };
+    if (resp.status === 429) return { ok: false, error: "RailRadar rate limit exceeded (429)." };
+    const body = await resp.json();
+    if (!body || body.success !== true) {
+      return { ok: false, error: (body && body.error && body.error.message) || `RailRadar returned HTTP ${resp.status} with no usable data.` };
+    }
+    return { ok: true, data: body.data != null ? body.data : body };
+  } catch (err) {
+    return { ok: false, error: `Could not reach api.railradar.in (${err && err.message ? err.message : err}).` };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+app.get("/coach-composition/:trainNumber", async (req, res) => {
+  const result = await fetchRailRadarCoaches(req.params.trainNumber, req.query.station);
+  res.json({
+    success: result.ok,
+    data: result.ok ? result.data : null,
+    error: result.ok ? null : result.error,
+  });
+});
+
 app.get("/track-combined/:trainNumber", async (req, res) => {
   const trainNumber = req.params.trainNumber;
   const date = req.query.date;
