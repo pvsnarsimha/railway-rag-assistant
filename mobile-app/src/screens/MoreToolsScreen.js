@@ -22,6 +22,7 @@ import {
   getPlatformNavigation, getDepartureReminder, checkSmartAlarm, getTransitOptimizer,
   getRouteTimelapse,
   getBookingWindow, findMyCoach, getStationNavigator, checkFareWatches, syncFareWatches,
+  getCoachComposition,
 } from "../api/railwayApi";
 import { registerForPushNotifications } from "../services/pushNotifications";
 
@@ -106,6 +107,78 @@ function Chips({ options, value, onSelect, multi, selected }) {
 }
 
 const CLASS_OPTIONS = ["SL", "3A", "2A", "1A", "3E", "CC", "EC", "2S"];
+
+/* ---------------------------------------------------------------------
+ * Real per-train Coach Composition strip (RailRadar) — used by
+ * CoachLayoutTool below. This is the RailYatri-style row of numbered
+ * coach boxes (C1, C2, ... E1, E2, ...) built from the ACTUAL rake
+ * RailRadar returns for that specific train — not the generic
+ * standard-convention block used by the older "Find My Coach" guide
+ * further down this same screen. Coloring by class is our own display
+ * choice; every code/count/order shown is exactly what RailRadar sent.
+ * ------------------------------------------------------------------- */
+function coachCategoryColor(category, classType) {
+  const c = (category || classType || "").toString().toLowerCase();
+  if (c.includes("ec")) return "#6A3FA0"; // Executive Chair Car
+  if (c.includes("cc")) return colors.primary; // AC Chair Car
+  if (c.includes("1a")) return "#B8860B"; // First AC
+  if (c.includes("2a")) return colors.success; // 2AC
+  if (c.includes("3a") || c.includes("3e")) return "#2E8B8B"; // 3AC / 3AC Economy
+  if (c.includes("sl")) return colors.accent; // Sleeper
+  if (c.includes("2s") || c.includes("gen") || c.includes("unreserved")) return colors.textMuted;
+  if (c.includes("slr") || c.includes("eog") || c.includes("luggage") || c.includes("brake")) return "#8A6D3B"; // Guard/luggage van
+  if (c.includes("engine") || c.includes("loco")) return "#1A2233";
+  if (c.includes("pantry")) return "#C2410C";
+  return colors.textMuted; // unrecognized real code — neutral color, nothing invented
+}
+
+function CoachCompositionStrip({ composition, loading, error }) {
+  if (loading) return <Text style={[styles.resultLine, { marginTop: spacing.sm }]}>Checking RailRadar for this train's real coach formation…</Text>;
+  if (error) return <Text style={[styles.disclaimer, { marginTop: spacing.sm }]}>Real coach formation unavailable from RailRadar for this train ({error}). Showing the standard-pattern layout and platform-end guide below instead.</Text>;
+  if (!composition) return null;
+
+  const rake = Array.isArray(composition.rake) ? [...composition.rake].sort((a, b) => (a.position ?? 0) - (b.position ?? 0)) : [];
+  if (!rake.length) return null;
+  const reversed = composition.reversal === true;
+  const ordered = reversed ? [...rake].reverse() : rake;
+  const formationStr = composition.formation || composition.coachPosition || null;
+
+  return (
+    <View style={{ marginTop: spacing.md }}>
+      <Text style={styles.resultSubhead}>🚆 Real Coach Formation (RailRadar)</Text>
+      {(composition.trainName || composition.trainNumber) && (
+        <Text style={styles.resultLine}>
+          {composition.trainNumber ? `Train ${composition.trainNumber}` : ""}{composition.trainName ? ` — ${composition.trainName}` : ""}
+        </Text>
+      )}
+      {composition.station?.name && (
+        <Text style={styles.resultLine}>
+          Boarding at {composition.station.name} ({composition.station.code}){composition.station.platform ? ` — Platform ${composition.station.platform}` : ""}
+        </Text>
+      )}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingVertical: spacing.sm }}>
+        {ordered.map((coach, i) => {
+          const col = coachCategoryColor(coach.category, coach.classType);
+          return (
+            <View key={`${coach.code || coach.position || i}-${i}`} style={[styles.coachBox, { borderColor: col, backgroundColor: col + "22" }]}>
+              <Text style={[styles.coachBoxCode, { color: col }]}>{coach.code || "?"}</Text>
+              {coach.totalBerths != null && <Text style={styles.coachBoxSub}>{coach.totalBerths}</Text>}
+            </View>
+          );
+        })}
+      </ScrollView>
+      <Disclaimer
+        text={
+          (reversed
+            ? "This train reverses direction before reaching this station — the row above is mirrored from the standard formation to match real platform order (RailRadar's own reversal flag for this station)."
+            : "Shown in standard rake formation order (RailRadar reports no reversal for this station).")
+          + ` Real data — ${composition.totalCoaches ?? ordered.length} coaches, straight from RailRadar, nothing estimated.`
+        }
+      />
+      {formationStr && <Text style={[styles.disclaimer, { marginTop: 2 }]}>Standard formation order: {formationStr}</Text>}
+    </View>
+  );
+}
 
 /* ---------------------------------------------------------------------
  * 1. Platform Predictor
@@ -363,6 +436,21 @@ function CoachLayoutTool({ apiBaseUrl, initialTrainNumber }) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // FEATURE: real per-train Coach Composition (RailRadar) — see
+  // CoachCompositionStrip above. Uses the same `source` field as the
+  // "boarding station" for RailRadar's direction-aware variant, since
+  // that's already what "From" means to the rest of this tool.
+  const [compositionData, setCompositionData] = useState(null);
+  const [compositionError, setCompositionError] = useState(null);
+  const [compositionLoading, setCompositionLoading] = useState(false);
+  async function runComposition(trainNo, stationCode) {
+    if (!/^\d{5}$/.test(trainNo || "")) { setCompositionData(null); setCompositionError(null); return; }
+    setCompositionLoading(true); setCompositionError(null);
+    try { setCompositionData(await getCoachComposition(apiBaseUrl, trainNo, stationCode || undefined)); }
+    catch (e) { setCompositionError(describeApiError(e)); setCompositionData(null); }
+    finally { setCompositionLoading(false); }
+  }
+
   // FEATURE: Coach & Seat "Find My Coach" Guide
   const [coachNumber, setCoachNumber] = useState("");
   const [findCoachData, setFindCoachData] = useState(null);
@@ -386,6 +474,10 @@ function CoachLayoutTool({ apiBaseUrl, initialTrainNumber }) {
     }
     catch (e) { setError(describeApiError(e)); setData(null); }
     finally { setLoading(false); }
+    // Real rake composition needs an actual train number — the generic
+    // per-class layout above doesn't, so this runs alongside it rather
+    // than gating it.
+    runComposition(trainNumber.trim(), source.trim());
   }
 
   // CROWD-POSITION FOLLOW-UP: occupied_berths (when present) is a
@@ -408,15 +500,16 @@ function CoachLayoutTool({ apiBaseUrl, initialTrainNumber }) {
   const occupiedSet = occ?.occupied_berths ? new Set(occ.occupied_berths) : null;
 
   return (
-    <SectionCard title="Coach Layout Visualization" subtitle="Real seat numbers, standard ICF pattern for the class. Add train/route/date below for an occupancy estimate.">
+    <SectionCard title="Coach Layout Visualization" subtitle="Enter a train number for its real coach formation (RailRadar). Seat numbers below follow the standard ICF pattern for the class; add route/date for an occupancy estimate.">
       <LabeledInput label="Train number (optional)" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" maxLength={5} />
       <View style={{ flexDirection: "row", gap: spacing.sm }}>
-        <LabeledInput label="From (optional)" value={source} onChangeText={setSource} style={{ flex: 1 }} />
+        <LabeledInput label="From / boarding station (optional)" value={source} onChangeText={setSource} style={{ flex: 1 }} />
         <LabeledInput label="To (optional)" value={dest} onChangeText={setDest} style={{ flex: 1 }} />
       </View>
       <LabeledInput label="Date (dd-mm-yyyy, optional)" value={dateText} onChangeText={setDateText} />
       <Chips options={CLASS_OPTIONS} value={travelClass} onSelect={setTravelClass} />
       <PrimaryButton title="Show Layout" onPress={run} loading={loading} style={{ marginTop: spacing.sm }} />
+      <CoachCompositionStrip composition={compositionData} loading={compositionLoading} error={compositionError} />
       <ErrorText text={error} />
       <ResultBox>
         {data && data.found && (
@@ -2060,6 +2153,12 @@ const styles = StyleSheet.create({
   disclaimer: { fontSize: 11, color: colors.textMuted, fontStyle: "italic", marginTop: 6 },
   error: { fontSize: 13, color: colors.danger, marginTop: 6 },
   dangerText: { color: colors.danger, fontWeight: "700" },
+  coachBox: {
+    minWidth: 46, paddingHorizontal: 6, paddingVertical: 8, borderRadius: radius.sm,
+    borderWidth: 1.5, alignItems: "center", justifyContent: "center",
+  },
+  coachBoxCode: { fontSize: 12, fontWeight: "800" },
+  coachBoxSub: { fontSize: 9, color: colors.textMuted, marginTop: 2 },
   listRow: {
     flexDirection: "row", alignItems: "center", paddingVertical: spacing.sm,
     borderBottomWidth: 1, borderBottomColor: colors.border,
