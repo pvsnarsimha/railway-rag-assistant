@@ -6,7 +6,7 @@ import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
 import { useSettings } from "../context/SettingsContext";
-import { buildTrackingWsUrl, saveTripSummary, buildTrackShareUrl, buildTripShareUrl } from "../api/railwayApi";
+import { buildTrackingWsUrl, saveTripSummary, buildTrackShareUrl, buildTripShareUrl, sendFeedback } from "../api/railwayApi";
 import { formatDelayDuration } from "../utils/formatDelay";
 
 // FEATURE: Live delay-trend sparkline — same rolling-buffer size as the
@@ -114,6 +114,49 @@ function formatJourneyDayLabel(startDate, dayNumber) {
   const d = new Date(startDate);
   d.setDate(d.getDate() + (dayNumber - 1));
   return d.toLocaleDateString("en-IN", { month: "short", day: "numeric" });
+}
+
+// REDESIGN (RailYatri-style): RailKit reports intermediate ("passing")
+// station names in ALL CAPS while its major-halt names already come
+// through nicely cased — purely a display normalization of the SAME real
+// name, not a data change, so the collapsed "No-Halt stations" list reads
+// like the rest of the screen instead of shouting.
+function toDisplayCase(name) {
+  if (!name) return name;
+  // Leave a name that's already mixed-case alone (don't mangle real
+  // camel/PascalCase station names some sources already provide nicely).
+  if (/[a-z]/.test(name)) return name;
+  return name.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// REDESIGN (RailYatri-style bottom bar): "Next: X in N mins" needs
+// minutes-from-now, not just the clock-time string the payload already
+// carries (next_station_live_eta, e.g. "13:10") — this is arithmetic on
+// that same real value, never an invented ETA. Returns null (never a
+// guess) if the string isn't a parseable HH:MM, or if it's already passed
+// by more than a few minutes (stale/yesterday's reading).
+function minutesFromNowClockTime(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || "").trim());
+  if (!m) return null;
+  const now = new Date();
+  const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), parseInt(m[1], 10), parseInt(m[2], 10));
+  let diffMin = Math.round((target.getTime() - now.getTime()) / 60000);
+  if (diffMin < -5) diffMin += 24 * 60; // clock time was for "tomorrow" relative to a late-night now
+  return diffMin;
+}
+
+// REDESIGN (RailYatri-style live position marker): "As of N mins ago" —
+// same real field (backend app.py's status_updated_at, set fresh every
+// poll) and same wording as the native card's own formatAsOfAgo. Kept as a
+// duplicate copy rather than shared, matching this file's existing
+// separate-Metro-entry-point pattern (see extractHostname's comment above).
+function formatAsOfAgo(iso) {
+  if (!iso) return "just now";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "just now";
+  const diffMin = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (diffMin < 1) return "less than a min ago";
+  return `${diffMin} min${diffMin === 1 ? "" : "s"} ago`;
 }
 
 // FEATURE: "Train on map" — a real Leaflet map on demand, shown/hidden by a
@@ -233,7 +276,7 @@ const STATUS_COLOR = {
   upcoming: colors.danger,
 };
 
-export default function LiveTrackingScreen() {
+export default function LiveTrackingScreen({ navigation }) {
   const { wsBaseUrl, apiBaseUrl } = useSettings();
   const [trainNumber, setTrainNumber] = useState("");
   const [source, setSource] = useState("");
@@ -242,6 +285,48 @@ export default function LiveTrackingScreen() {
   const [connection, setConnection] = useState("idle");
   const [payload, setPayload] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
+
+  // REDESIGN (RailYatri-style live position marker): a real countdown to
+  // the next auto-refresh — the backend genuinely pushes a fresh position
+  // every 5s once connected (see backend/app.py's
+  // _TRACK_POLL_INTERVAL_SECONDS), so this just displays that real
+  // cadence rather than an invented number, resetting to 5 every time a
+  // payload actually arrives (lastUpdated changes) and ticking down once
+  // a second in between.
+  const [refreshCountdown, setRefreshCountdown] = useState(5);
+  useEffect(() => {
+    if (!lastUpdated) return undefined;
+    setRefreshCountdown(5);
+    const id = setInterval(() => setRefreshCountdown((n) => (n > 0 ? n - 1 : 0)), 1000);
+    return () => clearInterval(id);
+  }, [lastUpdated]);
+
+  // REDESIGN (RailYatri-style "Report Inaccuracy") — reuses the SAME real
+  // /api/feedback endpoint (and status_response_id the backend already
+  // attaches to every /ws/track payload) the native app's status popup
+  // already calls, so this is real feedback wired to a real endpoint, not
+  // a decorative button.
+  const [reportState, setReportState] = useState("idle"); // idle | sending | sent
+  const reportInaccuracy = useCallback(async (responseId) => {
+    if (!responseId) return;
+    setReportState("sending");
+    try {
+      await sendFeedback(apiBaseUrl, {
+        responseId, rating: "down",
+        reason: "Reported inaccurate from web Live Tracking position marker",
+      });
+      setReportState("sent");
+    } catch (e) {
+      setReportState("idle");
+    }
+  }, [apiBaseUrl]);
+  // A "Reported — thanks" state should only last until the train actually
+  // moves on to a new current station — otherwise it wrongly looks like
+  // the NEXT station's position was also reported, once the train reaches
+  // it minutes/hours later.
+  useEffect(() => {
+    setReportState("idle");
+  }, [payload?.current_station]);
   const [refreshing, setRefreshing] = useState(false);
   const wsRef = useRef(null);
 
@@ -699,8 +784,38 @@ export default function LiveTrackingScreen() {
   }
   const journeyStartDate = parseTrackDateInput(trackDate);
 
+  // REDESIGN (RailYatri-style live position marker): "X km covered so
+  // far" — honestly derived, never invented, from two real payload
+  // values: the last reporting station's own real distance-from-origin
+  // (already on that station's timeline entry) plus how far the train has
+  // moved past it (payload.distance_covered_since_last_stop_km, computed
+  // fresh every poll server-side — see backend/app.py).
+  let ltLastReportingDistanceKm = null;
+  for (let i = timeline.length - 1; i >= 0; i--) {
+    if ((timeline[i].status === "passed" || timeline[i].status === "current") && timeline[i].distance_km != null) {
+      ltLastReportingDistanceKm = timeline[i].distance_km;
+      break;
+    }
+  }
+  const ltTotalCoveredKm = (ltLastReportingDistanceKm != null && payload?.distance_covered_since_last_stop_km != null)
+    ? Math.round((ltLastReportingDistanceKm + payload.distance_covered_since_last_stop_km) * 10) / 10
+    : null;
+  const ltNextEtaMinutes = !ltJourneyLikelyComplete
+    ? minutesFromNowClockTime(payload?.next_station_live_eta || payload?.next_station_expected_arrival)
+    : null;
+
+  // REDESIGN (RailYatri-style bottom sticky bar): "Next: X in N mins
+  // (delay)" plus two quick-action buttons that jump to the real Time
+  // Table / "More tools" (Coach layout lives there) screens — see
+  // App.js's actual navigator structure. Neither screen currently accepts
+  // a pre-filled train number (confirmed — neither reads route.params),
+  // so this is a real navigation shortcut, not a fabricated deep link,
+  // just without pre-fill yet.
+  const showBottomBar = !!payload && !ltJourneyLikelyComplete && !!payload.next_station;
+
   return (
-    <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
+    <View style={styles.flex}>
+    <ScrollView style={styles.flex} contentContainerStyle={[styles.content, showBottomBar && styles.contentWithBar]}>
       <SectionCard title="Track a train" subtitle="Streams a position + delay + crowd update every ~5s.">
         <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
         <LabeledInput label="Date (optional \u2014 defaults to today)" placeholder="DD-MM-YYYY" value={trackDate} onChangeText={setTrackDate} />
@@ -949,6 +1064,13 @@ export default function LiveTrackingScreen() {
                               : undefined
                       }
                       journeyLikelyComplete={ltJourneyLikelyComplete}
+                      statusUpdatedAt={payload?.status_updated_at}
+                      refreshCountdown={refreshCountdown}
+                      distanceRemainingToNextKm={payload?.distance_remaining_to_next_km}
+                      totalCoveredKm={ltTotalCoveredKm}
+                      statusResponseId={payload?.status_response_id}
+                      reportState={reportState}
+                      onReportInaccuracy={reportInaccuracy}
                     />
                   </React.Fragment>
                 );
@@ -958,6 +1080,91 @@ export default function LiveTrackingScreen() {
         </>
       )}
     </ScrollView>
+    {showBottomBar && (
+      <View style={styles.bottomBar}>
+        <View style={styles.bottomBarInfo}>
+          <Text style={styles.bottomBarLabel} numberOfLines={1}>
+            Next: <Text style={styles.bottomBarStation}>{payload.next_station}</Text>
+            {ltNextEtaMinutes != null ? ` in ${ltNextEtaMinutes} min${ltNextEtaMinutes === 1 ? "" : "s"}` : ""}
+          </Text>
+          {ltEffectiveDelay != null && (
+            <Text style={[styles.bottomBarDelay, ltEffectiveDelay > 0 ? styles.bottomBarDelayLate : styles.bottomBarDelayOnTime]}>
+              {ltEffectiveDelay === 0 ? "Ontime" : `${ltEffectiveDelay > 0 ? "+" : ""}${formatDelayDuration(ltEffectiveDelay)}${ltEffectiveDelay > 0 ? " late" : " early"}`}
+            </Text>
+          )}
+        </View>
+        <View style={styles.bottomBarActions}>
+          <TouchableOpacity style={styles.bottomBarBtn} onPress={() => navigation?.navigate?.("More")}>
+            <Ionicons name="grid-outline" size={13} color={colors.primary} />
+            <Text style={styles.bottomBarBtnText}>Coach layout</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.bottomBarBtn} onPress={() => navigation?.navigate?.("Home", { screen: "TrainSchedule" })}>
+            <Ionicons name="time-outline" size={13} color={colors.primary} />
+            <Text style={styles.bottomBarBtnText}>Time Table</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    )}
+    </View>
+  );
+}
+
+// REDESIGN (RailYatri-style live position marker): white rounded-square
+// train glyph with a small red circular "pin" badge overlapping its
+// bottom-right corner — same silhouette as the reference screenshot,
+// replacing the plain solid-red circle this screen used before.
+function TrainMarkerIcon() {
+  return (
+    <View style={styles.trainMarkerWrap}>
+      <View style={styles.trainMarkerSquare}>
+        <Ionicons name="train" size={16} color={colors.primary} />
+      </View>
+      <View style={styles.trainMarkerPinBadge}>
+        <Ionicons name="location" size={9} color="#fff" />
+      </View>
+    </View>
+  );
+}
+
+// REDESIGN (RailYatri-style live position marker): the speech-bubble
+// callout at the train's real current position — "As of X ago" (real
+// status_updated_at) + a live refresh countdown (the real ~5s server push
+// cadence, see _TRACK_POLL_INTERVAL_SECONDS), the real distance to the
+// next station, the real distance covered so far this run, and a working
+// "Report Inaccuracy" link wired to the real /api/feedback endpoint.
+function LiveStatusCallout({
+  stop, statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm,
+  totalCoveredKm, statusResponseId, reportState, onReportInaccuracy,
+}) {
+  return (
+    <View style={styles.liveCallout}>
+      <View style={styles.liveCalloutHeadRow}>
+        <Text style={styles.liveCalloutAsOf}>As of {formatAsOfAgo(statusUpdatedAt)}</Text>
+        <View style={styles.liveCalloutRefreshWrap}>
+          <Ionicons name="refresh" size={10} color={colors.textMuted} />
+          <Text style={styles.liveCalloutRefreshText}>{refreshCountdown}s</Text>
+        </View>
+      </View>
+      <Text style={styles.liveCalloutMain}>
+        🚆 Train is currently at {stop.name}
+        {stop.halt_minutes ? ` · halt ${stop.halt_minutes} min` : ""}
+      </Text>
+      {distanceRemainingToNextKm != null && (
+        <Text style={styles.liveCalloutBold}>{distanceRemainingToNextKm} km to next station</Text>
+      )}
+      {totalCoveredKm != null && (
+        <Text style={styles.liveCalloutMuted}>({totalCoveredKm} km covered so far)</Text>
+      )}
+      <TouchableOpacity
+        style={styles.liveCalloutReportLink}
+        disabled={reportState !== "idle" || !statusResponseId}
+        onPress={() => onReportInaccuracy(statusResponseId)}
+      >
+        <Text style={styles.liveCalloutReportText}>
+          {reportState === "sending" ? "Reporting…" : reportState === "sent" ? "Reported — thanks" : "Report Inaccuracy"}
+        </Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
@@ -1027,6 +1234,7 @@ function DayPill({ label }) {
 // those stations with whatever real per-station figures the backend
 // already computed for them (never invented here).
 function NoHaltGroupRow({ group, expanded, onToggle }) {
+  const stations = group.stations || [];
   return (
     <View style={styles.noHaltWrap}>
       <View style={styles.tlRail}>
@@ -1040,20 +1248,35 @@ function NoHaltGroupRow({ group, expanded, onToggle }) {
           </Text>
           <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={13} color={colors.primary} />
         </TouchableOpacity>
+        {/* REDESIGN (RailYatri-style): a connected-dot mini-rail for the
+            expanded no-halt stations, mirroring TimelineStopRow's own rail
+            (small dot + continuous line per stop) instead of a plain
+            stacked-text list — just simplified: no arrival/departure time
+            columns or status pill, since these stops never report their
+            own arrival/departure times, only a passing distance. */}
         {expanded && (
           <View style={styles.noHaltExpanded}>
-            {(group.stations || []).map((s, i) => (
-              <View key={s.code || i} style={styles.noHaltStationRow}>
-                <Text style={styles.noHaltStationText}>
-                  {s.name} <Text style={styles.tlCode}>({s.code})</Text>
-                  {s.distance_since_last_stoppage_km != null ? ` · ${s.distance_since_last_stoppage_km} km` : ""}
-                </Text>
-                {s.predicted_delay_minutes != null && (
-                  <Text style={styles.tlPredicted}>
-                    ~{formatDelayDuration(s.predicted_delay_minutes)} late (predicted)
-                    {s.predicted_eta ? ` · ETA ~${s.predicted_eta}` : ""}
+            {stations.map((s, i) => (
+              <View key={s.code || i} style={styles.noHaltRow}>
+                <View style={styles.noHaltRail}>
+                  <View style={[styles.noHaltRailLine, i === 0 && styles.tlLineHidden]} />
+                  <View style={styles.noHaltDot} />
+                  <View style={[styles.noHaltRailLine, i === stations.length - 1 && styles.tlLineHidden]} />
+                </View>
+                <View style={styles.noHaltRowBody}>
+                  <Text style={styles.noHaltStationText}>
+                    {toDisplayCase(s.name)} <Text style={styles.tlCode}>({s.code})</Text>
                   </Text>
-                )}
+                  {s.distance_since_last_stoppage_km != null && (
+                    <Text style={styles.noHaltStationDist}>{s.distance_since_last_stoppage_km} km</Text>
+                  )}
+                  {s.predicted_delay_minutes != null && (
+                    <Text style={styles.tlPredicted}>
+                      ~{formatDelayDuration(s.predicted_delay_minutes)} late (predicted)
+                      {s.predicted_eta ? ` · ETA ~${s.predicted_eta}` : ""}
+                    </Text>
+                  )}
+                </View>
               </View>
             ))}
           </View>
@@ -1111,7 +1334,11 @@ function stopEffectiveDelay(stop, staleUnconfirmed) {
 // (left) | connecting vertical line + dot, train icon for the current
 // stop, station name/meta/status pill (middle) | Departure time (right).
 // Mirrors the reference's own Arrival | Station | Departure layout.
-function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete }) {
+function TimelineStopRow({
+  stop, isFirst, isLast, rowRef, journeyLikelyComplete,
+  statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
+  statusResponseId, reportState, onReportInaccuracy,
+}) {
   // BUGFIX: once the journey looks likely complete (see
   // computeJourneyLikelyComplete near the top of this file), the train
   // has genuinely already gone through every remaining station — even
@@ -1143,13 +1370,7 @@ function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete 
       <TimeStack timing={stop.arrival} staleUnconfirmed={staleUnconfirmed} placeholder={isFirst ? "Src" : null} />
       <View style={styles.tlRail}>
         <View style={[styles.tlLine, isFirst && styles.tlLineHidden]} />
-        {isCurrent ? (
-          <View style={styles.tlTrainIconWrap}>
-            <Ionicons name="train" size={13} color="#fff" />
-          </View>
-        ) : (
-          <View style={[styles.tlDot, { backgroundColor: dotColor }]} />
-        )}
+        {isCurrent ? <TrainMarkerIcon /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
         <View style={[styles.tlLine, isLast && styles.tlLineHidden]} />
       </View>
       <View style={styles.tlBody}>
@@ -1160,11 +1381,16 @@ function TimelineStopRow({ stop, isFirst, isLast, rowRef, journeyLikelyComplete 
         {metaBits.length > 0 && <Text style={styles.tlMeta}>{metaBits.join(" | ")}</Text>}
         {showStatusPill && <DelayPill minutes={effectiveDelay} />}
         {isCurrent && (
-          <View style={styles.tlCurrentCallout}>
-            <Text style={styles.tlCurrentCalloutText}>
-              🚆 Train is currently here{stop.halt_minutes ? ` · halt ${stop.halt_minutes} min` : ""}
-            </Text>
-          </View>
+          <LiveStatusCallout
+            stop={stop}
+            statusUpdatedAt={statusUpdatedAt}
+            refreshCountdown={refreshCountdown}
+            distanceRemainingToNextKm={distanceRemainingToNextKm}
+            totalCoveredKm={totalCoveredKm}
+            statusResponseId={statusResponseId}
+            reportState={reportState}
+            onReportInaccuracy={onReportInaccuracy}
+          />
         )}
         {/* BUGFIX: suppressed when staleUnconfirmed — see TimeStack's
             matching comment above. A confident-looking predicted delay is
@@ -1302,4 +1528,71 @@ const styles = StyleSheet.create({
   rerouteSubhead: { fontSize: 12, fontWeight: "700", color: colors.primary, marginTop: 6, marginBottom: 2 },
   rerouteAltLine: { fontSize: 12, color: colors.text, marginBottom: 2 },
   rerouteDisclaimer: { fontSize: 10.5, color: colors.textMuted, fontStyle: "italic", marginTop: 6 },
+
+  // REDESIGN (RailYatri-style live position marker): white rounded-square
+  // icon + small red circular pin badge overlapping its corner.
+  trainMarkerWrap: { width: 28, height: 28, marginVertical: 2 },
+  trainMarkerSquare: {
+    width: 26, height: 26, borderRadius: 7, backgroundColor: "#fff",
+    borderWidth: 1.5, borderColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
+    shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 3, shadowOffset: { width: 0, height: 1 }, elevation: 2,
+  },
+  trainMarkerPinBadge: {
+    position: "absolute", right: -4, bottom: -4,
+    width: 15, height: 15, borderRadius: 7.5, backgroundColor: colors.danger,
+    borderWidth: 1.5, borderColor: "#fff",
+    alignItems: "center", justifyContent: "center",
+  },
+
+  // REDESIGN (RailYatri-style live position marker): the speech-bubble
+  // callout — "As of X ago" + refresh countdown, distance to next station,
+  // distance covered so far, and Report Inaccuracy.
+  liveCallout: {
+    backgroundColor: "#fff", borderWidth: 1, borderColor: colors.danger,
+    borderRadius: 8, paddingVertical: 8, paddingHorizontal: 10, marginTop: 4,
+    alignSelf: "stretch", maxWidth: 260,
+    shadowColor: "#000", shadowOpacity: 0.08, shadowRadius: 4, shadowOffset: { width: 0, height: 1 }, elevation: 1,
+  },
+  liveCalloutHeadRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 3 },
+  liveCalloutAsOf: { fontSize: 10.5, color: colors.textMuted, fontStyle: "italic" },
+  liveCalloutRefreshWrap: { flexDirection: "row", alignItems: "center", gap: 2 },
+  liveCalloutRefreshText: { fontSize: 10, color: colors.textMuted },
+  liveCalloutMain: { fontSize: 11.5, color: colors.danger, fontWeight: "600", marginBottom: 2 },
+  liveCalloutBold: { fontSize: 12, fontWeight: "700", color: colors.text },
+  liveCalloutMuted: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
+  liveCalloutReportLink: { alignSelf: "flex-end", marginTop: 4 },
+  liveCalloutReportText: { fontSize: 11, color: "#4a90d9", textDecorationLine: "underline" },
+
+  // REDESIGN (RailYatri-style): connected-dot mini-rail for an expanded
+  // no-halt group's stations.
+  noHaltRow: { flexDirection: "row" },
+  noHaltRail: { width: 18, alignItems: "center" },
+  noHaltRailLine: { width: 2, flex: 1, backgroundColor: colors.border, minHeight: 6 },
+  noHaltDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.border, marginVertical: 2 },
+  noHaltRowBody: { flex: 1, paddingLeft: 6, paddingBottom: 6 },
+  noHaltStationDist: { fontSize: 10.5, color: colors.textMuted, marginTop: 1 },
+
+  // REDESIGN (RailYatri-style bottom sticky bar): "Next: X in N mins" +
+  // Coach layout / Time Table quick-action buttons pinned to the bottom.
+  contentWithBar: { paddingBottom: 76 },
+  bottomBar: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    gap: 8, backgroundColor: "#fff", borderTopWidth: 1, borderTopColor: colors.border,
+    paddingVertical: 10, paddingHorizontal: spacing.lg,
+    shadowColor: "#000", shadowOpacity: 0.1, shadowRadius: 6, shadowOffset: { width: 0, height: -2 }, elevation: 6,
+  },
+  bottomBarInfo: { flexShrink: 1 },
+  bottomBarLabel: { fontSize: 12.5, color: colors.text, fontWeight: "600" },
+  bottomBarStation: { color: colors.primary, fontWeight: "700" },
+  bottomBarDelay: { fontSize: 11, fontWeight: "700", marginTop: 1 },
+  bottomBarDelayLate: { color: colors.danger },
+  bottomBarDelayOnTime: { color: colors.success },
+  bottomBarActions: { flexDirection: "row", gap: 6 },
+  bottomBarBtn: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill,
+    paddingVertical: 6, paddingHorizontal: 10, backgroundColor: colors.chip,
+  },
+  bottomBarBtnText: { fontSize: 11, fontWeight: "600", color: colors.primary },
 });
