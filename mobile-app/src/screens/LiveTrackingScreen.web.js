@@ -784,6 +784,24 @@ export default function LiveTrackingScreen({ navigation }) {
   }
   const journeyStartDate = parseTrackDateInput(trackDate);
 
+  // BUGFIX: the real current position is very often INSIDE a collapsed
+  // "+N No-Halt stations" group (most of a route's stations are
+  // non-reporting) — auto-expand whichever group actually contains it so
+  // the live marker is visible without the user having to guess which
+  // collapsed group to tap open. Keyed on the real current_station value
+  // so this only re-fires when the train genuinely moves on, and only
+  // ever adds an expansion (never collapses a group the user opened by
+  // hand, or one they've since closed again).
+  useEffect(() => {
+    const idx = timelineGrouped.findIndex(
+      (e) => e.display_type === "no_halt_group" && (e.stations || []).some((s) => s.status === "current")
+    );
+    if (idx !== -1) {
+      setExpandedGroups((prev) => (prev[idx] ? prev : { ...prev, [idx]: true }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payload?.current_station]);
+
   // REDESIGN (RailYatri-style live position marker): "X km covered so
   // far" — honestly derived, never invented, from two real payload
   // values: the last reporting station's own real distance-from-origin
@@ -1034,6 +1052,13 @@ export default function LiveTrackingScreen({ navigation }) {
                       group={entry}
                       expanded={!!expandedGroups[idx]}
                       onToggle={() => setExpandedGroups((prev) => ({ ...prev, [idx]: !prev[idx] }))}
+                      statusUpdatedAt={payload?.status_updated_at}
+                      refreshCountdown={refreshCountdown}
+                      distanceRemainingToNextKm={payload?.distance_remaining_to_next_km}
+                      totalCoveredKm={ltTotalCoveredKm}
+                      statusResponseId={payload?.status_response_id}
+                      reportState={reportState}
+                      onReportInaccuracy={reportInaccuracy}
                     />
                   );
                 }
@@ -1157,7 +1182,7 @@ function LiveStatusCallout({
         </View>
       </View>
       <Text style={styles.liveCalloutMain}>
-        🚆 Train is currently at {stop.name}
+        🚆 Train is currently at {toDisplayCase(stop.name)}
         {stop.halt_minutes ? ` · halt ${stop.halt_minutes} min` : ""}
       </Text>
       {distanceRemainingToNextKm != null && (
@@ -1244,70 +1269,91 @@ function DayPill({ label }) {
 // gps_tracking.py's group_timeline_for_display) — tap to reveal each of
 // those stations with whatever real per-station figures the backend
 // already computed for them (never invented here).
-function NoHaltGroupRow({ group, expanded, onToggle }) {
+//
+// BUGFIX ("broken pipeline"): the expanded sub-stations used to sit in
+// their OWN narrower, differently-indented rail column (nested a level
+// deeper inside the toggle row's body), so the connecting line visibly
+// jogged sideways going into and out of an expanded group instead of
+// running straight down like every other stretch of the timeline. Every
+// row here — the toggle row AND each expanded sub-station — now uses the
+// exact same 3-column layout (time-placeholder | tlRail | body |
+// time-placeholder) as TimelineStopRow itself, at the identical widths,
+// so the rail is one continuous straight line top to bottom, same as the
+// reference.
+//
+// BUGFIX (missing live marker on a no-halt current station): the real
+// current position is very often AT a non-reporting station (most of a
+// route's stations are non-reporting) — this used to just draw a small
+// red dot with no marker/callout at all, unlike a reporting station's
+// current row. A no-halt sub-station with status "current" now gets the
+// exact same TrainMarkerIcon + LiveStatusCallout as a reporting station.
+function NoHaltGroupRow({
+  group, expanded, onToggle,
+  statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
+  statusResponseId, reportState, onReportInaccuracy,
+}) {
   const stations = group.stations || [];
-  // BUGFIX: each no-halt (non-reporting) station now carries its own real
-  // passed/current/upcoming status (see gps_tracking.py's
-  // group_timeline_for_display — it used to silently drop this field
-  // during grouping). Same green-for-passed/red-for-current/grey-for-
-  // upcoming convention as every reporting station's own dot below, so a
-  // no-halt station the train has genuinely already gone through reads
-  // the same way instead of always looking not-yet-reached.
-  const groupAllPassed = stations.length > 0 && stations.every((s) => s.status === "passed");
+  const firstPassed = stations.length > 0 && stations[0].status === "passed";
   return (
-    <View style={styles.noHaltWrap}>
-      <View style={styles.tlRail}>
-        <View style={[styles.tlLine, groupAllPassed && styles.tlLinePassed]} />
-      </View>
-      <View style={styles.noHaltBody}>
-        <TouchableOpacity onPress={onToggle} style={styles.noHaltToggle}>
+    <>
+      <View style={styles.tlRow}>
+        <View style={styles.tlTimeCol} />
+        <View style={styles.tlRail}>
+          <View style={[styles.tlLine, firstPassed && styles.tlLinePassed]} />
+        </View>
+        <TouchableOpacity onPress={onToggle} style={styles.noHaltToggleBody}>
           <Text style={styles.noHaltToggleText}>
             + {group.count} No-Halt station{group.count === 1 ? "" : "s"}
             {group.distance_km != null ? ` (${group.distance_km} km)` : ""}
           </Text>
           <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={13} color={colors.primary} />
         </TouchableOpacity>
-        {/* REDESIGN (RailYatri-style): a connected-dot mini-rail for the
-            expanded no-halt stations, mirroring TimelineStopRow's own rail
-            (small dot + continuous line per stop) instead of a plain
-            stacked-text list — just simplified: no arrival/departure time
-            columns or status pill, since these stops never report their
-            own arrival/departure times, only a passing distance. */}
-        {expanded && (
-          <View style={styles.noHaltExpanded}>
-            {stations.map((s, i) => {
-              const passed = s.status === "passed";
-              const current = s.status === "current";
-              const dotColor = passed ? colors.success : current ? colors.danger : colors.border;
-              const linePassed = passed || (i > 0 && stations[i - 1].status === "passed");
-              return (
-              <View key={s.code || i} style={styles.noHaltRow}>
-                <View style={styles.noHaltRail}>
-                  <View style={[styles.noHaltRailLine, i === 0 && styles.tlLineHidden, linePassed && styles.tlLinePassed]} />
-                  <View style={[styles.noHaltDot, { backgroundColor: dotColor }]} />
-                  <View style={[styles.noHaltRailLine, i === stations.length - 1 && styles.tlLineHidden, passed && styles.tlLinePassed]} />
-                </View>
-                <View style={styles.noHaltRowBody}>
-                  <Text style={styles.noHaltStationText}>
-                    {toDisplayCase(s.name)} <Text style={styles.tlCode}>({s.code})</Text>
-                  </Text>
-                  {s.distance_since_last_stoppage_km != null && (
-                    <Text style={styles.noHaltStationDist}>{s.distance_since_last_stoppage_km} km</Text>
-                  )}
-                  {s.predicted_delay_minutes != null && (
-                    <Text style={styles.tlPredicted}>
-                      ~{formatDelayDuration(s.predicted_delay_minutes)} late (predicted)
-                      {s.predicted_eta ? ` · ETA ~${s.predicted_eta}` : ""}
-                    </Text>
-                  )}
-                </View>
-              </View>
-              );
-            })}
-          </View>
-        )}
+        <View style={styles.tlTimeCol} />
       </View>
-    </View>
+      {expanded && stations.map((s, i) => {
+        const passed = s.status === "passed";
+        const current = s.status === "current";
+        const dotColor = passed ? colors.success : current ? colors.danger : colors.border;
+        return (
+          <View key={s.code || i} style={styles.tlRow}>
+            <View style={styles.tlTimeCol} />
+            <View style={styles.tlRail}>
+              <View style={[styles.tlLine, passed && styles.tlLinePassed]} />
+              {current ? <TrainMarkerIcon /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
+              <View style={[styles.tlLine, passed && !current && styles.tlLinePassed]} />
+            </View>
+            <View style={styles.tlBody}>
+              <Text style={styles.tlName}>
+                {toDisplayCase(s.name)} <Text style={styles.tlCode}>({s.code})</Text>
+                <Text style={styles.timelineKind}>  · passing</Text>
+              </Text>
+              {s.distance_since_last_stoppage_km != null && (
+                <Text style={styles.tlMeta}>{s.distance_since_last_stoppage_km} km</Text>
+              )}
+              {current && (
+                <LiveStatusCallout
+                  stop={s}
+                  statusUpdatedAt={statusUpdatedAt}
+                  refreshCountdown={refreshCountdown}
+                  distanceRemainingToNextKm={distanceRemainingToNextKm}
+                  totalCoveredKm={totalCoveredKm}
+                  statusResponseId={statusResponseId}
+                  reportState={reportState}
+                  onReportInaccuracy={onReportInaccuracy}
+                />
+              )}
+              {!current && s.predicted_delay_minutes != null && (
+                <Text style={styles.tlPredicted}>
+                  ~{formatDelayDuration(s.predicted_delay_minutes)} late (predicted)
+                  {s.predicted_eta ? ` · ETA ~${s.predicted_eta}` : ""}
+                </Text>
+              )}
+            </View>
+            <View style={styles.tlTimeCol} />
+          </View>
+        );
+      })}
+    </>
   );
 }
 
@@ -1497,6 +1543,14 @@ const styles = StyleSheet.create({
   noHaltWrap: { flexDirection: "row" },
   noHaltBody: { flex: 1, paddingLeft: spacing.sm, paddingVertical: 4 },
   noHaltToggle: { flexDirection: "row", alignItems: "center", gap: 4 },
+  // BUGFIX ("broken pipeline"): the toggle row now shares the exact same
+  // tlTimeCol/tlRail column widths as every other timeline row (see
+  // NoHaltGroupRow) so its rail segment lines up perfectly with the ones
+  // above and below it — this is its "body" cell, sized like tlBody.
+  noHaltToggleBody: {
+    flex: 1, flexDirection: "row", alignItems: "center", gap: 4,
+    paddingLeft: spacing.sm, paddingVertical: spacing.sm,
+  },
   noHaltToggleText: { fontSize: 12, fontWeight: "600", color: colors.primary },
   noHaltExpanded: {
     marginTop: 6, paddingLeft: spacing.sm, borderLeftWidth: 2, borderLeftColor: colors.border,
