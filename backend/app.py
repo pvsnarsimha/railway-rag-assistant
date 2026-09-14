@@ -3817,6 +3817,88 @@ def api_coach_composition(train_number: str, station: Optional[str] = None):
 
 
 # =============================================================================
+# DIAGNOSTIC: live-position source comparison (RailKit's own current-station
+# pointer vs. RailRadar's segment_progress/station_code/is_actual_position),
+# added to actually track down a reported bug: the /ws/track loop's live
+# position lagged ~40km behind RailRadar's OWN website for the same train at
+# the same moment. The loop's "RailRadar wins" override (see the BUGFIX
+# comment right above it, a few hundred lines below in this file) only fires
+# when RailRadar's is_actual_position is truthy AND its station_code
+# resolves to a real stop in this train's own timeline - this endpoint is a
+# one-shot snapshot of exactly those inputs plus the decision they'd
+# produce, so the actual cause (is_actual_position genuinely false/missing
+# on RailRadar's side for this train right now, vs. some other mismatch)
+# can be confirmed against real data instead of guessed at. Hit this for a
+# currently-running train (e.g. /api/advanced/live-position-debug/12714)
+# at the same time you're looking at RailRadar's own site for it.
+# =============================================================================
+@app.get("/api/advanced/live-position-debug/{train_number}")
+def api_live_position_debug(train_number: str, date: Optional[str] = None):
+    date_ddmmyyyy = date or datetime.now().strftime("%d-%m-%Y")
+    try:
+        live_data = railway_api.get_live_train_status(train_number, date_ddmmyyyy)
+    except railway_api.RailwayAPIError as e:
+        return {"train_number": train_number, "ok": False, "error": f"RailKit live status: {e}"}
+    try:
+        train_info_data = railway_api.get_train_info(train_number)
+    except railway_api.RailwayAPIError:
+        train_info_data = None
+
+    position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
+    timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
+    timeline_json = gps_tracking.timeline_to_json(timeline_stops)
+    segment_info = railradar_fallback.get_segment_progress(train_number)
+
+    current_idx = next((i for i, s in enumerate(timeline_json) if s.get("status") == "current"), None)
+    if current_idx is None:
+        passed_idxs = [i for i, s in enumerate(timeline_json)
+                        if s.get("kind") != "intermediate" and s.get("status") == "passed"]
+        current_idx = passed_idxs[-1] if passed_idxs else None
+    current_entry = timeline_json[current_idx] if current_idx is not None else None
+
+    rr_code = segment_info.get("station_code")
+    rr_code_norm = rr_code.strip().upper() if isinstance(rr_code, str) else rr_code
+    rr_entry = next((s for s in timeline_json
+                      if isinstance(s.get("code"), str) and s["code"].strip().upper() == rr_code_norm), None) if rr_code_norm else None
+    override_would_fire = bool(
+        rr_code and segment_info.get("is_actual_position")
+        and rr_code_norm != (position.current_station_code or "").strip().upper()
+        and (rr_entry is not None or (gps_tracking._lookup_station(rr_code) or {}).get("name"))
+    )
+
+    return {
+        "train_number": train_number,
+        "ok": True,
+        "railkit_current_station": {
+            "code": position.current_station_code,
+            "name": position.current_station_name,
+        },
+        "railkit_current_timeline_entry": (
+            {"code": current_entry.get("code"), "name": current_entry.get("name"),
+             "distance_km": current_entry.get("distance_km"), "index": current_idx}
+            if current_entry else None
+        ),
+        "railradar_segment_info_raw": segment_info,
+        "railradar_station_resolves_in_timeline": bool(rr_entry),
+        "railradar_station_matched_entry": (
+            {"code": rr_entry.get("code"), "name": rr_entry.get("name"), "distance_km": rr_entry.get("distance_km")}
+            if rr_entry else None
+        ),
+        "override_would_fire_this_poll": override_would_fire,
+        "note": (
+            "override_would_fire_this_poll mirrors the exact condition the live /ws/track loop "
+            "uses right now. If this is False while RailRadar's own site clearly shows a fresher "
+            "position for this train, check railradar_segment_info_raw.is_actual_position first - "
+            "if it's false/None here, RailRadar's public /live API itself isn't returning a "
+            "confident fix for this train at this moment (a RailRadar-side gap, not a bug in this "
+            "app), even though their own site may have better internal data. If is_actual_position "
+            "is true but railradar_station_resolves_in_timeline is false, that's the actual bug - "
+            "a station-code mismatch this app can fix."
+        ),
+    }
+
+
+# =============================================================================
 # FEATURE: Coach & Seat "Find My Coach" Guide
 # =============================================================================
 class FindMyCoachRequest(BaseModel):
@@ -5223,9 +5305,39 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 current_station_code_display = position.current_station_code
                 next_station_code_display = position.next_station_code
                 current_station_source = "railkit"
-                rr_code = segment_info.get("station_code")
-                if rr_code and segment_info.get("is_actual_position") and rr_code != position.current_station_code:
-                    rr_entry = next((s for s in timeline_json if s["code"] == rr_code), None)
+                # BUGFIX (reported: app's live position showed the train
+                # ~40km / several real stations behind RailRadar's OWN live
+                # page for the exact same train). Investigated whether the
+                # is_actual_position gate below was silently dropping good
+                # RailRadar reads - but get_segment_progress's own docstring
+                # says is_actual_position specifically distinguishes "a real
+                # GPS fix" from "a schedule-based placeholder", so loosening
+                # THAT gate risks the opposite failure this app has avoided
+                # everywhere else: showing a schedule guess as if it were a
+                # live position. Not changed without real evidence of what
+                # RailRadar is actually returning for a poll where this lags.
+                #
+                # What IS fixed here, safely, regardless of that open
+                # question: rr_code / position.current_station_code / each
+                # timeline_json entry's own "code" were compared with plain
+                # `==`, so a whitespace or case difference between what
+                # RailKit and RailRadar each call the same real station
+                # (e.g. "zn " vs "ZN") would make this override - and the
+                # code-match inside it - silently fail even when
+                # is_actual_position genuinely was true. Normalized once
+                # here so that specific class of mismatch can't cause this
+                # symptom; see the new GET /api/advanced/live-position-debug
+                # endpoint below for actually confirming, next time this is
+                # reported, whether is_actual_position was the real cause -
+                # inspect its raw fields against RailRadar's own site for
+                # the same train at the same moment before touching that
+                # gate.
+                def _norm_code(c):
+                    return c.strip().upper() if isinstance(c, str) else c
+                rr_code = _norm_code(segment_info.get("station_code"))
+                current_code_norm = _norm_code(position.current_station_code)
+                if rr_code and segment_info.get("is_actual_position") and rr_code != current_code_norm:
+                    rr_entry = next((s for s in timeline_json if _norm_code(s.get("code")) == rr_code), None)
                     rr_name = rr_entry["name"] if rr_entry else (gps_tracking._lookup_station(rr_code) or {}).get("name")
                     if rr_name:
                         current_station_display = rr_name
