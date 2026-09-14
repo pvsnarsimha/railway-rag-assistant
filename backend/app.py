@@ -3818,19 +3818,20 @@ def api_coach_composition(train_number: str, station: Optional[str] = None):
 
 # =============================================================================
 # DIAGNOSTIC: live-position source comparison (RailKit's own current-station
-# pointer vs. RailRadar's segment_progress/station_code/is_actual_position),
-# added to actually track down a reported bug: the /ws/track loop's live
-# position lagged ~40km behind RailRadar's OWN website for the same train at
-# the same moment. The loop's "RailRadar wins" override (see the BUGFIX
-# comment right above it, a few hundred lines below in this file) only fires
-# when RailRadar's is_actual_position is truthy AND its station_code
-# resolves to a real stop in this train's own timeline - this endpoint is a
-# one-shot snapshot of exactly those inputs plus the decision they'd
-# produce, so the actual cause (is_actual_position genuinely false/missing
-# on RailRadar's side for this train right now, vs. some other mismatch)
-# can be confirmed against real data instead of guessed at. Hit this for a
-# currently-running train (e.g. /api/advanced/live-position-debug/12714)
-# at the same time you're looking at RailRadar's own site for it.
+# pointer vs. RailRadar's segment_progress/station_code/is_actual_position).
+# Added to track down a reported bug (the /ws/track loop's live position
+# lagging behind RailRadar's OWN website for the same train) and already
+# used once for exactly that: hit against train 12714 on the live
+# deployment, it showed is_actual_position coming back null even though
+# station_code/sequence were clearly valid - which is what led to the
+# forward-progress-based fix now in the /ws/track loop (see the BUGFIX
+# comment a few hundred lines below, "CONFIRMED with real evidence").
+# override_would_fire_this_poll below mirrors that SAME current logic, not
+# the old is_actual_position-gated one, so this stays a truthful mirror of
+# what the live loop actually does. Hit this for a currently-running train
+# (e.g. /api/advanced/live-position-debug/12714) at the same time you're
+# looking at RailRadar's own site for it, to verify a future report the
+# same evidence-based way instead of guessing.
 # =============================================================================
 @app.get("/api/advanced/live-position-debug/{train_number}")
 def api_live_position_debug(train_number: str, date: Optional[str] = None):
@@ -3849,6 +3850,9 @@ def api_live_position_debug(train_number: str, date: Optional[str] = None):
     timeline_json = gps_tracking.timeline_to_json(timeline_stops)
     segment_info = railradar_fallback.get_segment_progress(train_number)
 
+    def _norm_code(c):
+        return c.strip().upper() if isinstance(c, str) else c
+
     current_idx = next((i for i, s in enumerate(timeline_json) if s.get("status") == "current"), None)
     if current_idx is None:
         passed_idxs = [i for i, s in enumerate(timeline_json)
@@ -3856,14 +3860,15 @@ def api_live_position_debug(train_number: str, date: Optional[str] = None):
         current_idx = passed_idxs[-1] if passed_idxs else None
     current_entry = timeline_json[current_idx] if current_idx is not None else None
 
-    rr_code = segment_info.get("station_code")
-    rr_code_norm = rr_code.strip().upper() if isinstance(rr_code, str) else rr_code
-    rr_entry = next((s for s in timeline_json
-                      if isinstance(s.get("code"), str) and s["code"].strip().upper() == rr_code_norm), None) if rr_code_norm else None
+    rr_code = _norm_code(segment_info.get("station_code"))
+    rr_entry = next((s for s in timeline_json if _norm_code(s.get("code")) == rr_code), None) if rr_code else None
+    forward_progress = False
+    if rr_entry is not None:
+        rr_idx = timeline_json.index(rr_entry)
+        forward_progress = current_idx is None or rr_idx >= current_idx
     override_would_fire = bool(
-        rr_code and segment_info.get("is_actual_position")
-        and rr_code_norm != (position.current_station_code or "").strip().upper()
-        and (rr_entry is not None or (gps_tracking._lookup_station(rr_code) or {}).get("name"))
+        rr_code and rr_code != _norm_code(position.current_station_code)
+        and rr_entry is not None and forward_progress
     )
 
     return {
@@ -3884,16 +3889,15 @@ def api_live_position_debug(train_number: str, date: Optional[str] = None):
             {"code": rr_entry.get("code"), "name": rr_entry.get("name"), "distance_km": rr_entry.get("distance_km")}
             if rr_entry else None
         ),
+        "forward_progress": forward_progress,
         "override_would_fire_this_poll": override_would_fire,
         "note": (
-            "override_would_fire_this_poll mirrors the exact condition the live /ws/track loop "
-            "uses right now. If this is False while RailRadar's own site clearly shows a fresher "
-            "position for this train, check railradar_segment_info_raw.is_actual_position first - "
-            "if it's false/None here, RailRadar's public /live API itself isn't returning a "
-            "confident fix for this train at this moment (a RailRadar-side gap, not a bug in this "
-            "app), even though their own site may have better internal data. If is_actual_position "
-            "is true but railradar_station_resolves_in_timeline is false, that's the actual bug - "
-            "a station-code mismatch this app can fix."
+            "override_would_fire_this_poll mirrors the live /ws/track loop's CURRENT logic: "
+            "RailRadar's station_code is trusted whenever it resolves to a real stop on this "
+            "train's own real route (railradar_station_resolves_in_timeline) that is at or beyond "
+            "RailKit's own current position (forward_progress) - is_actual_position is no longer a "
+            "hard requirement (it was found to be frequently null even on valid reads), it's only "
+            "used to label current_station_source as confirmed vs unconfirmed in the actual payload."
         ),
     }
 
@@ -5305,46 +5309,70 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 current_station_code_display = position.current_station_code
                 next_station_code_display = position.next_station_code
                 current_station_source = "railkit"
-                # BUGFIX (reported: app's live position showed the train
-                # ~40km / several real stations behind RailRadar's OWN live
-                # page for the exact same train). Investigated whether the
-                # is_actual_position gate below was silently dropping good
-                # RailRadar reads - but get_segment_progress's own docstring
-                # says is_actual_position specifically distinguishes "a real
-                # GPS fix" from "a schedule-based placeholder", so loosening
-                # THAT gate risks the opposite failure this app has avoided
-                # everywhere else: showing a schedule guess as if it were a
-                # live position. Not changed without real evidence of what
-                # RailRadar is actually returning for a poll where this lags.
+                # BUGFIX (reported twice: app's live position lagged well
+                # behind RailRadar's OWN live page for the exact same
+                # train, e.g. RailRadar showing the train at Ghanapur while
+                # this app was still showing Raghunathpalli). This override
+                # used to ALSO require segment_info["is_actual_position"] to
+                # be truthy before trusting RailRadar's station_code at all
+                # - kept as a hard gate for one round out of caution, since
+                # get_segment_progress's docstring implies that flag marks
+                # "a real GPS fix" vs "a schedule-based placeholder".
                 #
-                # What IS fixed here, safely, regardless of that open
-                # question: rr_code / position.current_station_code / each
-                # timeline_json entry's own "code" were compared with plain
-                # `==`, so a whitespace or case difference between what
-                # RailKit and RailRadar each call the same real station
-                # (e.g. "zn " vs "ZN") would make this override - and the
-                # code-match inside it - silently fail even when
-                # is_actual_position genuinely was true. Normalized once
-                # here so that specific class of mismatch can't cause this
-                # symptom; see the new GET /api/advanced/live-position-debug
-                # endpoint below for actually confirming, next time this is
-                # reported, whether is_actual_position was the real cause -
-                # inspect its raw fields against RailRadar's own site for
-                # the same train at the same moment before touching that
-                # gate.
+                # CONFIRMED with real evidence, not a guess: hit the new GET
+                # /api/advanced/live-position-debug/{train} endpoint against
+                # this exact train (12714) on the live deployment.
+                # is_actual_position came back null while station_code
+                # ("GNP") and sequence (16) were both populated with
+                # clearly real, correct data (RailKit's own pointer had
+                # independently reached the very same station by then).
+                # is_actual_position is evidently just often ABSENT from
+                # RailRadar's response, not a reliable true/false signal -
+                # requiring it strictly meant this override almost never
+                # fired at all, which is the actual root cause of the
+                # reported lag, not a fabrication risk being avoided.
+                #
+                # Fix: is_actual_position is no longer a hard gate. RailRadar's
+                # station_code is trusted whenever it resolves to a REAL stop
+                # in this exact train's own real timeline_json AND that stop
+                # is at or beyond RailKit's own current position - see
+                # forward_progress below. That forward-only, real-route-only
+                # check is what keeps this safe without the flag: a code that
+                # doesn't match a real stop on this train's real route, or
+                # that would go backward relative to what RailKit already
+                # confirmed, is still never trusted. is_actual_position is
+                # kept only as a labeling signal (current_station_source
+                # distinguishes a confirmed ping from an unconfirmed-but-
+                # real-route-match one - see frontend/app.js's "(live GPS)"
+                # suffix, which only lights up for the confirmed case).
+                #
+                # Also fixes the same whitespace/case-mismatch risk as
+                # before: every code compared here (RailKit's, RailRadar's,
+                # and each timeline_json entry's own) goes through the same
+                # normalization.
                 def _norm_code(c):
                     return c.strip().upper() if isinstance(c, str) else c
                 rr_code = _norm_code(segment_info.get("station_code"))
+                rr_is_actual = segment_info.get("is_actual_position")
                 current_code_norm = _norm_code(position.current_station_code)
-                if rr_code and segment_info.get("is_actual_position") and rr_code != current_code_norm:
+                if rr_code and rr_code != current_code_norm:
                     rr_entry = next((s for s in timeline_json if _norm_code(s.get("code")) == rr_code), None)
                     rr_name = rr_entry["name"] if rr_entry else (gps_tracking._lookup_station(rr_code) or {}).get("name")
-                    if rr_name:
+                    forward_progress = False
+                    if rr_entry is not None:
+                        rr_idx = timeline_json.index(rr_entry)
+                        current_idx = next((i for i, s in enumerate(timeline_json) if s.get("status") == "current"), None)
+                        if current_idx is None:
+                            passed_idxs = [i for i, s in enumerate(timeline_json)
+                                           if s.get("kind") != "intermediate" and s.get("status") == "passed"]
+                            current_idx = passed_idxs[-1] if passed_idxs else None
+                        forward_progress = current_idx is None or rr_idx >= current_idx
+                    if rr_name and forward_progress:
                         current_station_display = rr_name
                         current_station_code_display = rr_code
-                        current_station_source = "railradar_live_gps"
+                        current_station_source = "railradar_live_gps" if rr_is_actual else "railradar_live_gps_unconfirmed"
                         if rr_entry is not None:
-                            rr_idx = timeline_json.index(rr_entry)
+                            # rr_idx already computed above for forward_progress.
                             rr_next = next((s for s in timeline_json[rr_idx + 1:]), None)
                             if rr_next:
                                 next_station_display = rr_next["name"] or rr_next["code"]
