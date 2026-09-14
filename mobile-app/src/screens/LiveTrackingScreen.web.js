@@ -1059,6 +1059,7 @@ export default function LiveTrackingScreen({ navigation }) {
                       statusResponseId={payload?.status_response_id}
                       reportState={reportState}
                       onReportInaccuracy={reportInaccuracy}
+                      nextStationName={payload?.next_station}
                     />
                   );
                 }
@@ -1097,6 +1098,7 @@ export default function LiveTrackingScreen({ navigation }) {
                       statusResponseId={payload?.status_response_id}
                       reportState={reportState}
                       onReportInaccuracy={reportInaccuracy}
+                      nextStationName={payload?.next_station}
                     />
                   </React.Fragment>
                 );
@@ -1170,7 +1172,7 @@ function TrainMarkerIcon() {
 // "Report Inaccuracy" link wired to the real /api/feedback endpoint.
 function LiveStatusCallout({
   stop, statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm,
-  totalCoveredKm, statusResponseId, reportState, onReportInaccuracy,
+  totalCoveredKm, statusResponseId, reportState, onReportInaccuracy, nextStationName,
 }) {
   return (
     <View style={styles.liveCallout}>
@@ -1186,7 +1188,13 @@ function LiveStatusCallout({
         {stop.halt_minutes ? ` · halt ${stop.halt_minutes} min` : ""}
       </Text>
       {distanceRemainingToNextKm != null && (
-        <Text style={styles.liveCalloutBold}>{distanceRemainingToNextKm} km to next station</Text>
+        // REDESIGN (RailYatri parity): names the real upcoming station
+        // (payload.next_station, threaded down from the screen) instead of
+        // a generic "next station" — same phrasing as the reference app's
+        // "4 kms to Aler".
+        <Text style={styles.liveCalloutBold}>
+          {distanceRemainingToNextKm} km to {nextStationName ? toDisplayCase(nextStationName) : "next station"}
+        </Text>
       )}
       {totalCoveredKm != null && (
         <Text style={styles.liveCalloutMuted}>({totalCoveredKm} km covered so far)</Text>
@@ -1264,6 +1272,41 @@ function DayPill({ label }) {
   );
 }
 
+// FEATURE PARITY (was desktop-only until now): the "locked in" / "confirmed
+// via <station>" badge next to a predicted delay — mirrors frontend/app.js's
+// predictedDelayBadge() exactly, same real fields, same priority order.
+// Backend's _lock_grounded_station_predictions() (app.py) already freezes a
+// station's predicted_delay_minutes/predicted_eta once real speed+distance
+// math (_lock_confidence_from_speed_distance(), app.py) crosses the 99.5%
+// confidence threshold, OR once it's anchored to a nearby real-grounded
+// point (predicted_delay_grounded_via) — this only reads that decision, it
+// doesn't make one; nothing here recomputes or re-guesses anything.
+function PredictedDelayLine({ stop }) {
+  if (stop.predicted_delay_minutes == null) return null;
+  const groundedVia = stop.predicted_delay_grounded_via || stop.predicted_delay_locked_via;
+  let badge = null;
+  if (groundedVia) {
+    badge = { text: `✓ confirmed via ${groundedVia}`, hint: `Anchored to ${groundedVia}'s own real-time-grounded arrival — locked in, won't change again this journey.` };
+  } else if (stop.predicted_delay_locked) {
+    badge = { text: "✓ locked in", hint: "This station's own real schedule vs. live position math grounded this prediction — locked in, won't change again this journey." };
+  } else if (stop.predicted_delay_confidence === "Very High" && stop.prediction_methods_compared) {
+    badge = { text: "✓ cross-verified", hint: `${stop.prediction_methods_compared} independent methods agreed within ${stop.prediction_agreement_minutes} min.` };
+  }
+  return (
+    <View style={styles.tlPredictedRow}>
+      <Text style={styles.tlPredicted}>
+        ~{formatDelayDuration(stop.predicted_delay_minutes)} late (predicted)
+        {stop.predicted_eta ? ` · ETA ~${stop.predicted_eta}` : ""}
+      </Text>
+      {badge && (
+        <View style={styles.tlVerifiedBadge}>
+          <Text style={styles.tlVerifiedBadgeText} numberOfLines={1}>{badge.text}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
 // REDESIGN (RailYatri-style): the collapsed "+N No-Halt stations" row for
 // a run of consecutive non-reporting stations between two real halts (see
 // gps_tracking.py's group_timeline_for_display) — tap to reveal each of
@@ -1290,7 +1333,7 @@ function DayPill({ label }) {
 function NoHaltGroupRow({
   group, expanded, onToggle,
   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
-  statusResponseId, reportState, onReportInaccuracy,
+  statusResponseId, reportState, onReportInaccuracy, nextStationName,
 }) {
   const stations = group.stations || [];
   const firstPassed = stations.length > 0 && stations[0].status === "passed";
@@ -1340,14 +1383,10 @@ function NoHaltGroupRow({
                   statusResponseId={statusResponseId}
                   reportState={reportState}
                   onReportInaccuracy={onReportInaccuracy}
+                  nextStationName={nextStationName}
                 />
               )}
-              {!current && s.predicted_delay_minutes != null && (
-                <Text style={styles.tlPredicted}>
-                  ~{formatDelayDuration(s.predicted_delay_minutes)} late (predicted)
-                  {s.predicted_eta ? ` · ETA ~${s.predicted_eta}` : ""}
-                </Text>
-              )}
+              {!current && <PredictedDelayLine stop={s} />}
             </View>
             <View style={styles.tlTimeCol} />
           </View>
@@ -1408,7 +1447,7 @@ function stopEffectiveDelay(stop, staleUnconfirmed) {
 function TimelineStopRow({
   stop, isFirst, isLast, rowRef, journeyLikelyComplete,
   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
-  statusResponseId, reportState, onReportInaccuracy,
+  statusResponseId, reportState, onReportInaccuracy, nextStationName,
 }) {
   // BUGFIX: once the journey looks likely complete (see
   // computeJourneyLikelyComplete near the top of this file), the train
@@ -1468,6 +1507,7 @@ function TimelineStopRow({
             statusResponseId={statusResponseId}
             reportState={reportState}
             onReportInaccuracy={onReportInaccuracy}
+            nextStationName={nextStationName}
           />
         )}
         {/* BUGFIX: suppressed when staleUnconfirmed — see TimeStack's
@@ -1475,12 +1515,7 @@ function TimelineStopRow({
             worse than none once the provider has stopped updating this
             stop altogether (most often the destination, well after the
             train has genuinely reached it). */}
-        {!staleUnconfirmed && stop.status === "upcoming" && stop.predicted_delay_minutes != null && (
-          <Text style={styles.tlPredicted}>
-            ~{formatDelayDuration(stop.predicted_delay_minutes)} late (predicted)
-            {stop.predicted_eta ? ` · ETA ~${stop.predicted_eta}` : ""}
-          </Text>
-        )}
+        {!staleUnconfirmed && stop.status === "upcoming" && <PredictedDelayLine stop={stop} />}
       </View>
       <TimeStack timing={stop.departure} staleUnconfirmed={staleUnconfirmed} placeholder={isLast && journeyLikelyComplete ? "Dest" : null} align="right" />
     </View>
@@ -1577,6 +1612,14 @@ const styles = StyleSheet.create({
   },
   tlCurrentCalloutText: { fontSize: 11.5, color: colors.danger, fontWeight: "600" },
   tlPredicted: { fontSize: 11, color: colors.warning, marginTop: 3 },
+  tlPredictedRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", marginTop: 3, gap: 4 },
+  // FEATURE PARITY: same "✓ locked in / confirmed via X" look as the web
+  // frontend's .live-timeline__verified badge (green outline pill).
+  tlVerifiedBadge: {
+    borderWidth: 1, borderColor: colors.success, backgroundColor: "#e2f6e9",
+    borderRadius: 3, paddingHorizontal: 6, paddingVertical: 1, maxWidth: 180,
+  },
+  tlVerifiedBadgeText: { fontSize: 9.5, fontWeight: "700", color: colors.success },
   badgeRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: spacing.sm },
   badgeText: { fontSize: 12, fontWeight: "600" },
   webNotice: { flexDirection: "row", gap: 6, marginTop: spacing.md, alignItems: "flex-start" },
