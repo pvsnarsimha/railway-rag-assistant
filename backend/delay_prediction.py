@@ -276,18 +276,134 @@ class _LSTMDelayRegressor:
 _model = None
 _model_name = None
 _lstm_available = None  # tri-state: None = not yet checked, else True/False
+# FEATURE: which data this app is CURRENTLY predicting from - "synthetic"
+# (the documented heuristic dataset above, the honest default this project
+# has always disclosed) or "real" (this app's OWN logged predicted-vs-
+# actual history, see train_on_real_history_if_available() below). Exposed
+# via /api/health in app.py and DelayPrediction.model_name/disclaimer so
+# this transition is genuinely visible when it happens, not a silent
+# upgrade nobody can confirm actually took effect.
+_model_source = None
+_real_training_info: dict = {"source": "not_checked", "real_row_count": 0, "min_required_rows": None}
+
+# Real supervised training examples needed before this app trusts its OWN
+# logged history over the synthetic dataset. Chosen as a floor, not a
+# target: below this, a 9-feature RandomForest/MLP fit is dominated by
+# noise (too few rows per feature-space region) and would likely be WORSE
+# than the documented synthetic heuristic, not better - "real" data isn't
+# automatically more trustworthy than a small amount of it. Revisit upward
+# once real volume is consistently available; this is a starting floor,
+# not a validated optimum (no real historical dataset existed to validate
+# it against before this feature existed - see this module's own docstring).
+_MIN_REAL_TRAINING_ROWS = 60
+
+
+def _fit_ensemble(X: np.ndarray, y: np.ndarray, seed: int = 42) -> dict:
+    """
+    Shared RF + MLP (+ optional LSTM) -> RidgeCV stacking fit, used for
+    BOTH the synthetic dataset (get_model()'s fallback path) and real
+    logged history (train_on_real_history_if_available()) - same model
+    architecture either way, so "real" vs "synthetic" is purely about
+    which (X, y) it was handed, never a different, less-tested model type
+    for the real-data path.
+    """
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.neural_network import MLPRegressor
+    from sklearn.linear_model import RidgeCV
+
+    rf = RandomForestRegressor(
+        n_estimators=150, max_depth=11, min_samples_leaf=4, random_state=seed, n_jobs=-1,
+    )
+    mlp = MLPRegressor(
+        hidden_layer_sizes=(32, 16), activation="relu", max_iter=800,
+        early_stopping=True, random_state=seed,
+    )
+    rf.fit(X, y)
+    mlp.fit(X, y)
+
+    meta_features = [rf.predict(X), mlp.predict(X)]
+
+    lstm = None
+    try:
+        lstm = _LSTMDelayRegressor(hidden_size=16, epochs=80, lr=0.01, seed=seed)
+        lstm.fit(X, y)
+        meta_features.append(lstm.predict(X))
+    except ImportError:
+        lstm = None  # torch not installed - degrade to RandomForest + MLP only
+    except Exception:
+        lstm = None
+
+    meta = RidgeCV()
+    meta.fit(np.column_stack(meta_features), y)
+
+    return {"rf": rf, "mlp": mlp, "lstm": lstm, "meta": meta}
+
+
+def _build_real_dataset():
+    """
+    Real (X, y) built from this app's OWN logged predicted-vs-actual
+    history (delay_accuracy_store.py), once enough of it exists to trust.
+
+    Only rows carrying BOTH a real recorded actual_delay_minutes AND a
+    COMPLETE recorded feature vector (every one of FEATURE_NAMES, from
+    delay_prediction.DelayPrediction.feature_values at the moment that
+    prediction was made - see delay_accuracy_store.py's _FEATURE_COLUMNS)
+    are usable. A row missing even one feature has no known input->output
+    mapping and would corrupt training with a garbage row rather than
+    genuinely teaching the model anything - this includes every row logged
+    before feature-vector logging existed, which is the expected, honest
+    reason this returns (None, None, 0) for a good while after this
+    feature first ships, not a bug.
+
+    Returns (X, y, usable_row_count). X/y are None whenever fewer than
+    _MIN_REAL_TRAINING_ROWS usable rows exist - the caller must fall back
+    to the synthetic dataset in that case, same as every other "not enough
+    real data yet" case in this app.
+    """
+    try:
+        import delay_accuracy_store
+    except Exception:
+        return None, None, 0
+    try:
+        rows = delay_accuracy_store.get_all_records_for_training(min_actual_rows=_MIN_REAL_TRAINING_ROWS)
+    except Exception:
+        return None, None, 0
+
+    usable_X, usable_y = [], []
+    for r in rows:
+        vals = [r.get(f"feature_{name}") for name in FEATURE_NAMES]
+        if any(v is None for v in vals) or r.get("actual_delay_minutes") is None:
+            continue
+        try:
+            usable_X.append([float(v) for v in vals])
+            usable_y.append(float(r["actual_delay_minutes"]))
+        except (TypeError, ValueError):
+            continue
+
+    if len(usable_X) < _MIN_REAL_TRAINING_ROWS:
+        return None, None, len(usable_X)
+    return np.array(usable_X, dtype=float), np.array(usable_y, dtype=float), len(usable_X)
 
 
 def get_model():
-    """Singleton accessor: loads cached fitted models from disk if present
-    and matching this schema version, otherwise trains + caches fresh ones.
-    Returns a dict: {"rf", "mlp", "lstm" (or None), "meta"} plus the raw
-    training X/y aren't kept - only the fitted estimators."""
-    global _model, _model_name, _lstm_available
+    """Singleton accessor. Checks THIS APP'S OWN real logged prediction
+    history FIRST (see train_on_real_history_if_available()) every process
+    start; only when there isn't enough of it yet does this fall back to
+    the documented synthetic dataset, loading a cached fit from disk if
+    present and matching this schema version, otherwise training + caching
+    a fresh one. Returns a dict: {"rf", "mlp", "lstm" (or None), "meta"} -
+    the raw training X/y aren't kept, only the fitted estimators."""
+    global _model, _model_name, _model_source, _lstm_available
     if _model is not None:
         return _model
 
     os.makedirs(_CACHE_DIR, exist_ok=True)
+
+    real_model = train_on_real_history_if_available()
+    if real_model is not None:
+        _model = real_model
+        return _model
+
     try:
         import joblib
         if os.path.isfile(_MODEL_PATH):
@@ -304,56 +420,23 @@ def get_model():
                 else:
                     _lstm_available = False
                 _model = {"rf": cached["rf"], "mlp": cached["mlp"], "lstm": lstm, "meta": cached["meta"]}
-                _model_name = _describe_model(lstm is not None)
+                _model_name = _describe_model(lstm is not None, source="synthetic")
+                _model_source = "synthetic"
                 return _model
     except Exception:
         pass  # fall through to a fresh train — never crash the app over a cache miss
 
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.neural_network import MLPRegressor
-    from sklearn.linear_model import RidgeCV
-
     X, y = _generate_training_data()
-
-    rf = RandomForestRegressor(
-        n_estimators=150, max_depth=11, min_samples_leaf=4, random_state=42, n_jobs=-1,
-    )
-    mlp = MLPRegressor(
-        hidden_layer_sizes=(32, 16), activation="relu", max_iter=800,
-        early_stopping=True, random_state=42,
-    )
-    rf.fit(X, y)
-    mlp.fit(X, y)
-
-    meta_features = [rf.predict(X), mlp.predict(X)]
-
-    lstm = None
-    lstm_blob = None
-    try:
-        lstm = _LSTMDelayRegressor(hidden_size=16, epochs=80, lr=0.01, seed=42)
-        lstm.fit(X, y)
-        meta_features.append(lstm.predict(X))
-        lstm_blob = lstm.state_dict_for_cache()
-        _lstm_available = True
-    except ImportError:
-        # torch not installed - degrade to RandomForest + MLP only, same
-        # graceful pattern semantic_engine.py uses for its own torch import.
-        lstm = None
-        _lstm_available = False
-    except Exception:
-        lstm = None
-        _lstm_available = False
-
-    meta = RidgeCV()
-    meta.fit(np.column_stack(meta_features), y)
-
-    _model = {"rf": rf, "mlp": mlp, "lstm": lstm, "meta": meta}
-    _model_name = _describe_model(lstm is not None)
+    _model = _fit_ensemble(X, y)
+    _model_name = _describe_model(_model["lstm"] is not None, source="synthetic")
+    _model_source = "synthetic"
+    _lstm_available = _model["lstm"] is not None
 
     try:
         import joblib
         joblib.dump({
-            "version": _MODEL_VERSION, "rf": rf, "mlp": mlp, "meta": meta, "lstm_blob": lstm_blob,
+            "version": _MODEL_VERSION, "rf": _model["rf"], "mlp": _model["mlp"], "meta": _model["meta"],
+            "lstm_blob": (_model["lstm"].state_dict_for_cache() if _model["lstm"] is not None else None),
         }, _MODEL_PATH)
     except Exception:
         pass  # caching is an optimisation only — a failed write must never break prediction
@@ -361,11 +444,71 @@ def get_model():
     return _model
 
 
-def _describe_model(lstm_included: bool) -> str:
-    if lstm_included:
-        return "RandomForest + MLPRegressor + LSTM (PyTorch), blended via RidgeCV meta-learner"
-    return ("RandomForest + MLPRegressor, blended via RidgeCV meta-learner "
-            "(LSTM skipped - torch not installed in this environment)")
+def train_on_real_history_if_available() -> Optional[dict]:
+    """
+    FEATURE: retrain the delay ensemble on this app's OWN real logged
+    predicted-vs-actual history (delay_accuracy_store.py) instead of the
+    synthetic dataset, the moment there's genuinely enough of it to trust
+    (_MIN_REAL_TRAINING_ROWS) - see this module's docstring and
+    _build_real_dataset() for the full honesty reasoning on what counts as
+    "enough" and why a row without a complete real feature vector can
+    never be used.
+
+    Deliberately NOT disk-cached the way the synthetic fallback is: this
+    app's own real history only grows over time (and, per delay_accuracy_
+    store.py's own docstring, can reset entirely on a Render free-tier
+    restart), so a stale cached "real" fit from an earlier, smaller or
+    since-reset pool of rows must never keep being silently served after a
+    restart - training a few hundred real rows is fast (same cost class as
+    the synthetic fit this already pays on every cold start), so this is
+    simply re-checked and re-fit fresh every time get_model() is called
+    with no cached model in memory yet.
+
+    Returns None (never a placeholder model) when fewer than
+    _MIN_REAL_TRAINING_ROWS usable real rows exist - the caller (get_model)
+    must fall back to the synthetic dataset in that case. Sets the module-
+    level _real_training_info diagnostics dict either way, so
+    /api/health can report exactly how much real data exists right now
+    even while still on the synthetic model - the transition to "real" is
+    then something anyone can watch approach, not a silent flip with no
+    visibility beforehand.
+    """
+    global _model_name, _model_source, _lstm_available, _real_training_info
+
+    X_real, y_real, real_count = _build_real_dataset()
+    _real_training_info = {
+        "source": "real" if X_real is not None else "synthetic",
+        "real_row_count": real_count,
+        "min_required_rows": _MIN_REAL_TRAINING_ROWS,
+    }
+    if X_real is None:
+        return None
+
+    try:
+        model = _fit_ensemble(X_real, y_real)
+    except Exception:
+        # A real-data training failure (e.g. a degenerate dataset) must
+        # never break prediction - fall back to synthetic, same as every
+        # other best-effort path in this app.
+        _real_training_info["source"] = "synthetic"
+        _real_training_info["error"] = "Training on real logged history failed; using the synthetic model instead."
+        return None
+
+    _model_name = _describe_model(model["lstm"] is not None, source="real", real_count=real_count)
+    _model_source = "real"
+    _lstm_available = model["lstm"] is not None
+    return model
+
+
+def _describe_model(lstm_included: bool, source: str = "synthetic", real_count: Optional[int] = None) -> str:
+    base = (
+        "RandomForest + MLPRegressor + LSTM (PyTorch), blended via RidgeCV meta-learner" if lstm_included else
+        "RandomForest + MLPRegressor, blended via RidgeCV meta-learner "
+        "(LSTM skipped - torch not installed in this environment)"
+    )
+    if source == "real":
+        return f"{base} — trained on {real_count} real logged prediction-vs-actual observations from this app's own history"
+    return base
 
 
 def _ensemble_predict(model: dict, X: np.ndarray) -> float:
@@ -567,6 +710,18 @@ class DelayPrediction:
     # narrower for High confidence (more real signal fed in), wider for Low.
     low_minutes: int = 0
     high_minutes: int = 0
+    # FEATURE: the exact resolved feature vector (FEATURE_NAMES -> value)
+    # this specific prediction was made from - see resolve_features(). Kept
+    # on the result (not just used internally) so a caller that ALSO wants
+    # to durably log this prediction (see app.py's _predict_delay_per_
+    # reporting_station -> delay_accuracy_store) can persist the real
+    # inputs alongside the output, without a second resolve_features() call
+    # and without ever having to reconstruct them later from scratch. This
+    # is what makes train_on_real_history_if_available() below possible at
+    # all - a logged (predicted, actual) pair with no recorded feature
+    # vector can never be turned into a real supervised training example,
+    # only a raw before/after number.
+    feature_values: Optional[dict] = None
 
 
 def predict_delay(
@@ -606,11 +761,35 @@ def predict_delay(
         confidence = "Low"
 
     low_minutes, high_minutes = _confidence_band(predicted, confidence)
+    disclaimer = DISCLAIMER
+    if _model_source == "real":
+        disclaimer = (
+            "This is a machine-learning estimate (a stacked ensemble of RandomForestRegressor, "
+            f"MLPRegressor{', and an LSTM neural network,' if _lstm_available else ' (LSTM unavailable),'} "
+            f"blended by a RidgeCV meta-learner) trained on {_real_training_info.get('real_row_count', 0)} "
+            "REAL logged prediction-vs-actual observations from this app's own Live Tracking history - "
+            "still an early-stage sample size, so treat it as a planning estimate, not a guarantee."
+        )
     return DelayPrediction(
         predicted_delay_minutes=predicted, confidence=confidence, basis=resolved.basis,
         low_minutes=low_minutes, high_minutes=high_minutes,
         model_name=_model_name or "RandomForestRegressor (scikit-learn)",
+        feature_values=resolved.values,
+        disclaimer=disclaimer,
     )
+
+
+def get_training_status() -> dict:
+    """FEATURE: honest visibility into whether this process is CURRENTLY
+    predicting from real logged history or the synthetic fallback, and how
+    close it is to the real-data threshold - wired into /api/health in
+    app.py so this is checkable on a deployed server with no shell access,
+    same "prove it, don't just claim it" pattern as delay_accuracy_store.
+    db_diagnostics(). Calling get_model() first (idempotent - a no-op if
+    already loaded this process) ensures _real_training_info reflects an
+    actual attempted load, not stale pre-startup defaults."""
+    get_model()
+    return dict(_real_training_info, active_model_source=_model_source)
 
 
 _SPEED_MODEL_PATH = os.path.join(_CACHE_DIR, "speed_model.joblib")

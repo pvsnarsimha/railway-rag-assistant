@@ -1548,6 +1548,17 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
                           <Text style={[styles.statusDelay, delayed ? styles.statusDelayLate : styles.statusDelayOnTime]}>
                             {delayed ? `${formatDelayDuration(payload.delay_minutes)} late` : "On time"}
                           </Text>
+                          {/* FEATURE PARITY (LiveTrackingScreen.web.js's segment
+                              speed warning): closest real substitute for "route
+                              congestion" this app can honestly show — see
+                              backend's _compute_segment_speed_signal. Only
+                              appears when genuinely running well below this
+                              SPECIFIC segment's own published typical speed. */}
+                          {payload.segment_speed_signal && (
+                            <Text style={styles.segmentSpeedWarn}>
+                              {"⚠"} {payload.segment_speed_signal.live_kmph} km/h vs. usual ~{payload.segment_speed_signal.typical_kmph} km/h here
+                            </Text>
+                          )}
                           <TouchableOpacity
                             style={styles.reportLink}
                             disabled={reportState !== "idle"}
@@ -1560,14 +1571,33 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
                         </View>
                       )}
                       {showPredicted && (
-                        <Text style={styles.timelinePredicted}>
-                          ~{formatDelayDuration(stop.predicted_delay_minutes)}
-                          {stop.predicted_delay_low_minutes != null && stop.predicted_delay_high_minutes != null
-                            ? ` [${formatDelayDuration(stop.predicted_delay_low_minutes)}\u2013${formatDelayDuration(stop.predicted_delay_high_minutes)}]`
-                            : ""}{" "}
-                          late (predicted)
-                          {stop.predicted_eta ? ` \u00b7 ETA ~${stop.predicted_eta}` : ""}
-                        </Text>
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                          <Text style={styles.timelinePredicted}>
+                            ~{formatDelayDuration(stop.predicted_delay_minutes)}
+                            {stop.predicted_delay_low_minutes != null && stop.predicted_delay_high_minutes != null
+                              ? ` [${formatDelayDuration(stop.predicted_delay_low_minutes)}\u2013${formatDelayDuration(stop.predicted_delay_high_minutes)}]`
+                              : ""}{" "}
+                            late (predicted)
+                            {stop.predicted_eta ? ` \u00b7 ETA ~${stop.predicted_eta}` : ""}
+                          </Text>
+                          {/* FEATURE PARITY (web frontend's historicalNote/disagreementNote,
+                              LiveTrackingScreen.web.js's PredictedDelayLine): this exact
+                              train's own real historical tendency at this exact station,
+                              and real RailKit-vs-RailRadar disagreement on already-confirmed
+                              stations this run \u2014 informational only, never a "verified" claim. */}
+                          {stop.predicted_delay_historical_basis && (
+                            <View style={styles.tlInfoBadge}>
+                              <Text style={styles.tlInfoBadgeText} numberOfLines={1}>\u24d8 history</Text>
+                            </View>
+                          )}
+                          {stop.provider_disagreement_minutes != null && stop.provider_disagreement_minutes > 2 && (
+                            <View style={[styles.tlInfoBadge, styles.tlInfoBadgeWarn]}>
+                              <Text style={[styles.tlInfoBadgeText, styles.tlInfoBadgeTextWarn]} numberOfLines={1}>
+                                {"\u26a0"} Providers differ ~{stop.provider_disagreement_minutes}m
+                              </Text>
+                            </View>
+                          )}
+                        </View>
                       )}
                       <Text style={styles.timelineTimes}>
                         Arr {stop.arrival?.scheduled || "\u2014"}
@@ -1729,6 +1759,21 @@ const styles = StyleSheet.create({
   timelineFromLast: { fontSize: 11, color: colors.textMuted, fontStyle: "italic", marginTop: 1 },
   timelineHalt: { fontSize: 12, color: colors.textMuted, marginTop: 1 },
   timelinePredicted: { fontSize: 12, fontWeight: "700", color: colors.danger, marginTop: 1 },
+  // FEATURE PARITY (web frontend's .live-timeline__info / --warn,
+  // LiveTrackingScreen.web.js's tlInfoBadge*): same neutral/amber
+  // "ⓘ history" / "⚠ providers differ" informational notes — real
+  // signals, but never a "verified" claim.
+  tlInfoBadge: {
+    borderWidth: 1, borderColor: "#cbd5e1", backgroundColor: "#f1f5f9",
+    borderRadius: 3, paddingHorizontal: 6, paddingVertical: 1, maxWidth: 180,
+  },
+  tlInfoBadgeText: { fontSize: 9, fontWeight: "600", color: "#64748b" },
+  tlInfoBadgeWarn: { borderColor: "#d97706", backgroundColor: "#fef3c7" },
+  tlInfoBadgeTextWarn: { color: "#92400e" },
+  // FEATURE PARITY (LiveTrackingScreen.web.js's liveCalloutSpeedWarn):
+  // closest real substitute for "route congestion" this app can
+  // honestly show — see backend's _compute_segment_speed_signal.
+  segmentSpeedWarn: { fontSize: 10.5, fontWeight: "600", color: "#92400e", marginTop: 2 },
   nohaltToggle: { fontSize: 13, fontWeight: "600", color: colors.primary || colors.text },
   nohaltStationRow: { paddingLeft: spacing.sm, marginTop: 4 },
   nohaltStationName: { fontSize: 12, color: colors.text },

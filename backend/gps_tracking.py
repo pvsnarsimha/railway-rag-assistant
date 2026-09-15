@@ -26,6 +26,7 @@ coordinate), "estimated_from_last_station" (our static fallback table), or
 """
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -685,7 +686,7 @@ def interpolate_live_position(timeline_json: list, segment_progress: Optional[fl
     return distance_km, lat, lng
 
 
-def compute_recent_delay_trend(stops, max_points: int = 5, recency_decay: float = 0.6):
+def compute_recent_delay_trend(stops, max_points: int = 5, recency_decay: float = 0.6, decay_per_km: float = 0.015):
     """
     FEATURE: real inter-station delay trend, e.g. "20833 crossed VSKP with
     5 min delay, SLO 10 min, RJY 10 min, BZA 15 min -> predict expected
@@ -697,46 +698,74 @@ def compute_recent_delay_trend(stops, max_points: int = 5, recency_decay: float 
       - trend_per_stop: the RECENCY-WEIGHTED minute-over-minute change in
         delay between consecutive reporting stations (how fast delay is
         currently growing/shrinking) - None if fewer than 2 real delay
-        points are available. The most recent halt-to-halt transition is
-        weighted `recency_decay^0 == 1.0`, the one before it
-        `recency_decay^1`, and so on, instead of a flat average of all
-        diffs. HONEST NOTE on why: a flat average lets an old, since-
-        reversed transition drag the trend figure - this is exactly what
-        made the prediction visibly lag reality at Rajahmundry and
-        Samalkot, where the delay jumped sharply on the LATEST transition
-        but the flat average was still half-anchored to the calmer
-        transitions before it. Weighting recent transitions more heavily
-        makes the trend track a genuine acceleration/deceleration within
-        a station or two, while still not swinging wildly off a single
-        noisy diff the way using only the last diff alone would.
+        points are available.
       - basis: a human-readable string of the actual stations/delays used,
         so the prediction can show its work instead of just a number
     Every input here is RailKit's own reported delay at a station the train
     has genuinely already passed - nothing is estimated in this function.
+
+    SECTION-AWARE WEIGHTING (real distance, not just station count): each
+    transition's weight used to be pure ordinal decay (`recency_decay^N`
+    stations back), which treats two transitions as equally "recent" even
+    when one covers 3 real km and the other covers 40 - the 40km one is a
+    much older piece of the journey in genuine travel-time terms, so it
+    should count for less. When every involved stop carries a real
+    distance_km (RailKit's own figure, never estimated), this instead
+    decays each transition by the REAL km already covered since it
+    happened: weight = recency_decay^(stations_back) * exp(-decay_per_km *
+    km_since_that_transition) - a transition that's both several stops AND
+    many real km behind now contributes very little, while a transition
+    that's a few stops back but geographically close (a cluster of closely
+    spaced halts) still counts meaningfully. Falls back to the original
+    pure ordinal decay when any involved stop is missing a real distance_km
+    (never fabricates a distance), so this is strictly an enhancement, not
+    a new failure mode.
     """
     passed_stoppages = [s for s in stops if s.kind != "intermediate" and s.status == "passed"]
     recent = passed_stoppages[-max_points:]
 
     recent_delays = []
+    recent_distances = []  # parallel to recent_delays; None where distance_km isn't real for that stop
     for s in recent:
         d = s.departure.delay_minutes if s.departure.delay_minutes is not None else s.arrival.delay_minutes
         if d is not None:
             recent_delays.append((s.name, d))
+            recent_distances.append(_distance_km_value(s.distance_km))
 
     trend_per_stop = None
+    section_aware = False
     if len(recent_delays) >= 2:
         diffs = [recent_delays[i][1] - recent_delays[i - 1][1] for i in range(1, len(recent_delays))]
         n = len(diffs)
-        weights = [recency_decay ** (n - 1 - i) for i in range(n)]  # most-recent diff -> weight 1.0
-        trend_per_stop = sum(w * d for w, d in zip(weights, diffs)) / sum(weights)
+        last_km = recent_distances[-1]
+        all_real_distances = last_km is not None and all(d is not None for d in recent_distances)
+        if all_real_distances:
+            # km already covered SINCE each transition (i.e. since the
+            # LATER of the two stops in that transition), using the real
+            # distance_km already on each stop - no estimation.
+            km_since = [max(0.0, last_km - recent_distances[i]) for i in range(1, len(recent_distances))]
+            weights = [
+                (recency_decay ** (n - 1 - i)) * math.exp(-decay_per_km * km_since[i])
+                for i in range(n)
+            ]
+            section_aware = True
+        else:
+            weights = [recency_decay ** (n - 1 - i) for i in range(n)]  # most-recent diff -> weight 1.0
+        total_w = sum(weights)
+        if total_w > 0:
+            trend_per_stop = sum(w * d for w, d in zip(weights, diffs)) / total_w
 
     basis = None
     if recent_delays:
         basis = "crossed " + ", ".join(f"{name} ({d:+d} min)" for name, d in recent_delays)
         if trend_per_stop is not None:
-            basis += f" — recency-weighted trend {trend_per_stop:+.1f} min/stop"
+            weighting_note = "distance+recency-weighted" if section_aware else "recency-weighted"
+            basis += f" — {weighting_note} trend {trend_per_stop:+.1f} min/stop"
 
-    return {"recent_delays": recent_delays, "trend_per_stop": trend_per_stop, "basis": basis}
+    return {
+        "recent_delays": recent_delays, "trend_per_stop": trend_per_stop, "basis": basis,
+        "section_aware": section_aware,
+    }
 
 
 def compute_avg_speed_kmph(stops, max_points: Optional[int] = None):
@@ -911,6 +940,34 @@ class RecencyWeightedValue:
 
     def sample_count(self) -> int:
         return len(self._samples)
+
+    def coefficient_of_variation(self, min_samples: int = 4) -> Optional[float]:
+        """
+        FEATURE: this train's OWN real measured speed variability this run,
+        as a fraction of its mean (stddev / mean) - e.g. 0.08 means this
+        train's actual recent speed readings have varied about +/-8% around
+        their average. Used by app.py's lock-confidence formula in place of
+        the fixed assumed 12% (_LOCK_SPEED_VARIABILITY_CV) whenever there
+        are enough real samples to trust: a train that's been running very
+        steadily should get a MORE confident (tighter) lock than one whose
+        speed has been jumping around, and the fixed 12% treated every
+        train identically regardless of how it's actually been running.
+
+        Returns None (never fabricating a number) when fewer than
+        `min_samples` real readings have been collected yet this
+        connection, or when the mean is non-positive - callers must fall
+        back to the documented fixed assumption in that case, same as
+        every other "not enough real data yet" case in this app.
+        """
+        if len(self._samples) < min_samples:
+            return None
+        values = [v for v, _t in self._samples]
+        mean = sum(values) / len(values)
+        if mean <= 0:
+            return None
+        variance = sum((v - mean) ** 2 for v in values) / len(values)
+        stddev = variance ** 0.5
+        return round(stddev / mean, 4)
 
 
 class DirectionAwareSmoother:

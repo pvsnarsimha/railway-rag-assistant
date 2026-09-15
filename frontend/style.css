@@ -941,6 +941,29 @@ html, body {
   vertical-align: middle;
 }
 
+/* "ⓘ history" / "⚠ providers differ" - soft informational notes on a
+   prediction (real signals, but not a "verified" claim the way the green
+   tag above is) - neutral gray by default, amber for the provider-
+   disagreement variant since that one is a genuine reason to trust the
+   number a bit less. */
+.live-timeline__info {
+  display: inline-block;
+  font-size: 9.5px;
+  font-weight: 600;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #64748b;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  vertical-align: middle;
+}
+.live-timeline__info--warn {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #d97706;
+}
+
 /* Collapsed "+N No-Halt stations" group row (RailYatri-style) */
 .live-timeline__dot--muted { background: #d8dee6 !important; box-shadow: none !important; }
 .live-timeline__nohalt-toggle {

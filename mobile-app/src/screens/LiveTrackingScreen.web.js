@@ -1060,6 +1060,7 @@ export default function LiveTrackingScreen({ navigation }) {
                       reportState={reportState}
                       onReportInaccuracy={reportInaccuracy}
                       nextStationName={payload?.next_station}
+                      segmentSpeedSignal={payload?.segment_speed_signal}
                     />
                   );
                 }
@@ -1099,6 +1100,7 @@ export default function LiveTrackingScreen({ navigation }) {
                       reportState={reportState}
                       onReportInaccuracy={reportInaccuracy}
                       nextStationName={payload?.next_station}
+                      segmentSpeedSignal={payload?.segment_speed_signal}
                     />
                   </React.Fragment>
                 );
@@ -1172,7 +1174,7 @@ function TrainMarkerIcon() {
 // "Report Inaccuracy" link wired to the real /api/feedback endpoint.
 function LiveStatusCallout({
   stop, statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm,
-  totalCoveredKm, statusResponseId, reportState, onReportInaccuracy, nextStationName,
+  totalCoveredKm, statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
 }) {
   return (
     <View style={styles.liveCallout}>
@@ -1198,6 +1200,18 @@ function LiveStatusCallout({
       )}
       {totalCoveredKm != null && (
         <Text style={styles.liveCalloutMuted}>({totalCoveredKm} km covered so far)</Text>
+      )}
+      {/* FEATURE PARITY (web frontend's liveTrackCaption addition): closest
+          real substitute for "route congestion" this app can honestly
+          show — see backend's _compute_segment_speed_signal. Only appears
+          when genuinely running well below this SPECIFIC segment's own
+          published typical speed (RailRadar's real speedToNextStationKmph),
+          never implying a multi-train congestion measurement no provider
+          this app uses actually has. */}
+      {segmentSpeedSignal && (
+        <Text style={styles.liveCalloutSpeedWarn}>
+          ⚠ {segmentSpeedSignal.live_kmph} km/h vs. usual ~{segmentSpeedSignal.typical_kmph} km/h here
+        </Text>
       )}
       <TouchableOpacity
         style={styles.liveCalloutReportLink}
@@ -1292,6 +1306,17 @@ function PredictedDelayLine({ stop }) {
   } else if (stop.predicted_delay_confidence === "Very High" && stop.prediction_methods_compared) {
     badge = { text: "✓ cross-verified", hint: `${stop.prediction_methods_compared} independent methods agreed within ${stop.prediction_agreement_minutes} min.` };
   }
+  // FEATURE PARITY (web frontend's historicalNote/disagreementNote in
+  // predictedDelayBadge()): this exact train's own real historical
+  // tendency at this exact station (backend's delay_accuracy_store.
+  // get_station_history_for_train), and real RailKit-vs-RailRadar
+  // disagreement on already-confirmed stations this run
+  // (_compute_provider_agreement) — both soft, informational notes, never
+  // claiming "verified" the way the green badge above does.
+  const historicalNote = stop.predicted_delay_historical_basis || null;
+  const disagreementNote = (stop.provider_disagreement_minutes != null && stop.provider_disagreement_minutes > 2)
+    ? `Providers differ ~${stop.provider_disagreement_minutes}m`
+    : null;
   return (
     <View style={styles.tlPredictedRow}>
       <Text style={styles.tlPredicted}>
@@ -1301,6 +1326,16 @@ function PredictedDelayLine({ stop }) {
       {badge && (
         <View style={styles.tlVerifiedBadge}>
           <Text style={styles.tlVerifiedBadgeText} numberOfLines={1}>{badge.text}</Text>
+        </View>
+      )}
+      {historicalNote && (
+        <View style={styles.tlInfoBadge}>
+          <Text style={styles.tlInfoBadgeText} numberOfLines={1}>ⓘ history</Text>
+        </View>
+      )}
+      {disagreementNote && (
+        <View style={[styles.tlInfoBadge, styles.tlInfoBadgeWarn]}>
+          <Text style={[styles.tlInfoBadgeText, styles.tlInfoBadgeTextWarn]} numberOfLines={1}>⚠ {disagreementNote}</Text>
         </View>
       )}
     </View>
@@ -1333,7 +1368,7 @@ function PredictedDelayLine({ stop }) {
 function NoHaltGroupRow({
   group, expanded, onToggle,
   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
-  statusResponseId, reportState, onReportInaccuracy, nextStationName,
+  statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
 }) {
   const stations = group.stations || [];
   const firstPassed = stations.length > 0 && stations[0].status === "passed";
@@ -1384,6 +1419,7 @@ function NoHaltGroupRow({
                   reportState={reportState}
                   onReportInaccuracy={onReportInaccuracy}
                   nextStationName={nextStationName}
+                  segmentSpeedSignal={segmentSpeedSignal}
                 />
               )}
               {!current && <PredictedDelayLine stop={s} />}
@@ -1447,7 +1483,7 @@ function stopEffectiveDelay(stop, staleUnconfirmed) {
 function TimelineStopRow({
   stop, isFirst, isLast, rowRef, journeyLikelyComplete,
   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
-  statusResponseId, reportState, onReportInaccuracy, nextStationName,
+  statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
 }) {
   // BUGFIX: once the journey looks likely complete (see
   // computeJourneyLikelyComplete near the top of this file), the train
@@ -1508,6 +1544,7 @@ function TimelineStopRow({
             reportState={reportState}
             onReportInaccuracy={onReportInaccuracy}
             nextStationName={nextStationName}
+            segmentSpeedSignal={segmentSpeedSignal}
           />
         )}
         {/* BUGFIX: suppressed when staleUnconfirmed — see TimeStack's
@@ -1620,6 +1657,17 @@ const styles = StyleSheet.create({
     borderRadius: 3, paddingHorizontal: 6, paddingVertical: 1, maxWidth: 180,
   },
   tlVerifiedBadgeText: { fontSize: 9.5, fontWeight: "700", color: colors.success },
+  // FEATURE PARITY: same neutral/amber "ⓘ history" / "⚠ providers differ"
+  // informational notes as the web frontend's .live-timeline__info /
+  // --warn (see predictedDelayBadge() there) - real signals, but not a
+  // "verified" claim the way the green badge above is.
+  tlInfoBadge: {
+    borderWidth: 1, borderColor: "#cbd5e1", backgroundColor: "#f1f5f9",
+    borderRadius: 3, paddingHorizontal: 6, paddingVertical: 1, maxWidth: 180,
+  },
+  tlInfoBadgeText: { fontSize: 9, fontWeight: "600", color: "#64748b" },
+  tlInfoBadgeWarn: { borderColor: "#d97706", backgroundColor: "#fef3c7" },
+  tlInfoBadgeTextWarn: { color: "#92400e" },
   badgeRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: spacing.sm },
   badgeText: { fontSize: 12, fontWeight: "600" },
   webNotice: { flexDirection: "row", gap: 6, marginTop: spacing.md, alignItems: "flex-start" },
@@ -1691,6 +1739,7 @@ const styles = StyleSheet.create({
   liveCalloutMain: { fontSize: 11.5, color: colors.danger, fontWeight: "600", marginBottom: 2 },
   liveCalloutBold: { fontSize: 12, fontWeight: "700", color: colors.text },
   liveCalloutMuted: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
+  liveCalloutSpeedWarn: { fontSize: 10.5, fontWeight: "600", color: "#92400e", marginTop: 2 },
   liveCalloutReportLink: { alignSelf: "flex-end", marginTop: 4 },
   liveCalloutReportText: { fontSize: 11, color: "#4a90d9", textDecorationLine: "underline" },
 

@@ -190,6 +190,14 @@ def health():
         # last time this service started (see that file's own docstring
         # for why it resets on redeploy/restart on the free plan).
         "delay_accuracy_db": delay_accuracy_store.db_diagnostics(),
+        # FEATURE: honest visibility into which delay-prediction model is
+        # CURRENTLY active — "synthetic" (the documented heuristic dataset,
+        # always disclosed) or "real" (this app's own logged history, once
+        # enough real rows exist — see delay_prediction.py's
+        # train_on_real_history_if_available()). real_row_count /
+        # min_required_rows let you watch this approach the real-data
+        # threshold over time, well before it actually flips.
+        "delay_prediction_training": delay_prediction.get_training_status(),
     }
 
 
@@ -878,11 +886,21 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
 # fast train "locks in" a bit further out in km than a slow one, since
 # what actually matters is the remaining TIME, not the raw distance.
 LOCK_CONFIDENCE_THRESHOLD_PCT = 99.5
-_LOCK_SPEED_VARIABILITY_CV = 0.12   # assumed +/-12% real-world speed variability over the final approach
+_LOCK_SPEED_VARIABILITY_CV = 0.12   # assumed +/-12% real-world speed variability over the final approach —
+                                     # the fallback used only when this train's own real recent speed
+                                     # samples aren't enough yet to measure it directly (see
+                                     # gps_tracking.RecencyWeightedValue.coefficient_of_variation, wired in
+                                     # below as speed_cv - a genuinely steadier-running train now locks in
+                                     # MORE confidently than this fixed assumption, and a jumpier one less,
+                                     # instead of every train being treated as identically variable).
+_LOCK_SPEED_CV_MIN = 0.03           # sane floor on a MEASURED cv — a tiny real sample happening to look
+                                     # almost perfectly steady must not imply near-zero uncertainty.
+_LOCK_SPEED_CV_MAX = 0.50           # sane ceiling — a wildly noisy few samples must not blow the
+                                     # confidence formula out to a useless near-0% for every station.
 _LOCK_TOLERANCE_MINUTES = 1.0       # the arrival-time tolerance the confidence score is computed against
 
 
-def _lock_confidence_from_speed_distance(gap_km, speed_kmph):
+def _lock_confidence_from_speed_distance(gap_km, speed_kmph, speed_cv=None, dampening=None):
     """
     Numeric 0-100 confidence that a station's CURRENT predicted delay will
     still hold once the train actually gets there, derived only from real
@@ -894,20 +912,144 @@ def _lock_confidence_from_speed_distance(gap_km, speed_kmph):
     distance, or no positive speed reading) — callers must treat None as
     "not eligible to lock", never as 0% (0% would wrongly claim we know
     it's UNTRUSTWORTHY, when really we just don't have the inputs yet).
+
+    `speed_cv` (optional): this SPECIFIC train's own REAL measured speed
+    coefficient-of-variation this run (see gps_tracking.RecencyWeightedValue.
+    coefficient_of_variation), used in place of the fixed
+    _LOCK_SPEED_VARIABILITY_CV assumption whenever supplied — clamped to
+    [_LOCK_SPEED_CV_MIN, _LOCK_SPEED_CV_MAX] so a very small or very noisy
+    real sample can't push the formula to a degenerate extreme. None (the
+    default) preserves the exact previous fixed-assumption behavior.
+
+    `dampening` (optional): a real [0, 1] multiplier applied to the final
+    confidence percentage — used by the RailKit-vs-RailRadar disagreement
+    check (see _predict_delay_per_reporting_station) to honestly LOWER
+    confidence when the two independent live providers disagree on this
+    run's own recent real delay figures, since that disagreement is a
+    genuine reason to trust further extrapolation less. Never raises
+    confidence (values are clamped to <= 1.0) — disagreement is only ever
+    a reason to be LESS sure, never more.
     """
     if gap_km is None or speed_kmph is None or speed_kmph <= 0 or gap_km < 0:
         return None
     travel_time_min = gap_km / speed_kmph * 60.0
     if travel_time_min <= 0:
         return 100.0  # already effectively there
-    uncertainty_min = travel_time_min * _LOCK_SPEED_VARIABILITY_CV
+    cv = _LOCK_SPEED_VARIABILITY_CV
+    if speed_cv is not None and speed_cv > 0:
+        cv = max(_LOCK_SPEED_CV_MIN, min(_LOCK_SPEED_CV_MAX, speed_cv))
+    uncertainty_min = travel_time_min * cv
     if uncertainty_min <= 0:
         return 100.0
     z = _LOCK_TOLERANCE_MINUTES / uncertainty_min
     # erf(z / sqrt(2)) is P(|X| <= z*sigma) for X ~ Normal(0, sigma) — the
     # two-sided "within tolerance" probability, expressed as a percentage.
     confidence = 100.0 * math.erf(z / math.sqrt(2.0))
-    return round(min(100.0, max(0.0, confidence)), 2)
+    confidence = min(100.0, max(0.0, confidence))
+    if dampening is not None:
+        confidence *= max(0.0, min(1.0, dampening))
+    return round(confidence, 2)
+
+
+def _compute_provider_agreement(timeline_stops, rr_stops, max_stations: int = 3):
+    """
+    FEATURE: real disagreement between RailKit and RailRadar on delay at
+    the reporting stations BOTH have independently confirmed "passed" with
+    a real recorded delay figure — a genuine cross-check between two
+    separately-polling live providers, not a derived/estimated number.
+    Looks at the most recent `max_stations` stations RailKit itself has
+    passed; for each one that RailRadar's OWN feed also marks "passed"
+    with a real delay for the SAME station code, takes the absolute
+    difference. Returns the average of those real differences (rounded)
+    plus how many stations were actually compared — never a guess when
+    there's nothing to compare (e.g. RailRadar has no data for this train,
+    or hasn't independently confirmed any of the same stations yet).
+
+    Used by _predict_delay_per_reporting_station's lock-confidence pass to
+    honestly DAMPEN (never raise) confidence when the two live providers
+    meaningfully disagree on what has already, genuinely happened on this
+    run — a real reason to trust further extrapolation less.
+
+    Returns (avg_disagreement_minutes: float|None, stations_compared: int).
+    """
+    rk_passed = [s for s in timeline_stops if s.kind != "intermediate" and s.status == "passed"]
+    if not rk_passed or not rr_stops:
+        return None, 0
+    rr_by_code = {}
+    for rr in rr_stops:
+        code = (getattr(rr, "code", None) or "").strip().upper()
+        if not code or getattr(rr, "status", None) != "passed":
+            continue
+        d = rr.departure.delay_minutes if rr.departure.delay_minutes is not None else rr.arrival.delay_minutes
+        if d is not None:
+            rr_by_code[code] = d
+
+    diffs = []
+    for s in rk_passed[-max_stations:]:
+        code = (s.code or "").strip().upper()
+        rk_delay = s.departure.delay_minutes if s.departure.delay_minutes is not None else s.arrival.delay_minutes
+        if not code or rk_delay is None or code not in rr_by_code:
+            continue
+        diffs.append(abs(rk_delay - rr_by_code[code]))
+
+    if not diffs:
+        return None, 0
+    return round(sum(diffs) / len(diffs), 1), len(diffs)
+
+
+def _compute_segment_speed_signal(train_number, current_station_code, live_speed_kmph, distance_to_next_km):
+    """
+    FEATURE: closest REAL substitute for "route congestion", after
+    confirming (against RailRadar's own published API schema —
+    https://railradar.in/docs/live-train-status) that no route-congestion,
+    section-occupancy, or other-trains-in-this-block field exists anywhere
+    in their response. Rather than fabricate one, this compares the
+    train's own real current speed against RailRadar's own real
+    `speedToNextStationKmph` for the segment it's actually on right now
+    (railradar_fallback.get_major_stop_distances) — a genuine, if narrower,
+    "running slower than this specific segment's own typical speed" signal,
+    honestly labeled as exactly that and nothing more.
+
+    Deliberately excludes the final few km before the next halt (guarded
+    by `distance_to_next_km`) — real, expected braking on approach would
+    otherwise look identical to a genuine mid-segment slowdown, and this
+    must not cry "slower than typical" for perfectly normal station
+    approach behavior.
+
+    Returns None (never a guess) when RailRadar has no published typical
+    speed for this exact segment, or when there's no real live speed to
+    compare it against yet, or when the train is within the braking-zone
+    guard. Otherwise a dict: {"typical_kmph", "live_kmph", "shortfall_pct",
+    "note"} — shortfall_pct is only meaningful (and only returned as a
+    flagged signal) when live speed is genuinely well below typical
+    (>=25% under); smaller gaps are normal real-world variation, not
+    flagged.
+    """
+    if not current_station_code or live_speed_kmph is None or live_speed_kmph <= 0:
+        return None
+    if distance_to_next_km is not None and distance_to_next_km < 5.0:
+        return None  # station-approach braking zone — not a real slowdown signal
+    try:
+        halts = railradar_fallback.get_major_stop_distances(train_number)
+    except Exception:
+        return None
+    code_norm = str(current_station_code).strip().upper()
+    entry = next((h for h in halts if (h.get("code") or "").strip().upper() == code_norm), None)
+    typical = entry.get("speed_to_next_station_kmph") if entry else None
+    if not typical or typical <= 0:
+        return None
+    shortfall_pct = round(max(0.0, (typical - live_speed_kmph) / typical * 100), 1)
+    if shortfall_pct < 25.0:
+        return None
+    return {
+        "typical_kmph": typical, "live_kmph": round(live_speed_kmph, 1), "shortfall_pct": shortfall_pct,
+        "note": (
+            f"Running ~{shortfall_pct:.0f}% slower than this segment's own typical/published speed "
+            f"({live_speed_kmph:.0f} vs {typical:.0f} km/h) — a real local speed signal from RailRadar's "
+            "own data, NOT a measure of how many other trains are in this section (no such field exists "
+            "in RailRadar's published API)."
+        ),
+    }
 
 
 def _predict_delay_per_reporting_station(
@@ -915,6 +1057,8 @@ def _predict_delay_per_reporting_station(
     trend_per_stop, trend_basis, avg_speed_kmph, avg_speed_basis,
     date_ddmmyyyy, travel_class, eta_speed_kmph=None, train_info_data=None,
     weather_component_minutes: float = 0.0, rr_stops: Optional[list] = None,
+    speed_cv: Optional[float] = None, provider_disagreement_minutes: Optional[float] = None,
+    train_number: Optional[str] = None,
 ) -> None:
     """
     FEATURE: per-station predicted delay for every upcoming REPORTING
@@ -959,6 +1103,29 @@ def _predict_delay_per_reporting_station(
     Both components are anchored to that station's own real distance from
     the train's current position, so they naturally differ station to
     station — including between two intermediate points a few km apart.
+
+    Three further real signals, all optional and all additive refinements
+    (each one degrades to today's exact prior behavior when not supplied):
+      - `speed_cv`: this train's OWN real measured speed variability this
+        run (see gps_tracking.RecencyWeightedValue.coefficient_of_variation),
+        used by the lock-confidence pass below in place of the fixed
+        assumed +/-12% whenever there's enough real data — a steadily
+        running train locks in more confidently, a jumpy one less.
+      - `provider_disagreement_minutes`: how much RailKit's and RailRadar's
+        own real recorded delays disagreed at the last few reporting
+        stations BOTH independently confirmed (see _compute_provider_
+        agreement in the /ws/track loop) — when the two live providers
+        meaningfully disagree on what already happened, that's a real
+        reason to trust further extrapolation less, so it dampens (never
+        raises) the lock-confidence score.
+      - `train_number`: when supplied, each upcoming station's prediction
+        is nudged by this EXACT train's own real historical delay pattern
+        at that EXACT station (delay_accuracy_store.get_station_history_
+        for_train) — e.g. a station right after a long single-line section
+        that this train specifically tends to lose a few extra minutes at,
+        regardless of how it was running before it — whenever enough real
+        past-run data exists for that station; otherwise this is silently
+        a no-op (never a guess standing in for missing history).
     """
     current_delay_minutes = current_delay_minutes if current_delay_minutes is not None else 0
     trend = trend_per_stop if trend_per_stop is not None else 0.0
@@ -1080,9 +1247,16 @@ def _predict_delay_per_reporting_station(
             )
             ml_minutes = ml_pred.predicted_delay_minutes
             confidence = ml_pred.confidence
+            # PERSISTED so _sync_station_delay_history can durably log the
+            # exact real feature vector this prediction was made from (see
+            # delay_accuracy_store.py's _FEATURE_COLUMNS) - what eventually
+            # makes train_on_real_history_if_available() possible at all.
+            # None on the exception path below, same as ml_minutes.
+            stop["_ml_feature_values"] = ml_pred.feature_values
         except Exception:
             ml_minutes = None
             confidence = "Low"
+            stop["_ml_feature_values"] = None
 
         trend_component = sum(trend * (0.7 ** k) for k in range(reporting_stops_ahead))
         speed_component = 0.0
@@ -1096,11 +1270,54 @@ def _predict_delay_per_reporting_station(
         # next few stations, progressively less so many stops out.
         weather_component = weather_component_minutes * (0.85 ** (stops_ahead - 1)) if weather_component_minutes else 0.0
 
-        heuristic_minutes = max(0.0, min(400.0, current_delay_minutes + trend_component + speed_component + weather_component))
+        # FEATURE: this EXACT train's own real historical tendency at this
+        # EXACT station (delay_accuracy_store.get_station_history_for_train)
+        # - e.g. a station right after a long single-line/ghat section that
+        # this specific train tends to lose a few extra minutes at, beyond
+        # whatever the generic trend/speed extrapolation already accounts
+        # for. Computed as the real average (actual_delay_minutes -
+        # feature_current_delay_minutes) across this station's own past
+        # logged runs — "how much MORE delay this station tends to add
+        # beyond whatever the train was already running at prediction
+        # time" — damped by a real confidence factor so 2-3 past runs
+        # nudge gently while a larger real sample can speak more strongly.
+        # Silently 0.0 (a true no-op, not a guess) whenever train_number
+        # isn't supplied or this station has no usable real history yet -
+        # which, for most trains right now, is simply the honest, expected
+        # state until this app's own logging accumulates more real runs.
+        historical_component = 0.0
+        historical_basis = None
+        station_code_for_history = (stop.get("code") or "").strip().upper()
+        if train_number and station_code_for_history:
+            try:
+                hist_rows = delay_accuracy_store.get_station_history_for_train(
+                    train_number, station_code_for_history, exclude_date=date_ddmmyyyy,
+                )
+            except Exception:
+                hist_rows = []
+            shifts = [
+                r["actual_delay_minutes"] - r["feature_current_delay_minutes"]
+                for r in hist_rows
+                if r.get("actual_delay_minutes") is not None and r.get("feature_current_delay_minutes") is not None
+            ]
+            if shifts:
+                avg_shift = sum(shifts) / len(shifts)
+                # Confidence damping by real sample size: 1 real past run is
+                # barely more than anecdote, 5+ is a real pattern - capped
+                # at 0.8 (never full weight) since this is still a shift on
+                # top of a live, real-time-grounded number, not a
+                # replacement for it.
+                sample_weight = min(0.8, 0.2 * len(shifts))
+                historical_component = avg_shift * sample_weight
+                historical_basis = f"{station_code_for_history} historically runs {avg_shift:+.1f} min vs. this train's delay-at-prediction-time, over {len(shifts)} real past run(s)"
+
+        heuristic_minutes = max(0.0, min(400.0, current_delay_minutes + trend_component + speed_component + weather_component + historical_component))
         blended = round(0.65 * heuristic_minutes + 0.35 * (ml_minutes if ml_minutes is not None else heuristic_minutes))
         blended = max(0, blended)
         stop["predicted_delay_minutes"] = blended
         stop["predicted_delay_confidence"] = confidence
+        if historical_basis:
+            stop["predicted_delay_historical_basis"] = historical_basis
         # Confidence band, widening further out for stations we have less
         # certainty about (each stop ahead compounds the trend/speed
         # extrapolation) - same tiered spread as the single-figure
@@ -1304,14 +1521,29 @@ def _predict_delay_per_reporting_station(
     # this score clears LOCK_CONFIDENCE_THRESHOLD_PCT; being merely
     # "grounded" is no longer enough by itself.
     lock_speed_kmph = eta_speed_kmph or avg_speed_kmph
+    # Real disagreement between RailKit and RailRadar on this run's own
+    # recently-confirmed delays -> a confidence dampener (never a booster).
+    # See this function's own docstring for provider_disagreement_minutes;
+    # a small, everyday disagreement (<=2 min — real providers round/poll
+    # at different moments) is treated as noise, not distrust. Beyond that,
+    # each extra real minute of disagreement shaves 2% off the multiplier,
+    # floored at 0.5 so this alone can never fully zero out a station that
+    # is otherwise physically close enough to lock.
+    lock_dampening = None
+    if provider_disagreement_minutes is not None and provider_disagreement_minutes > 2:
+        lock_dampening = max(0.5, 1.0 - (provider_disagreement_minutes - 2) * 0.02)
     for s in timeline_json:
         if s.get("status") != "upcoming" or s.get("kind") == "intermediate":
             continue
         if not s.get("predicted_delay_is_grounded") or s.get("predicted_delay_minutes") is None:
             s["predicted_delay_lock_eligible"] = False
             continue
-        confidence_pct = _lock_confidence_from_speed_distance(s.get("distance_ahead_km"), lock_speed_kmph)
+        confidence_pct = _lock_confidence_from_speed_distance(
+            s.get("distance_ahead_km"), lock_speed_kmph, speed_cv=speed_cv, dampening=lock_dampening,
+        )
         s["predicted_delay_lock_confidence_pct"] = confidence_pct
+        if provider_disagreement_minutes is not None:
+            s["provider_disagreement_minutes"] = round(provider_disagreement_minutes, 1)
         s["predicted_delay_lock_eligible"] = bool(
             confidence_pct is not None and confidence_pct >= LOCK_CONFIDENCE_THRESHOLD_PCT
         )
@@ -1659,6 +1891,11 @@ def _snapshot_prediction_before_arrival(timeline_json: list, final_predictions: 
                 # instant the station was reached.
                 "predicted_delay_grounded_via": stop.get("predicted_delay_grounded_via"),
                 "from_history": False,
+                # Carried through the same way, purely so the durable write
+                # below can persist the exact real ML feature vector this
+                # prediction was made from - see delay_accuracy_store.py's
+                # _FEATURE_COLUMNS and train_on_real_history_if_available().
+                "ml_feature_values": stop.get("_ml_feature_values"),
             }
         snapshot = final_predictions.get(code)
         if snapshot is not None:
@@ -1668,6 +1905,7 @@ def _snapshot_prediction_before_arrival(timeline_json: list, final_predictions: 
             stop["final_predicted_delay_high_minutes"] = snapshot["predicted_delay_high_minutes"]
             stop["final_predicted_delay_was_locked"] = snapshot["predicted_delay_locked"]
             stop["final_predicted_delay_grounded_via"] = snapshot.get("predicted_delay_grounded_via")
+            stop["final_ml_feature_values"] = snapshot.get("ml_feature_values")
             # Carried from _sync_station_delay_history's cache (see there)
             # so this stays correct on every poll after the first, not just
             # the one poll where the historical backfill actually happened.
@@ -1751,6 +1989,20 @@ def _sync_station_delay_history(
                 stop["final_predicted_delay_was_locked"] = bool(stored.get("predicted_delay_locked"))
                 stop["final_predicted_delay_grounded_via"] = stored.get("predicted_delay_grounded_via")
                 stop["final_predicted_delay_from_history"] = True
+                # Reconstruct the real feature-vector dict (delay_prediction.
+                # FEATURE_NAMES -> value) from the stored feature_* columns,
+                # when the row that got written actually carried one (see
+                # delay_accuracy_store.py's _FEATURE_COLUMNS) - so a station
+                # backfilled from an EARLIER connection/session still has a
+                # real feature vector available if this same station later
+                # gets its actual confirmed within THIS connection too.
+                # None (never a guess) when the stored row predates
+                # feature-vector logging.
+                stored_feature_values = None
+                _fv = {name: stored.get(f"feature_{name}") for name in delay_prediction.FEATURE_NAMES}
+                if all(v is not None for v in _fv.values()):
+                    stored_feature_values = _fv
+                stop["final_ml_feature_values"] = stored_feature_values
                 # PERF: cache the fill into this connection's own in-memory
                 # map too, same shape _snapshot_prediction_before_arrival
                 # writes - without this, a station backfilled from history
@@ -1765,6 +2017,7 @@ def _sync_station_delay_history(
                     "predicted_delay_high_minutes": stored.get("predicted_delay_minutes"),
                     "predicted_delay_locked": bool(stored.get("predicted_delay_locked")),
                     "predicted_delay_grounded_via": stored.get("predicted_delay_grounded_via"),
+                    "ml_feature_values": stored_feature_values,
                     "from_history": True,
                 }
 
@@ -1795,6 +2048,7 @@ def _sync_station_delay_history(
                         predicted_delay_locked=bool(snapshot.get("predicted_delay_locked")),
                         predicted_delay_grounded_via=snapshot.get("predicted_delay_grounded_via"),
                         sequence_index=idx,
+                        feature_values=snapshot.get("ml_feature_values"),
                     )
                 except Exception:
                     pass
@@ -1841,6 +2095,7 @@ def _sync_station_delay_history(
                 scheduled_time=arrival.get("expected") or arrival.get("scheduled"),
                 actual_time=arrival.get("actual"),
                 sequence_index=idx,
+                feature_values=stop.get("final_ml_feature_values"),
             )
         except Exception:
             pass
@@ -5481,6 +5736,19 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 recency_weighted_speed_kmph = speed_tracker.value()
                 prev_position_distance_km = current_position_distance_km
                 prev_position_timestamp = now_ts
+                # FEATURE: this train's OWN real measured speed variability
+                # this run so far (see gps_tracking.RecencyWeightedValue.
+                # coefficient_of_variation) — None until enough real
+                # per-poll speed samples exist, in which case the lock-
+                # confidence formula below falls back to its documented
+                # fixed assumption exactly as before this feature existed.
+                measured_speed_cv = speed_tracker.coefficient_of_variation()
+                # FEATURE: real RailKit-vs-RailRadar disagreement on the
+                # last few reporting stations BOTH have independently
+                # confirmed — see _compute_provider_agreement.
+                provider_disagreement_minutes, _provider_stations_compared = _compute_provider_agreement(
+                    timeline_stops, rr_stops,
+                )
 
                 # FALLBACK (tier 3): neither RailRadar's live GPS speed nor a
                 # ping-to-ping distance delta has come through yet this
@@ -5519,6 +5787,8 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     avg_speed_kmph, avg_speed_basis, date_ddmmyyyy, travel_class,
                     eta_speed_kmph=eta_speed_kmph, train_info_data=train_info_data,
                     weather_component_minutes=weather_component_minutes, rr_stops=rr_stops,
+                    speed_cv=measured_speed_cv, provider_disagreement_minutes=provider_disagreement_minutes,
+                    train_number=train_number,
                 )
                 _mirror_origin_destination_timing(timeline_json)
                 _lock_grounded_station_predictions(timeline_json, locked_station_predictions)
@@ -5728,6 +5998,35 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "recent_delay_trend_basis": delay_trend.get("basis"),
                     "avg_speed_kmph": avg_speed_kmph,
                     "avg_speed_basis": avg_speed_basis,
+                    # FEATURE: real, distance-aware "how recent" weighting on
+                    # the crossed-station trend (see gps_tracking.compute_
+                    # recent_delay_trend) — True when every involved stop had
+                    # a real distance_km to weight by, False when it fell
+                    # back to plain ordinal (station-count) decay.
+                    "recent_delay_trend_section_aware": delay_trend.get("section_aware"),
+                    # FEATURE: this train's OWN real measured speed
+                    # variability this run (see gps_tracking.RecencyWeightedValue.
+                    # coefficient_of_variation) — None until enough real
+                    # samples exist. Feeds the lock-confidence formula
+                    # (_lock_confidence_from_speed_distance); surfaced here so
+                    # the UI can show WHY a steady-running train is locking in
+                    # more confidently than the fixed assumption would.
+                    "speed_variability_cv": measured_speed_cv,
+                    # FEATURE: real disagreement between RailKit and RailRadar
+                    # on the last few reporting stations both independently
+                    # confirmed (see _compute_provider_agreement) — dampens
+                    # lock-confidence when the two live providers meaningfully
+                    # disagree on what already happened.
+                    "provider_disagreement_minutes": provider_disagreement_minutes,
+                    "provider_stations_compared": _provider_stations_compared,
+                    # FEATURE: closest real substitute for "route congestion"
+                    # (confirmed no such field exists in RailRadar's published
+                    # API — see _compute_segment_speed_signal) — a genuine
+                    # local speed-vs-this-segment's-own-typical-speed signal,
+                    # None when nothing to flag.
+                    "segment_speed_signal": _compute_segment_speed_signal(
+                        train_number, current_station_code_display, display_speed_kmph, distance_to_next_km,
+                    ),
                     # FEATURE: instant speed per GPS ping - RailRadar's own
                     # live GPS speedKmh reading when available (updates
                     # every poll, independent of which station is

@@ -1210,8 +1210,25 @@ if (!alreadySeenTour) {
       // misleading "0 independent methods agreed" tooltip.
       confidenceBadge = `<span class="live-timeline__verified" title="${s.prediction_methods_compared} independent methods agreed within ${s.prediction_agreement_minutes} min">✓ cross-verified</span>`;
     }
+    // FEATURE: this exact train's own real historical tendency at this
+    // exact station (backend's delay_accuracy_store.get_station_history_
+    // for_train, folded in as historical_component) — shown as a small,
+    // clearly-labeled info note, never claiming "verified" since it's a
+    // real but soft nudge on top of the live-grounded number, not a
+    // confirmation of it.
+    const historicalNote = s.predicted_delay_historical_basis
+      ? `<span class="live-timeline__info" title="${escapeHtml(s.predicted_delay_historical_basis)}">ⓘ history</span>`
+      : "";
+    // FEATURE: RailKit vs RailRadar disagreement on this run's own already-
+    // confirmed stations (backend's _compute_provider_agreement) — only
+    // surfaced past the "everyday polling noise" floor the backend itself
+    // applies (>2 min), so this only appears when it genuinely means
+    // something.
+    const disagreementNote = (s.provider_disagreement_minutes != null && s.provider_disagreement_minutes > 2)
+      ? `<span class="live-timeline__info live-timeline__info--warn" title="RailKit and RailRadar's own recently-confirmed delays differ by ~${s.provider_disagreement_minutes} min right now — confidence below is reduced accordingly">⚠ providers differ ~${s.provider_disagreement_minutes}m</span>`
+      : "";
     return `<span class="live-timeline__predicted ${cls}" title="Estimated, ${escapeHtml(s.predicted_delay_confidence || "?")} confidence">
-      ~${formatDelayDuration(s.predicted_delay_minutes)}${bandText} late (predicted)${etaText} ${confidenceBadge}
+      ~${formatDelayDuration(s.predicted_delay_minutes)}${bandText} late (predicted)${etaText} ${confidenceBadge} ${historicalNote} ${disagreementNote}
     </span>`;
   }
 
@@ -1798,9 +1815,21 @@ if (!alreadySeenTour) {
           const positionCaption = usedRouteFallback
             ? "No live fix yet — showing last confirmed position on the route"
             : (captions[data.position_source] || "Live position from data provider");
-          liveTrackCaption.textContent = data.direction && data.direction !== "UNKNOWN"
+          let captionText = data.direction && data.direction !== "UNKNOWN"
             ? `${positionCaption} · Running ${data.direction}`
             : positionCaption;
+          // FEATURE: closest real substitute for "route congestion" this
+          // app can honestly show — see backend's _compute_segment_speed_
+          // signal. Only appears when the train is genuinely running well
+          // below this SPECIFIC segment's own published typical speed
+          // (RailRadar's real speedToNextStationKmph), never implying a
+          // multi-train congestion measurement that doesn't exist in any
+          // provider this app uses.
+          if (data.segment_speed_signal) {
+            captionText += ` · ⚠ ${data.segment_speed_signal.live_kmph} km/h vs. usual ~${data.segment_speed_signal.typical_kmph} km/h here`;
+          }
+          liveTrackCaption.textContent = captionText;
+          liveTrackCaption.title = data.segment_speed_signal ? data.segment_speed_signal.note : "";
         } else if (liveTrackMap) {
           liveTrackCaption.textContent = "No position available yet for this train — route shown above once station coordinates resolve.";
         }
