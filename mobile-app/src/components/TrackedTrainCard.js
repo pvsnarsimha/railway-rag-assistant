@@ -1467,6 +1467,13 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
                 // already-passed halts show their REAL recorded delay
                 // above via `delayed`/payload.delay_minutes instead.
                 const showPredicted = stop.status === "upcoming" && stop.predicted_delay_minutes != null;
+                // FEATURE PARITY (web frontend's historicalLabel,
+                // LiveTrackingScreen.web.js's historicalLabel):
+                // distinguishes this app's OWN logged history from
+                // RailRadar's past-date route history (used only when
+                // this app hasn't personally logged this station for
+                // this train yet).
+                const historicalLabel = stop.predicted_delay_historical_source === "railradar_route_history" ? "ⓘ route history" : "ⓘ history";
                 return (
                   <View key={`${stop.code}_${idx}`} style={[styles.timelineRow, isCurrent && styles.timelineRowCurrent]}>
                     <View style={styles.timelineLineWrap}>
@@ -1587,7 +1594,7 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
                               stations this run \u2014 informational only, never a "verified" claim. */}
                           {stop.predicted_delay_historical_basis && (
                             <View style={styles.tlInfoBadge}>
-                              <Text style={styles.tlInfoBadgeText} numberOfLines={1}>\u24d8 history</Text>
+                              <Text style={styles.tlInfoBadgeText} numberOfLines={1}>{historicalLabel}</Text>
                             </View>
                           )}
                           {stop.provider_disagreement_minutes != null && stop.provider_disagreement_minutes > 2 && (

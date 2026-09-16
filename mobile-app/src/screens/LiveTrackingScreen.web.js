@@ -1314,6 +1314,12 @@ function PredictedDelayLine({ stop }) {
   // (_compute_provider_agreement) — both soft, informational notes, never
   // claiming "verified" the way the green badge above does.
   const historicalNote = stop.predicted_delay_historical_basis || null;
+  // FEATURE PARITY (web frontend's historicalLabel): distinguishes this
+  // app's OWN logged history from RailRadar's past-date route history
+  // (used only when this app hasn't personally logged this station for
+  // this train yet) — this app has no hover tooltip, so the label itself
+  // is the only place this distinction is visible here.
+  const historicalLabel = stop.predicted_delay_historical_source === "railradar_route_history" ? "ⓘ route history" : "ⓘ history";
   const disagreementNote = (stop.provider_disagreement_minutes != null && stop.provider_disagreement_minutes > 2)
     ? `Providers differ ~${stop.provider_disagreement_minutes}m`
     : null;
@@ -1330,7 +1336,7 @@ function PredictedDelayLine({ stop }) {
       )}
       {historicalNote && (
         <View style={styles.tlInfoBadge}>
-          <Text style={styles.tlInfoBadgeText} numberOfLines={1}>ⓘ history</Text>
+          <Text style={styles.tlInfoBadgeText} numberOfLines={1}>{historicalLabel}</Text>
         </View>
       )}
       {disagreementNote && (

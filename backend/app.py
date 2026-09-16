@@ -1287,6 +1287,12 @@ def _predict_delay_per_reporting_station(
         # state until this app's own logging accumulates more real runs.
         historical_component = 0.0
         historical_basis = None
+        # "own_log" (this app's own delay_accuracy_store) or
+        # "railradar_route_history" (RailRadar's past-date route data,
+        # used only when the own log has nothing yet) - a clean field for
+        # web/mobile to show WHICH real source backs this nudge, instead
+        # of parsing the human-readable historical_basis string.
+        historical_source = None
         station_code_for_history = (stop.get("code") or "").strip().upper()
         if train_number and station_code_for_history:
             try:
@@ -1310,6 +1316,55 @@ def _predict_delay_per_reporting_station(
                 sample_weight = min(0.8, 0.2 * len(shifts))
                 historical_component = avg_shift * sample_weight
                 historical_basis = f"{station_code_for_history} historically runs {avg_shift:+.1f} min vs. this train's delay-at-prediction-time, over {len(shifts)} real past run(s)"
+                historical_source = "own_log"
+            else:
+                # own log has ZERO real samples for this station yet (the
+                # `if shifts:` above already caught anything >=1) - fall
+                # back to RailRadar's own route history instead.
+                # FEATURE: extends the same real-historical-shift idea to
+                # EVERY reporting station, not just the ones this app has
+                # personally logged live before - this app's own log
+                # (delay_accuracy_store) only has data for a station once
+                # THIS app has watched THIS train pass it at least once, so
+                # for a brand-new deployment (or a station on a route this
+                # app hasn't tracked yet) `shifts` above is almost always
+                # empty. RailRadar's own `date=<past date>` query on its
+                # live-status endpoint (already used by
+                # fetch_railradar_timeline) genuinely returns a full
+                # per-station route for a COMPLETED past run, so
+                # railradar_fallback.get_route_delay_history() walks the
+                # last two real weeks of that and keeps every station's
+                # real recorded delay, not just the final one - giving
+                # this station a real historical anchor even on day one of
+                # this app's own deployment.
+                #
+                # HONESTY: only used as a fallback when this app's OWN log
+                # has ZERO real samples for this station - this app's own
+                # observations of THIS EXACT train are always preferred
+                # over RailRadar's average when there's even one, since
+                # RailRadar's own past-run average reflects the train's
+                # general tendency at that station, not specifically
+                # today's run. Silently empty (0.0, no
+                # basis) if RailRadar has no real archived data that far
+                # back for this train - never guessed. See
+                # get_route_delay_history_diagnostics() for real per-day
+                # verification once this is deployed somewhere with real
+                # internet access (the sandbox that built this could not
+                # reach api.railradar.in to test it directly).
+                try:
+                    rr_history = railradar_fallback.get_route_delay_history(train_number)
+                except Exception:
+                    rr_history = {}
+                rr_entry = rr_history.get(station_code_for_history)
+                if rr_entry and rr_entry.get("samples"):
+                    rr_avg_shift = rr_entry["avg_delay_minutes"] - current_delay_minutes
+                    rr_sample_weight = min(0.6, 0.15 * rr_entry["samples"])
+                    historical_component = rr_avg_shift * rr_sample_weight
+                    historical_basis = (
+                        f"{station_code_for_history} averaged {rr_entry['avg_delay_minutes']:+.1f} min delay "
+                        f"over {rr_entry['samples']} of this train's real recent runs (RailRadar route history)"
+                    )
+                    historical_source = "railradar_route_history"
 
         heuristic_minutes = max(0.0, min(400.0, current_delay_minutes + trend_component + speed_component + weather_component + historical_component))
         blended = round(0.65 * heuristic_minutes + 0.35 * (ml_minutes if ml_minutes is not None else heuristic_minutes))
@@ -1318,6 +1373,7 @@ def _predict_delay_per_reporting_station(
         stop["predicted_delay_confidence"] = confidence
         if historical_basis:
             stop["predicted_delay_historical_basis"] = historical_basis
+            stop["predicted_delay_historical_source"] = historical_source
         # Confidence band, widening further out for stations we have less
         # certainty about (each stop ahead compounds the trend/speed
         # extrapolation) - same tiered spread as the single-figure
@@ -4155,6 +4211,24 @@ def api_live_position_debug(train_number: str, date: Optional[str] = None):
             "used to label current_station_source as confirmed vs unconfirmed in the actual payload."
         ),
     }
+
+
+@app.get("/api/advanced/railradar-route-history-debug/{train_number}")
+def api_railradar_route_history_debug(train_number: str, lookback_days: Optional[int] = 14):
+    """
+    VERIFICATION ENDPOINT for railradar_fallback.get_route_delay_history()
+    — the per-station "RailRadar route history" nudge used in the delay
+    prediction (see app.py's historical_component block). This exists
+    because the environment that BUILT this feature could not reach
+    api.railradar.in at all (outbound requests to it were blocked there),
+    so the feature was written strictly to RailRadar's own documented
+    response shape and to fail visibly rather than assumed to work. Hit
+    this endpoint on a real deployment (which has real internet access)
+    to see, station by station and day by day, whether RailRadar
+    actually returns real per-station delay data for past dates for a
+    given train — never take it on faith.
+    """
+    return railradar_fallback.get_route_delay_history_diagnostics(train_number, lookback_days=lookback_days or 14)
 
 
 # =============================================================================

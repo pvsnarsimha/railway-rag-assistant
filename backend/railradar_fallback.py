@@ -32,7 +32,7 @@ response it's backing up.
 
 import os
 import re
-from datetime import date as date_cls, datetime
+from datetime import date as date_cls, datetime, timedelta
 from typing import List, Optional
 
 import requests
@@ -457,4 +457,158 @@ def get_route_averages(train_number: str) -> Optional[dict]:
         "total_distance_km": total_distance_km,
         "total_halts": total_halts,
         "basis": basis,
+    }
+
+
+_ROUTE_HISTORY_DEFAULT_LOOKBACK_DAYS = 14
+_ROUTE_HISTORY_MAX_LOOKBACK_DAYS = 30
+
+
+@cached(ttl_seconds=86400, prefix="railradar_route_history")
+def get_route_delay_history(train_number: str, lookback_days: int = _ROUTE_HISTORY_DEFAULT_LOOKBACK_DAYS) -> dict:
+    """
+    FEATURE: real per-STATION delay history for this train, built from
+    RailRadar's own past-date live-status responses — unlike
+    historical_delay.py (which calls RailKit's separate /history endpoint
+    and collapses each day down to ONE final delay figure), this walks
+    RailRadar's `date=<past date>` query (already used by
+    fetch_railradar_timeline — see that function's own docstring) and
+    keeps EVERY real per-station delayArrival/delayDeparture RailRadar
+    reports for that completed run, not just the last one.
+
+    Real, not assumed: RailRadar's own docs don't state how many days
+    back a `date` query reliably returns real archived per-station data
+    (checked directly — it's undocumented), so this doesn't assume any
+    retention window. Each day is queried independently and honestly
+    contributes 0 samples if RailRadar has nothing real for it (train
+    didn't run that day, hasn't completed yet, or the provider simply has
+    no archived data that far back) — never backfilled or guessed. Use
+    get_route_delay_history_diagnostics() below to see exactly which of
+    the last N days actually had real data, e.g. after deploying
+    somewhere with real network access to api.railradar.in.
+
+    Cached 24h (a completed past day's data never changes), keyed on
+    (train_number, lookback_days) — so this costs up to `lookback_days`
+    real RailRadar calls only on the FIRST request for a given train each
+    day, not on every poll.
+
+    Returns {station_code: {"avg_delay_minutes": float, "samples": int,
+    "min_delay_minutes": int, "max_delay_minutes": int}} — a station only
+    appears here if at least one real past run gave it a real recorded
+    delay. Never includes a station with 0 real samples.
+    """
+    lookback_days = max(1, min(int(lookback_days or _ROUTE_HISTORY_DEFAULT_LOOKBACK_DAYS), _ROUTE_HISTORY_MAX_LOOKBACK_DAYS))
+    today = datetime.now()
+
+    per_station_delays: dict = {}
+    for i in range(1, lookback_days + 1):
+        day = today - timedelta(days=i)
+        date_ddmmyyyy = day.strftime("%d-%m-%Y")
+        try:
+            stops = fetch_railradar_timeline(train_number, date_ddmmyyyy)
+        except Exception:
+            stops = []
+        for stop in stops:
+            if stop.status != "passed":
+                continue
+            code = (stop.code or "").strip().upper()
+            if not code:
+                continue
+            delay = stop.departure.delay_minutes if stop.departure and stop.departure.delay_minutes is not None else (
+                stop.arrival.delay_minutes if stop.arrival else None
+            )
+            if delay is None:
+                continue
+            per_station_delays.setdefault(code, []).append(delay)
+
+    result = {}
+    for code, delays in per_station_delays.items():
+        result[code] = {
+            "avg_delay_minutes": round(sum(delays) / len(delays), 1),
+            "samples": len(delays),
+            "min_delay_minutes": min(delays),
+            "max_delay_minutes": max(delays),
+        }
+    return result
+
+
+def get_route_delay_history_diagnostics(train_number: str, lookback_days: int = _ROUTE_HISTORY_DEFAULT_LOOKBACK_DAYS) -> dict:
+    """
+    DIAGNOSTIC / VERIFICATION endpoint support — real per-day success/
+    failure detail behind get_route_delay_history()'s aggregated numbers,
+    so this can be checked against RailRadar's REAL behavior once
+    deployed somewhere with real internet access (this exact check could
+    not be run from the sandbox that built this feature — outbound
+    requests to api.railradar.in were blocked there, so this was built to
+    RailRadar's own documented response shape and to fail honestly/
+    visibly rather than assumed to work). NOT cached, unlike
+    get_route_delay_history() — always a fresh real check.
+
+    Returns per-day detail (date, whether real stops came back, how many
+    had a real delay figure) plus the same aggregated per-station result,
+    so a genuinely broken day is visible instead of silently averaged
+    away.
+    """
+    lookback_days = max(1, min(int(lookback_days or _ROUTE_HISTORY_DEFAULT_LOOKBACK_DAYS), _ROUTE_HISTORY_MAX_LOOKBACK_DAYS))
+    today = datetime.now()
+
+    days_detail = []
+    per_station_delays: dict = {}
+    for i in range(1, lookback_days + 1):
+        day = today - timedelta(days=i)
+        date_ddmmyyyy = day.strftime("%d-%m-%Y")
+        try:
+            stops = fetch_railradar_timeline(train_number, date_ddmmyyyy)
+        except Exception as exc:
+            days_detail.append({
+                "date": date_ddmmyyyy, "stops_returned": 0, "stations_with_real_delay": 0,
+                "error": str(exc),
+            })
+            continue
+
+        stations_with_delay = 0
+        for stop in stops:
+            if stop.status != "passed":
+                continue
+            code = (stop.code or "").strip().upper()
+            if not code:
+                continue
+            delay = stop.departure.delay_minutes if stop.departure and stop.departure.delay_minutes is not None else (
+                stop.arrival.delay_minutes if stop.arrival else None
+            )
+            if delay is None:
+                continue
+            stations_with_delay += 1
+            per_station_delays.setdefault(code, []).append(delay)
+
+        days_detail.append({
+            "date": date_ddmmyyyy, "stops_returned": len(stops),
+            "stations_with_real_delay": stations_with_delay,
+            "error": get_last_error() if not stops else None,
+        })
+
+    per_station_summary = {
+        code: {
+            "avg_delay_minutes": round(sum(delays) / len(delays), 1),
+            "samples": len(delays),
+        }
+        for code, delays in per_station_delays.items()
+    }
+
+    days_with_real_data = sum(1 for d in days_detail if d["stations_with_real_delay"] > 0)
+    return {
+        "train_number": train_number,
+        "lookback_days": lookback_days,
+        "days_with_real_data": days_with_real_data,
+        "days_detail": days_detail,
+        "stations_with_history": len(per_station_summary),
+        "per_station_summary": per_station_summary,
+        "note": (
+            f"{days_with_real_data}/{lookback_days} recent days returned real per-station delay data from "
+            f"RailRadar for train {train_number}. Days with 0 stations are shown as such (train didn't run, "
+            "hasn't completed yet, or RailRadar has no archived data that far back) — never guessed or "
+            "backfilled. If days_with_real_data is 0 across a wide lookback_days, RailRadar's `date` param "
+            "likely doesn't retain real per-station history this far back for this train, and the route-history "
+            "prediction nudge below will correctly stay inactive rather than fabricate one."
+        ),
     }

@@ -1216,8 +1216,15 @@ if (!alreadySeenTour) {
     // clearly-labeled info note, never claiming "verified" since it's a
     // real but soft nudge on top of the live-grounded number, not a
     // confirmation of it.
+    // FEATURE: the basis text alone doesn't say at a glance whether this
+    // came from this app's OWN logged runs or from RailRadar's past-date
+    // route history (used specifically for a station this app hasn't
+    // personally logged yet) — labeling the badge itself, not just the
+    // hover tooltip, matters here since this exact distinction is what
+    // makes the nudge trustworthy rather than a black box.
+    const historicalLabel = s.predicted_delay_historical_source === "railradar_route_history" ? "ⓘ route history" : "ⓘ history";
     const historicalNote = s.predicted_delay_historical_basis
-      ? `<span class="live-timeline__info" title="${escapeHtml(s.predicted_delay_historical_basis)}">ⓘ history</span>`
+      ? `<span class="live-timeline__info" title="${escapeHtml(s.predicted_delay_historical_basis)}">${historicalLabel}</span>`
       : "";
     // FEATURE: RailKit vs RailRadar disagreement on this run's own already-
     // confirmed stations (backend's _compute_provider_agreement) — only
