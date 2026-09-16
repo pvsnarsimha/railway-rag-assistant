@@ -1518,6 +1518,7 @@ def _predict_delay_per_reporting_station(
     # it, the same as if it had grounded itself.
     last_intermediate_grounded_delay = None
     last_intermediate_grounded_name = None
+    last_intermediate_grounded_distance_km = None
     for s in timeline_json:
         if s.get("status") != "upcoming":
             # A passed/current stop (reporting or not) marks the boundary
@@ -1525,11 +1526,13 @@ def _predict_delay_per_reporting_station(
             # anchor was seen before it no longer applies further ahead.
             last_intermediate_grounded_delay = None
             last_intermediate_grounded_name = None
+            last_intermediate_grounded_distance_km = None
             continue
         if s.get("kind") == "intermediate":
             if s.get("_intermediate_grounded"):
                 last_intermediate_grounded_delay = s["_intermediate_grounded_delay_minutes"]
                 last_intermediate_grounded_name = s.get("name")
+                last_intermediate_grounded_distance_km = gps_tracking._distance_km_value(s.get("distance_km"))
             continue
         # Reporting station reached: apply the pending anchor (if any),
         # then the anchor resets - it's consumed by the very next
@@ -1550,14 +1553,42 @@ def _predict_delay_per_reporting_station(
             # arithmetic pattern used everywhere else in this function -
             # only when this station has its own real schedule to add it
             # to; otherwise the existing real-time-distance ETA is left as
-            # the best available figure.
+            # the best available figure. This IS real-clock-time
+            # arithmetic (a real HH:MM parsed from this station's own
+            # schedule, plus the anchored delay) rather than a relative
+            # "minutes from now" figure — comparing against the train's
+            # actual real-world position/time is the entire basis for
+            # this anchor pass, not just this one line.
             own_anchor_time = (s.get("arrival") or {}).get("expected") or (s.get("arrival") or {}).get("scheduled")
             own_anchor_min = gps_tracking._time_str_to_minutes(own_anchor_time)
             if own_anchor_min is not None:
                 eta_dt = datetime.strptime(f"{own_anchor_min // 60:02d}:{own_anchor_min % 60:02d}", "%H:%M") + timedelta(minutes=anchor_delay)
                 s["predicted_eta"] = eta_dt.strftime("%H:%M")
+            # FEATURE: sub-1km auto-finalize. Real distance between the
+            # last GROUNDED non-reporting waypoint and this reporting
+            # station, using each one's own real distance_km (RailKit's
+            # own figure, never estimated) — when that real gap is under
+            # 1 km, the train is close enough to this station that there
+            # is essentially nothing left to predict: the grounded ETA
+            # above already reflects real elapsed time from a point a
+            # few hundred metres away, so this is finalized outright
+            # rather than left to also clear the separate statistical
+            # lock-confidence check below. Without this, a station this
+            # close could still show as merely "grounded, not yet locked"
+            # if provider disagreement or a jumpy recent speed reading
+            # happened to dampen the statistical score that poll — real
+            # physical proximity this close should never be second-
+            # guessed by a formula tuned for the general case. Both
+            # distances must be real (never guessed) for this to apply.
+            own_distance_km = gps_tracking._distance_km_value(s.get("distance_km"))
+            if (last_intermediate_grounded_distance_km is not None and own_distance_km is not None):
+                gap_km = own_distance_km - last_intermediate_grounded_distance_km
+                if 0 <= gap_km < 1.0:
+                    s["predicted_delay_near_station_lock"] = True
+                    s["predicted_delay_near_station_gap_km"] = round(gap_km, 2)
         last_intermediate_grounded_delay = None
         last_intermediate_grounded_name = None
+        last_intermediate_grounded_distance_km = None
 
     # FEATURE: lock-confidence pass. Runs AFTER the anchor pass above (so it
     # sees every station that just got grounded via the last non-reporting
@@ -1600,8 +1631,15 @@ def _predict_delay_per_reporting_station(
         s["predicted_delay_lock_confidence_pct"] = confidence_pct
         if provider_disagreement_minutes is not None:
             s["provider_disagreement_minutes"] = round(provider_disagreement_minutes, 1)
+        # A real sub-1km gap from the anchor pass above finalizes this
+        # station outright, same as clearing the statistical threshold -
+        # see the anchor pass's own comment for why physical proximity
+        # this close shouldn't be second-guessed by the general-case
+        # formula (e.g. a provider-disagreement dampener shouldn't be
+        # able to hold back a station the train is already basically at).
         s["predicted_delay_lock_eligible"] = bool(
-            confidence_pct is not None and confidence_pct >= LOCK_CONFIDENCE_THRESHOLD_PCT
+            (confidence_pct is not None and confidence_pct >= LOCK_CONFIDENCE_THRESHOLD_PCT)
+            or s.get("predicted_delay_near_station_lock")
         )
 
     # FEATURE: neighbor-consistency pass. A station without its own real
