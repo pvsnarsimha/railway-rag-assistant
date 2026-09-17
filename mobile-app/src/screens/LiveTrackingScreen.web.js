@@ -115,39 +115,60 @@ function journeyDayNumber(entry) {
 // field blank, this used to just call parseTrackDateInput("") -> today and
 // treat THAT as day 1 of the journey unconditionally. For a multi-day train
 // that's already partway through its run (e.g. it genuinely departed 2 days
-// ago), that's wrong - it silently shows every station's date shifted
-// forward to start from today instead of the train's real start date, and
-// because "today" is re-evaluated fresh on every render, the shown dates
-// even visibly DRIFT forward by a day right after midnight while the same
-// live run is still being tracked (exactly what was reported: NAGPUR JN
-// went from showing "17-Sep" to "18-Sep" between two polls of the same
-// ongoing journey for train 12295).
+// ago), that's wrong.
 //
-// Fix, using only real data already on hand (no guess, no extra request):
-// RailKit's own per-stop `day` field is real (1-based day-of-run). The
-// CURRENT stop (or, if none is marked current yet, the most recently
-// PASSED reporting stop) tells us for real how many days into the run
-// "right now" is - and "right now" really is today's real calendar date,
-// since this is a live poll. So day 1's real date = today minus
-// (that stop's real day number - 1). Plain date arithmetic on two real
-// values, anchored once per real position rather than re-guessed as
-// "today" on every render.
+// FIRST FIX ATTEMPT (kept here as a record, since it was real but
+// insufficient on its own): anchor on "today minus (the current/last-passed
+// stop's real day number - 1)". That was WRONG in practice as soon as the
+// backend was separately fixed to send RailKit the train's real start date
+// (see backend/app.py's ws_track_train) - RailKit's own per-stop
+// scheduled/expected/actual strings already carry a real date suffix in
+// RailKit's own "HH:MM DD-Mon" format (see parseRailTimestamp above,
+// "RailKit's own format"), and those came back correct (e.g. the origin
+// showing the real "16-Sep") - but this function was STILL computing the
+// "DayN:" pill from "today minus day-number", which used the DEVICE'S
+// clock as ground truth for "day N is happening right now". The two can
+// disagree (the device's "today" is not necessarily the same real day as
+// whichever station the provider currently marks "current"/"passed"),
+// which is exactly what was reported: the pill read "Day1: 17 Sept" while
+// the very first station's own row, right below it, already correctly
+// showed "16-Sep" - two different numbers for what should be the same
+// real fact, because they were computed two different ways.
+//
+// REAL FIX: stop deriving Day 1 from "today" at all. RailKit already GIVES
+// us a real calendar date on every dated stop (its own "HH:MM DD-Mon"
+// timestamps) - so Day 1's date is just that stop's own real date minus
+// (that SAME stop's own real day number - 1), entirely self-consistent
+// with what the row underneath the pill already displays, no separate
+// "what is today" assumption involved anywhere. Walks the timeline for the
+// first stop that has ANY real dated timestamp (arrival or departure,
+// actual/expected/scheduled, whichever is present) - normally the origin,
+// since an already-passed/current stop is what reliably carries a real
+// date-stamped time in RailKit's response.
 //
 // Only applies when the user left the date field blank - an explicit date
 // the user typed IS day 1 by definition and is trusted as before.
+function firstRealDatedStop(timelineArr) {
+  for (const s of timelineArr) {
+    for (const timing of [s.arrival, s.departure]) {
+      if (!timing) continue;
+      for (const raw of [timing.actual, timing.expected, timing.scheduled]) {
+        const d = parseRailTimestamp(raw);
+        if (d) return { stop: s, date: d };
+      }
+    }
+  }
+  return null;
+}
 function resolveJourneyStartDate(trackDateInput, timelineArr) {
   if ((trackDateInput || "").trim()) return parseTrackDateInput(trackDateInput);
   const arr = Array.isArray(timelineArr) ? timelineArr : [];
-  let anchor = arr.find((s) => s.status === "current");
-  if (!anchor) {
-    const passedReporting = arr.filter((s) => s.kind !== "intermediate" && s.status === "passed");
-    anchor = passedReporting.length ? passedReporting[passedReporting.length - 1] : null;
-  }
-  if (!anchor) return new Date(); // nothing real to anchor to yet (run hasn't started) - today genuinely is day 1
-  const realDayNumber = journeyDayNumber(anchor);
-  const today = new Date();
-  today.setDate(today.getDate() - (realDayNumber - 1));
-  return today;
+  const found = firstRealDatedStop(arr);
+  if (!found) return new Date(); // no real dated timestamp anywhere yet - today is the best honest fallback
+  const realDayNumber = journeyDayNumber(found.stop);
+  const anchor = new Date(found.date);
+  anchor.setDate(anchor.getDate() - (realDayNumber - 1));
+  return anchor;
 }
 function formatJourneyDayLabel(startDate, dayNumber) {
   const d = new Date(startDate);
