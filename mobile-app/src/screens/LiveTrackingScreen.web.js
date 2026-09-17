@@ -148,15 +148,21 @@ function journeyDayNumber(entry) {
 //
 // Only applies when the user left the date field blank - an explicit date
 // the user typed IS day 1 by definition and is trusted as before.
+function realDateOfEntry(entry) {
+  if (!entry) return null;
+  for (const timing of [entry.arrival, entry.departure]) {
+    if (!timing) continue;
+    for (const raw of [timing.actual, timing.expected, timing.scheduled]) {
+      const d = parseRailTimestamp(raw);
+      if (d) return d;
+    }
+  }
+  return null;
+}
 function firstRealDatedStop(timelineArr) {
   for (const s of timelineArr) {
-    for (const timing of [s.arrival, s.departure]) {
-      if (!timing) continue;
-      for (const raw of [timing.actual, timing.expected, timing.scheduled]) {
-        const d = parseRailTimestamp(raw);
-        if (d) return { stop: s, date: d };
-      }
-    }
+    const d = realDateOfEntry(s);
+    if (d) return { stop: s, date: d };
   }
   return null;
 }
@@ -169,6 +175,34 @@ function resolveJourneyStartDate(trackDateInput, timelineArr) {
   const anchor = new Date(found.date);
   anchor.setDate(anchor.getDate() - (realDayNumber - 1));
   return anchor;
+}
+// BUGFIX ("after 11:59:59 PM ... onwards it should display Day 2 ... but in
+// my app is not behaving like that"): the day-pill boundary itself (WHEN a
+// new "DayN:" band starts) was still keyed off RailKit's own per-stop `day`
+// field (journeyDayNumber) - a SEPARATE field from the real date already
+// stamped on that same stop's own arrival/departure time (the thing the row
+// itself displays, e.g. Warangal's own real "00:48 17-Sep"). Those two
+// fields don't reliably move together - a stop can carry a correct real
+// dated timestamp while RailKit's own `day` counter hasn't incremented for
+// it, so the pill kept showing "Day1" past a real midnight crossing even
+// though the row directly under it had already rolled over to the next
+// calendar date. Fixed the same way as resolveJourneyStartDate above: work
+// out this stop's real day number FROM ITS OWN real dated timestamp
+// (whole-calendar-days since journeyStartDate) whenever it has one, so the
+// pill boundary can never disagree with what's printed on the row beneath
+// it. Only falls back to RailKit's raw `day` field for a stop that has no
+// real dated timestamp of its own yet (a genuinely bare "HH:MM" far-future
+// scheduled stop) - same as before for that case, nothing lost.
+function dayNumberForEntry(entry, journeyStartDate) {
+  const realDate = realDateOfEntry(entry);
+  if (realDate && journeyStartDate) {
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const a = new Date(journeyStartDate.getFullYear(), journeyStartDate.getMonth(), journeyStartDate.getDate());
+    const b = new Date(realDate.getFullYear(), realDate.getMonth(), realDate.getDate());
+    const diffDays = Math.round((b.getTime() - a.getTime()) / msPerDay);
+    return diffDays + 1;
+  }
+  return journeyDayNumber(entry);
 }
 function formatJourneyDayLabel(startDate, dayNumber) {
   const d = new Date(startDate);
@@ -1124,7 +1158,7 @@ export default function LiveTrackingScreen({ navigation }) {
                     />
                   );
                 }
-                const dayNum = journeyDayNumber(entry);
+                const dayNum = dayNumberForEntry(entry, journeyStartDate);
                 const showDayPill = lastDay !== dayNum;
                 lastDay = dayNum;
                 return (
