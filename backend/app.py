@@ -5383,6 +5383,36 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     await websocket.accept()
     q = websocket.query_params
     date_ddmmyyyy = (q.get("date") or "").strip() or None
+    # BUGFIX ("long journey trains ... even if I don't give any date it
+    # should [not] default day 1 as today"): when the user leaves the Date
+    # field blank, railway_api.get_live_train_status would otherwise send
+    # RailKit "today" as the date - fine for a same-day train, but wrong
+    # for a multi-day journey (e.g. train 12295) that genuinely started
+    # before today, because RailKit stamps every station's own
+    # scheduled/expected/actual time relative to whatever date it's asked
+    # about. That means the wrong date comes back baked directly into the
+    # raw provider strings the UI displays - not something a client-side
+    # fix can correct after the fact, since the value shown IS the
+    # provider's own (mis-dated) string.
+    #
+    # Resolved here, ONCE per connection (reused for every poll in this
+    # same WS session, same as date_ddmmyyyy always was) - real, not
+    # guessed: RailRadar's own auto-detect (its `date` param, omitted,
+    # returns the ACTUALLY active run's real startDate - see
+    # railradar_fallback.get_real_journey_start_date) tells us which real
+    # calendar date this train's current run actually began on. Only
+    # applies when the user gave no date at all; an explicit date is
+    # trusted as-is exactly as before. Falls back to the untouched
+    # existing "today" default (inside get_live_train_status itself)
+    # whenever RailRadar can't resolve one - never a stricter requirement,
+    # just a best-effort improvement layered on top.
+    if not date_ddmmyyyy:
+        try:
+            resolved_start_date = railradar_fallback.get_real_journey_start_date(train_number)
+        except Exception:
+            resolved_start_date = None
+        if resolved_start_date:
+            date_ddmmyyyy = resolved_start_date
     source = (q.get("source") or "").strip().upper() or None
     dest = (q.get("dest") or "").strip().upper() or None
     travel_class = (q.get("travel_class") or "SL").strip().upper()
