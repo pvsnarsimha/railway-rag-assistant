@@ -6036,6 +6036,47 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                         # read on, even without RailRadar's confirmation.
                         if distance_to_next_km <= 1.5:
                             force_refresh_next_poll = True
+                        # FEATURE: sub-1km auto-finalize using the LIVE
+                        # real-time remaining distance to the next REPORTING
+                        # station (this same distance_to_next_km, computed
+                        # fresh every poll from the train's actual current
+                        # position — not the separate static-distance gap
+                        # the anchor pass above uses between two timeline
+                        # entries' own distance_km figures). Request: once
+                        # the train is genuinely this close to the very next
+                        # halt, its predicted arrival there should stop
+                        # visibly climbing poll-to-poll and just freeze -
+                        # the same "declare final and don't keep guessing"
+                        # reasoning as the anchor pass, but keyed off the
+                        # train's real live position instead of a grounded
+                        # intermediate waypoint (covers the case where the
+                        # LAST intermediate point before this station wasn't
+                        # itself grounded, or there wasn't one at all - a
+                        # short final approach with no passing points in
+                        # between). Only for a genuine reporting halt that's
+                        # still upcoming and already has a real predicted
+                        # figure to freeze; being this physically close is
+                        # itself real grounding evidence, so this also marks
+                        # the station grounded if the schedule-vs-ETA pass
+                        # earlier hadn't already done so.
+                        if (
+                            distance_to_next_km < 1.0
+                            and next_stop_json.get("kind") != "intermediate"
+                            and next_stop_json.get("status") == "upcoming"
+                            and next_stop_json.get("predicted_delay_minutes") is not None
+                        ):
+                            next_stop_json["predicted_delay_is_grounded"] = True
+                            next_stop_json["predicted_delay_near_station_lock"] = True
+                            next_stop_json["predicted_delay_near_station_gap_km"] = round(distance_to_next_km, 2)
+                            next_stop_json["predicted_delay_lock_eligible"] = True
+                            # Re-run the lock pass immediately so this
+                            # freezes THIS poll rather than waiting one more
+                            # ~5s cycle for the next one - safe to call
+                            # again this same poll, see the function's own
+                            # docstring (it only reads/writes timeline_json
+                            # + the connection-scoped locked_predictions
+                            # dict, no other side effects).
+                            _lock_grounded_station_predictions(timeline_json, locked_station_predictions)
                 # Destination = the last *scheduled halt* in the timeline
                 # (kind == "stoppage") when we can tell, else just the last
                 # entry — RailKit's timeline is already ordered start to end.
