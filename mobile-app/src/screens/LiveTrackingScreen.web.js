@@ -98,8 +98,8 @@ function computeJourneyLikelyComplete(timelineArr, lastStop) {
 // already flowing through both `timeline` and `timeline_grouped`) lets the
 // station list be split into "Day N: <date>" bands, same as RailYatri's own
 // page. The calendar date shown for each day is derived — never invented —
-// from the date this train was tracked from (the optional "Date" field
-// above, defaulting to today) plus (day - 1).
+// from day 1's real calendar date (see resolveJourneyStartDate below) plus
+// (day - 1).
 function parseTrackDateInput(str) {
   const m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec((str || "").trim());
   if (!m) return new Date();
@@ -109,6 +109,45 @@ function parseTrackDateInput(str) {
 function journeyDayNumber(entry) {
   const n = parseInt(entry?.day, 10);
   return Number.isFinite(n) && n > 0 ? n : 1;
+}
+// BUGFIX ("for long journey trains ... even if I don't give any date it
+// should [not] default day 1 as today"): when the user leaves the "Date"
+// field blank, this used to just call parseTrackDateInput("") -> today and
+// treat THAT as day 1 of the journey unconditionally. For a multi-day train
+// that's already partway through its run (e.g. it genuinely departed 2 days
+// ago), that's wrong - it silently shows every station's date shifted
+// forward to start from today instead of the train's real start date, and
+// because "today" is re-evaluated fresh on every render, the shown dates
+// even visibly DRIFT forward by a day right after midnight while the same
+// live run is still being tracked (exactly what was reported: NAGPUR JN
+// went from showing "17-Sep" to "18-Sep" between two polls of the same
+// ongoing journey for train 12295).
+//
+// Fix, using only real data already on hand (no guess, no extra request):
+// RailKit's own per-stop `day` field is real (1-based day-of-run). The
+// CURRENT stop (or, if none is marked current yet, the most recently
+// PASSED reporting stop) tells us for real how many days into the run
+// "right now" is - and "right now" really is today's real calendar date,
+// since this is a live poll. So day 1's real date = today minus
+// (that stop's real day number - 1). Plain date arithmetic on two real
+// values, anchored once per real position rather than re-guessed as
+// "today" on every render.
+//
+// Only applies when the user left the date field blank - an explicit date
+// the user typed IS day 1 by definition and is trusted as before.
+function resolveJourneyStartDate(trackDateInput, timelineArr) {
+  if ((trackDateInput || "").trim()) return parseTrackDateInput(trackDateInput);
+  const arr = Array.isArray(timelineArr) ? timelineArr : [];
+  let anchor = arr.find((s) => s.status === "current");
+  if (!anchor) {
+    const passedReporting = arr.filter((s) => s.kind !== "intermediate" && s.status === "passed");
+    anchor = passedReporting.length ? passedReporting[passedReporting.length - 1] : null;
+  }
+  if (!anchor) return new Date(); // nothing real to anchor to yet (run hasn't started) - today genuinely is day 1
+  const realDayNumber = journeyDayNumber(anchor);
+  const today = new Date();
+  today.setDate(today.getDate() - (realDayNumber - 1));
+  return today;
 }
 function formatJourneyDayLabel(startDate, dayNumber) {
   const d = new Date(startDate);
@@ -782,7 +821,7 @@ export default function LiveTrackingScreen({ navigation }) {
   for (let i = timelineGrouped.length - 1; i >= 0; i--) {
     if (timelineGrouped[i].display_type !== "no_halt_group") { ltLastStationIndex = i; break; }
   }
-  const journeyStartDate = parseTrackDateInput(trackDate);
+  const journeyStartDate = resolveJourneyStartDate(trackDate, timeline);
 
   // BUGFIX: the real current position is very often INSIDE a collapsed
   // "+N No-Halt stations" group (most of a route's stations are
