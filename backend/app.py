@@ -5383,36 +5383,37 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     await websocket.accept()
     q = websocket.query_params
     date_ddmmyyyy = (q.get("date") or "").strip() or None
-    # BUGFIX ("long journey trains ... even if I don't give any date it
-    # should [not] default day 1 as today"): when the user leaves the Date
-    # field blank, railway_api.get_live_train_status would otherwise send
-    # RailKit "today" as the date - fine for a same-day train, but wrong
-    # for a multi-day journey (e.g. train 12295) that genuinely started
-    # before today, because RailKit stamps every station's own
-    # scheduled/expected/actual time relative to whatever date it's asked
-    # about. That means the wrong date comes back baked directly into the
-    # raw provider strings the UI displays - not something a client-side
-    # fix can correct after the fact, since the value shown IS the
-    # provider's own (mis-dated) string.
+    # REVERTED (see below): a round-18 fix tried to resolve a "smarter"
+    # anchor here via RailRadar's auto-detect (railradar_fallback.
+    # get_real_journey_start_date) instead of defaulting to today, to
+    # correctly label an ALREADY-multi-day-in-progress run. That fix
+    # itself broke for a DAILY train whose journey spans more than a day
+    # (train 12295 again: 09:15-departure to-Danapur run, ~33h — daily,
+    # so there can be TWO real overlapping runs live at once: an older
+    # one still finishing its 2nd day, and a fresh one that departed
+    # again TODAY). RailRadar's auto-detect resolved the OLDER run's real
+    # startDate (16-Sep) - a genuinely real date, just for the WRONG one
+    # of the two simultaneously-active runs - while RailKit was actually
+    # showing the FRESH today's-departure run's real live position (just
+    # ~44 km in). Sent that resolved-but-wrong date to RailKit, and every
+    # station's own real timestamp came back stamped 16-Sep instead of
+    # the true 17-Sep, since RailKit uses whatever date it's given purely
+    # as the day-1 label anchor - it doesn't tell us which of two
+    # overlapping runs "16-Sep" vs "today" actually corresponds to.
     #
-    # Resolved here, ONCE per connection (reused for every poll in this
-    # same WS session, same as date_ddmmyyyy always was) - real, not
-    # guessed: RailRadar's own auto-detect (its `date` param, omitted,
-    # returns the ACTUALLY active run's real startDate - see
-    # railradar_fallback.get_real_journey_start_date) tells us which real
-    # calendar date this train's current run actually began on. Only
-    # applies when the user gave no date at all; an explicit date is
-    # trusted as-is exactly as before. Falls back to the untouched
-    # existing "today" default (inside get_live_train_status itself)
-    # whenever RailRadar can't resolve one - never a stricter requirement,
-    # just a best-effort improvement layered on top.
-    if not date_ddmmyyyy:
-        try:
-            resolved_start_date = railradar_fallback.get_real_journey_start_date(train_number)
-        except Exception:
-            resolved_start_date = None
-        if resolved_start_date:
-            date_ddmmyyyy = resolved_start_date
+    # There's no cheap, fully reliable way to disambiguate two
+    # simultaneously-live runs of the same daily train from here (RailKit
+    # itself doesn't expose which real instance it's showing), so per
+    # explicit request this goes back to the simple, predictable default:
+    # no date given -> today (see railway_api.get_live_train_status's own
+    # existing fallback, untouched). This matches RailYatri's own default
+    # view too (its "Today" tab). An explicit date is still trusted as-is
+    # either way. The mislabeled-mid-multi-day-run case round 18 was
+    # originally trying to fix can still recur in the OTHER direction (a
+    # long-running train tracked well into a later day with no date
+    # given) - if that resurfaces, it needs a real per-run identifier
+    # from the provider to fix properly rather than another guessed
+    # anchor, which is exactly what went wrong here.
     source = (q.get("source") or "").strip().upper() or None
     dest = (q.get("dest") or "").strip().upper() or None
     travel_class = (q.get("travel_class") or "SL").strip().upper()
