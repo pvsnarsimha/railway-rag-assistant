@@ -1039,6 +1039,24 @@ export default function LiveTrackingScreen({ navigation }) {
 
       {payload && (
         <>
+          {/* FEATURE: explicit-past-date reliability warning — see
+              backend/app.py's ws_track_train (`date_reliability_warning`).
+              RailKit's `date` query param doesn't reliably select a
+              SPECIFIC historical run; when a date was explicitly typed and
+              RailKit's response has no live "current" station, what came
+              back may actually be a different (often already-finished) run
+              than the one asked for, just relabeled with the requested
+              date. Shown first, above everything else, since it changes
+              how every row below should be read — same "surface the
+              uncertainty rather than present a guess as fact" rule this
+              project applies everywhere else. Only ever set on an explicit-
+              date request; the blank/today default never carries it. */}
+          {payload.date_reliability_warning && (
+            <SectionCard title="⚠️ This may be the wrong run">
+              <Text style={styles.rerouteNote}>{payload.date_reliability_warning}</Text>
+            </SectionCard>
+          )}
+
           {/* REDESIGN (RailYatri-style header): train number + real route
               (first/last reported stops — never invented), then a plain-
               English running-status line. When the journey is genuinely

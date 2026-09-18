@@ -5629,6 +5629,38 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
 
                 timeline_json = gps_tracking.timeline_to_json(timeline_stops)
 
+                # FEATURE: explicit-past-date reliability warning. RailKit's
+                # `date` query param does not appear to reliably select a
+                # SPECIFIC historical run of a train - see the long REVERTED
+                # comment above this function for the full round 18-22
+                # history. It looks like RailKit just returns whatever run
+                # it is currently (or most recently) tracking internally,
+                # and our own code stamps the REQUESTED date onto it purely
+                # as a label - there's no real per-run identifier available
+                # to tell the two apart. The clearest signal this happened:
+                # the caller explicitly typed a date (not the blank/"today"
+                # default, which round 22 already confirmed matches
+                # RailKit's own live-tracked run) AND the returned timeline
+                # has NO station marked "current" - i.e. RailKit isn't
+                # actively tracking a live position for whatever it just
+                # sent back, consistent with it being a different/already-
+                # finished run rather than the specific date's run asked
+                # for. Rather than silently present that data as a
+                # trustworthy live answer for the requested date (the same
+                # "no fabricated data" rule this project applies everywhere
+                # else), a plain warning is surfaced instead. Never fires on
+                # the blank/today default path (explicit_date_requested is
+                # False there).
+                explicit_date_requested = date_ddmmyyyy is not None
+                has_current_station = any(s.get("status") == "current" for s in timeline_json)
+                payload["date_reliability_warning"] = (
+                    "RailKit doesn't reliably support looking up a specific past run by date "
+                    "— what's shown below may be a different run than the one you asked for. "
+                    "Leave the date blank to track today's live run instead."
+                    if explicit_date_requested and not has_current_station
+                    else None
+                )
+
                 # FEATURE: instant speed per GPS ping. TWO real sources,
                 # preferred in this order:
                 #   1. RailRadar's own live GPS speed reading
