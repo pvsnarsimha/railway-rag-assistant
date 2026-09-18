@@ -1052,6 +1052,31 @@ def _compute_segment_speed_signal(train_number, current_station_code, live_speed
     }
 
 
+def _is_cancelled_value(v) -> bool:
+    """True if a raw RailKit timing field literally reads "Cancelled" (or
+    "Canceled") - a real sentinel the provider sends for a scheduled halt
+    that was cancelled/skipped on THIS specific run, in the same slot
+    where a real clock time normally goes (same idea as the pre-existing
+    "SRC"/"DSTN" sentinels gps_tracking.py already handles for the
+    origin/destination - see _timing_has_no_real_event there)."""
+    return isinstance(v, str) and v.strip().lower() in ("cancelled", "canceled")
+
+
+def _stop_is_cancelled(stop: dict) -> bool:
+    """True if this station's arrival OR departure carries RailKit's real
+    "Cancelled" sentinel on any of scheduled/expected/actual - checked
+    before any prediction math runs for a stop (see the loop in
+    _predict_delay_per_reporting_station below): forecasting an ETA/delay
+    for a station the train will never actually call at is exactly the
+    kind of guess this project's "no fabricated data" rule exists to
+    prevent, not merely an optimistic estimate."""
+    for event_key in ("arrival", "departure"):
+        event = stop.get(event_key) or {}
+        if any(_is_cancelled_value(event.get(field)) for field in ("scheduled", "expected", "actual")):
+            return True
+    return False
+
+
 def _predict_delay_per_reporting_station(
     timeline_json: list, total_distance_km, current_delay_minutes,
     trend_per_stop, trend_basis, avg_speed_kmph, avg_speed_basis,
@@ -1174,6 +1199,26 @@ def _predict_delay_per_reporting_station(
     reporting_stops_ahead = 0  # counts only real reporting halts — used for the trend extrapolation
     for stop in timeline_json:
         if stop.get("status") != "upcoming":
+            continue
+        # BUGFIX: RailKit sometimes reports a scheduled halt as literally
+        # cancelled for THIS specific run (a short-termination, a skipped
+        # stop) - the raw string "Cancelled" comes straight through on
+        # scheduled/expected/actual (see _stop_is_cancelled - it's real
+        # provider data, never invented here), and used to fall straight
+        # into the prediction math below anyway, which has no notion of
+        # "cancelled" and just computed a distance/speed-based ETA and
+        # delay for it regardless - a real case showed a station displaying
+        # "Cancelled" as its actual time AND "~36m late (predicted)" right
+        # below it, a contradiction no real running-status board would ever
+        # show. Forecasting an ETA for a stop the train will never call at
+        # is exactly the kind of guess this project's "no fabricated data"
+        # rule exists to prevent, so it's skipped entirely here instead -
+        # predicted_eta/predicted_delay_minutes simply stay unset, and the
+        # frontend already renders nothing for either field when absent.
+        # Also excluded from stops_ahead/reporting_stops_ahead so a
+        # cancelled stop never widens or skews another station's
+        # confidence/trend math.
+        if _stop_is_cancelled(stop):
             continue
         stops_ahead += 1
         is_reporting = stop.get("kind") != "intermediate"
@@ -5536,6 +5581,80 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 train_info_data = None if isinstance(train_info_result, BaseException) else train_info_result
                 position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
                 timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
+
+                # BUGFIX: self-correcting day-1 anchor. Rounds 18-23 all
+                # tried to guess, AHEAD OF TIME, which of a daily train's
+                # possibly-several overlapping real runs RailKit would hand
+                # back for a given requested date - "auto-detect via a
+                # second provider" (round 18) and "assume blank always
+                # means RailKit's own live-tracked run" (round 22) both
+                # turned out wrong in different real cases (round 18: a
+                # real train 12295 case where RailKit was showing the FRESH
+                # run while the second provider resolved the OLDER run's
+                # date; round 22, confirmed by this round's own evidence -
+                # explicit past dates read correctly on confirmtkt.com's
+                # real reference, but blank/today did not - RailKit was
+                # attached to the OLDER run while we labeled it as if it
+                # were today's fresh departure). Neither approach can
+                # actually know in advance which run RailKit is internally
+                # attached to at any given moment - it can change over
+                # time, as this round's regression shows.
+                #
+                # This sidesteps the guessing entirely: RailKit's own
+                # per-stop `day` field on whichever station it marks
+                # "current" is a REAL fact about the run it just returned
+                # (not a guess), and the real wall-clock date "now" is
+                # always known for certain - so that run's true Day-1
+                # calendar date is simply today_real_date minus
+                # (current_day_number - 1), regardless of which run RailKit
+                # happened to attach to or what date we originally asked
+                # for. If that doesn't match the date actually requested (an
+                # explicit date, or today for the blank default), the
+                # ORIGINAL response's date labels are wrong the exact way
+                # rounds 18-23 kept re-discovering - so this re-fetches from
+                # RailKit with the CORRECTED date instead of hand-patching
+                # the already-labeled strings, so RailKit's own internal
+                # per-stop label arithmetic (not just what's displayed) is
+                # consistent end-to-end. Only fires when a real "current"
+                # station exists to anchor from - see
+                # date_reliability_warning further below for the case where
+                # none does (nothing real to correct FROM, so that's
+                # surfaced honestly instead of guessed at). A failed
+                # correction attempt keeps the original response rather
+                # than lose live tracking entirely over it.
+                # ROBUSTNESS: captured here (before any correction can
+                # reassign date_ddmmyyyy) so the warning logic further below
+                # can tell whether the ORIGINAL request - blank, or an
+                # explicit date that happens to equal today - implied
+                # "today's fresh departure", not just whether it was blank.
+                # An explicit "18-09-2026" typed on 18-Sep carries the exact
+                # same intent as leaving the field blank; round 25 only
+                # covered the blank case and missed that equally common one.
+                original_requested_date_str = date_ddmmyyyy
+                original_date_was_explicit = date_ddmmyyyy is not None
+                current_stop_for_anchor = next((s for s in timeline_stops if s.status == "current"), None)
+                if current_stop_for_anchor is not None:
+                    try:
+                        current_day_number = int(current_stop_for_anchor.day)
+                    except (TypeError, ValueError):
+                        current_day_number = 1
+                    if current_day_number < 1:
+                        current_day_number = 1
+                    corrected_anchor_date = (datetime.now() - timedelta(days=current_day_number - 1)).strftime("%d-%m-%Y")
+                    date_as_requested = date_ddmmyyyy or datetime.now().strftime("%d-%m-%Y")
+                    if corrected_anchor_date != date_as_requested:
+                        try:
+                            corrected_live_data = await asyncio.to_thread(
+                                railway_api.get_live_train_status, train_number, corrected_anchor_date,
+                                _force_refresh=this_poll_force_refresh,
+                            )
+                            live_data = corrected_live_data
+                            position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
+                            timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
+                            date_ddmmyyyy = corrected_anchor_date
+                        except railway_api.RailwayAPIError:
+                            pass
+
                 distance_km, route_progress_ratio = _distance_and_progress_from_route(
                     train_info_data, source or position.current_station_code
                 )
@@ -5629,37 +5748,72 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
 
                 timeline_json = gps_tracking.timeline_to_json(timeline_stops)
 
-                # FEATURE: explicit-past-date reliability warning. RailKit's
-                # `date` query param does not appear to reliably select a
-                # SPECIFIC historical run of a train - see the long REVERTED
-                # comment above this function for the full round 18-22
-                # history. It looks like RailKit just returns whatever run
-                # it is currently (or most recently) tracking internally,
-                # and our own code stamps the REQUESTED date onto it purely
-                # as a label - there's no real per-run identifier available
-                # to tell the two apart. The clearest signal this happened:
-                # the caller explicitly typed a date (not the blank/"today"
-                # default, which round 22 already confirmed matches
-                # RailKit's own live-tracked run) AND the returned timeline
-                # has NO station marked "current" - i.e. RailKit isn't
-                # actively tracking a live position for whatever it just
-                # sent back, consistent with it being a different/already-
-                # finished run rather than the specific date's run asked
-                # for. Rather than silently present that data as a
-                # trustworthy live answer for the requested date (the same
-                # "no fabricated data" rule this project applies everywhere
-                # else), a plain warning is surfaced instead. Never fires on
-                # the blank/today default path (explicit_date_requested is
-                # False there).
-                explicit_date_requested = date_ddmmyyyy is not None
+                # FEATURE: date reliability warnings. RailKit's `date` query
+                # param does not appear to reliably select a SPECIFIC run of
+                # a daily train - see the long REVERTED comment above this
+                # function and the self-correcting anchor pass above for the
+                # full round 18-24 history. The evidence from round 24
+                # itself narrowed this further: RailKit seems to hold only
+                # ONE live GPS attachment per train number at a time, and
+                # there is no parameter that lets us choose a DIFFERENT one
+                # - the `date` param (and the self-correcting anchor pass)
+                # only affects what calendar-date LABEL gets stamped onto
+                # whichever run RailKit is already attached to, never WHICH
+                # run that is. That attachment can be the older, still-
+                # finishing run even when a fresh instance has genuinely
+                # departed again today (confirmed against a third-party
+                # reference: RailKit stayed on the previous day's run while
+                # the fresh one was already well underway elsewhere). There
+                # is nothing on our side that can force RailKit to switch
+                # its attachment - so rather than silently present
+                # whichever run it gives us as if it were guaranteed to be
+                # the one asked for (the same "no fabricated data" rule this
+                # project applies everywhere else), two honest warnings are
+                # surfaced instead of one more guessed fix:
+                #
+                # 1. Explicit date, no "current" station at all - nothing
+                #    real to anchor from (round 23's original case).
+                # 2. The ORIGINAL request implied "today's fresh departure" -
+                #    either left blank, OR an explicit date that just
+                #    happens to equal today (typing "18-09-2026" on 18-Sep
+                #    means exactly the same thing as leaving it blank - round
+                #    25 only checked the blank case and missed this equally
+                #    common one, confirmed live: explicit date=today still
+                #    showed the older run) - but the self-correcting anchor
+                #    pass had to shift the label away from today anyway,
+                #    meaning RailKit is still attached to an EARLIER run
+                #    that hasn't finished yet, not today's fresh one.
+                #
+                # Both use original_date_was_explicit / original_requested_
+                # date_str (captured BEFORE the self-correcting anchor pass,
+                # which can reassign date_ddmmyyyy to a real corrected date)
+                # rather than re-deriving from the possibly-reassigned
+                # date_ddmmyyyy.
                 has_current_station = any(s.get("status") == "current" for s in timeline_json)
-                payload["date_reliability_warning"] = (
-                    "RailKit doesn't reliably support looking up a specific past run by date "
-                    "— what's shown below may be a different run than the one you asked for. "
-                    "Leave the date blank to track today's live run instead."
-                    if explicit_date_requested and not has_current_station
-                    else None
+                today_str = datetime.now().strftime("%d-%m-%Y")
+                original_request_implied_todays_run = (
+                    original_requested_date_str is None or original_requested_date_str == today_str
                 )
+                if original_date_was_explicit and not has_current_station:
+                    payload["date_reliability_warning"] = (
+                        "RailKit doesn't reliably support looking up a specific past run by date "
+                        "— what's shown below may be a different run than the one you asked for. "
+                        "Leave the date blank to track today's live run instead."
+                    )
+                elif (
+                    original_request_implied_todays_run
+                    and has_current_station
+                    and date_ddmmyyyy
+                    and date_ddmmyyyy != today_str
+                ):
+                    payload["date_reliability_warning"] = (
+                        "RailKit appears to still be tracking an earlier run of this train that "
+                        "hasn't finished yet, not today's fresh departure — what's shown below may "
+                        "be a day (or more) behind. There's currently no way to make RailKit switch "
+                        "to today's specific run."
+                    )
+                else:
+                    payload["date_reliability_warning"] = None
 
                 # FEATURE: instant speed per GPS ping. TWO real sources,
                 # preferred in this order:
