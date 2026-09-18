@@ -5794,6 +5794,10 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 original_request_implied_todays_run = (
                     original_requested_date_str is None or original_requested_date_str == today_str
                 )
+                # The date actually being asked for, in the same "what did the
+                # user mean" sense as original_request_implied_todays_run
+                # above — blank means "today" by definition.
+                effective_requested_date_str = original_requested_date_str or today_str
                 if original_date_was_explicit and not has_current_station:
                     payload["date_reliability_warning"] = (
                         "RailKit doesn't reliably support looking up a specific past run by date "
@@ -5812,6 +5816,67 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                         "be a day (or more) behind. There's currently no way to make RailKit switch "
                         "to today's specific run."
                     )
+                elif (
+                    not original_request_implied_todays_run
+                    and has_current_station
+                    and date_ddmmyyyy
+                    and date_ddmmyyyy != effective_requested_date_str
+                ):
+                    # BUGFIX ("if I choose 17th sept then day1 17th sept day2
+                    # 18th sept day3 19th sept but in my app it is completely
+                    # reverse" — reported again on a long-journey train: date
+                    # field explicitly set to 17-09-2026, but the Running
+                    # Status list's Day1 pill and every station's own
+                    # timestamp came back dated 18-09-2026 instead, with no
+                    # explanation shown anywhere on screen).
+                    #
+                    # The two branches above only cover "no current station at
+                    # all" and "the request implied TODAY's run but RailKit is
+                    # stuck on an OLDER one". Neither fires for this case: an
+                    # EXPLICIT PAST date (not today) was requested, a real
+                    # current station DOES exist, but RailKit's own
+                    # current-station `day` field resolved (see the self-
+                    # correcting anchor pass above) to a calendar date that
+                    # doesn't match what was actually typed — in the reported
+                    # case, a LATER date than requested, which is what reads
+                    # as "reverse" (Day 1 should anchor to the requested day,
+                    # but instead anchors a day further on). Since neither
+                    # existing condition matches a past-dated request, this
+                    # silently fell through to the `else: None` below and no
+                    # warning ever reached the frontend banner that already
+                    # exists for exactly this payload field (see
+                    # LiveTrackingScreen.web.js's date_reliability_warning
+                    # render). Same honest-disclosure rule as the other two
+                    # branches — say plainly this may be a different run,
+                    # rather than let the Day-N pill imply the requested date
+                    # without any caveat, whichever direction the mismatch
+                    # goes.
+                    try:
+                        _requested_dt = datetime.strptime(effective_requested_date_str, "%d-%m-%Y")
+                        _resolved_dt = datetime.strptime(date_ddmmyyyy, "%d-%m-%Y")
+                        _resolved_is_later = _resolved_dt > _requested_dt
+                    except ValueError:
+                        _resolved_is_later = None
+                    if _resolved_is_later is True:
+                        payload["date_reliability_warning"] = (
+                            f"You asked for {effective_requested_date_str}, but RailKit is tracking a "
+                            f"LATER run of this train (dated {date_ddmmyyyy}) instead — what's shown "
+                            "below is that later run, not the one you asked for. There's currently no "
+                            "way to make RailKit switch to the specific run you requested."
+                        )
+                    elif _resolved_is_later is False:
+                        payload["date_reliability_warning"] = (
+                            f"You asked for {effective_requested_date_str}, but RailKit is still "
+                            f"tracking an earlier, unfinished run of this train (dated {date_ddmmyyyy}) "
+                            "instead — what's shown below is that earlier run, not the one you asked "
+                            "for. There's currently no way to make RailKit switch to the specific run "
+                            "you requested."
+                        )
+                    else:
+                        payload["date_reliability_warning"] = (
+                            f"You asked for {effective_requested_date_str}, but what's shown below "
+                            f"(dated {date_ddmmyyyy}) may be a different run than the one you asked for."
+                        )
                 else:
                     payload["date_reliability_warning"] = None
 

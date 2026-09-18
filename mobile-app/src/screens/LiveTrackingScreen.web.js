@@ -1072,13 +1072,15 @@ export default function LiveTrackingScreen({ navigation }) {
               RailKit's `date` query param doesn't reliably select a
               SPECIFIC historical run; when a date was explicitly typed and
               RailKit's response has no live "current" station, what came
-              back may actually be a different (often already-finished) run
-              than the one asked for, just relabeled with the requested
-              date. Shown first, above everything else, since it changes
-              how every row below should be read — same "surface the
+              back may actually be a different run (earlier, later, or
+              already-finished) than the one asked for, just relabeled with
+              the requested date — including when RailKit is simply attached
+              to a run dated later than an explicit past date that was typed
+              in. Also fires for a blank/today request stuck on an older,
+              unfinished run. Shown first, above everything else, since it
+              changes how every row below should be read — same "surface the
               uncertainty rather than present a guess as fact" rule this
-              project applies everywhere else. Only ever set on an explicit-
-              date request; the blank/today default never carries it. */}
+              project applies everywhere else. */}
           {payload.date_reliability_warning && (
             <SectionCard title="⚠️ This may be the wrong run">
               <Text style={styles.rerouteNote}>{payload.date_reliability_warning}</Text>
