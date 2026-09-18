@@ -5577,6 +5577,15 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # surfaced honestly instead of guessed at). A failed
                 # correction attempt keeps the original response rather
                 # than lose live tracking entirely over it.
+                # ROBUSTNESS: captured here (before any correction can
+                # reassign date_ddmmyyyy) so the warning logic further below
+                # can tell whether the ORIGINAL request - blank, or an
+                # explicit date that happens to equal today - implied
+                # "today's fresh departure", not just whether it was blank.
+                # An explicit "18-09-2026" typed on 18-Sep carries the exact
+                # same intent as leaving the field blank; round 25 only
+                # covered the blank case and missed that equally common one.
+                original_requested_date_str = date_ddmmyyyy
                 original_date_was_explicit = date_ddmmyyyy is not None
                 current_stop_for_anchor = next((s for s in timeline_stops if s.status == "current"), None)
                 if current_stop_for_anchor is not None:
@@ -5719,18 +5728,27 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 #
                 # 1. Explicit date, no "current" station at all - nothing
                 #    real to anchor from (round 23's original case).
-                # 2. Blank/default (today's fresh departure implied) but the
-                #    self-correcting anchor pass had to shift the label away
-                #    from today - RailKit is still attached to an EARLIER
-                #    run that hasn't finished yet, not today's fresh one.
+                # 2. The ORIGINAL request implied "today's fresh departure" -
+                #    either left blank, OR an explicit date that just
+                #    happens to equal today (typing "18-09-2026" on 18-Sep
+                #    means exactly the same thing as leaving it blank - round
+                #    25 only checked the blank case and missed this equally
+                #    common one, confirmed live: explicit date=today still
+                #    showed the older run) - but the self-correcting anchor
+                #    pass had to shift the label away from today anyway,
+                #    meaning RailKit is still attached to an EARLIER run
+                #    that hasn't finished yet, not today's fresh one.
                 #
-                # Both use original_date_was_explicit (captured BEFORE the
-                # self-correcting anchor pass, which can reassign
-                # date_ddmmyyyy to a real corrected date even when the
-                # caller left it blank) rather than re-deriving from the
-                # possibly-reassigned date_ddmmyyyy.
+                # Both use original_date_was_explicit / original_requested_
+                # date_str (captured BEFORE the self-correcting anchor pass,
+                # which can reassign date_ddmmyyyy to a real corrected date)
+                # rather than re-deriving from the possibly-reassigned
+                # date_ddmmyyyy.
                 has_current_station = any(s.get("status") == "current" for s in timeline_json)
                 today_str = datetime.now().strftime("%d-%m-%Y")
+                original_request_implied_todays_run = (
+                    original_requested_date_str is None or original_requested_date_str == today_str
+                )
                 if original_date_was_explicit and not has_current_station:
                     payload["date_reliability_warning"] = (
                         "RailKit doesn't reliably support looking up a specific past run by date "
@@ -5738,7 +5756,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                         "Leave the date blank to track today's live run instead."
                     )
                 elif (
-                    not original_date_was_explicit
+                    original_request_implied_todays_run
                     and has_current_station
                     and date_ddmmyyyy
                     and date_ddmmyyyy != today_str
