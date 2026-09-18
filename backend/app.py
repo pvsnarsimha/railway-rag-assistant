@@ -5655,6 +5655,83 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                         except railway_api.RailwayAPIError:
                             pass
 
+                # BUGFIX ("if I choose 17th sept then day1 17th sept day2
+                # 18th sept day3 19th sept but in my app it is completely
+                # reverse" — confirmtkt.com reference: train 12295 queried
+                # for 17-09-2026 legitimately spans Day1=17-Sep through
+                # Day3=19-Sep, real current position on Day2/18-Sep near
+                # Shankargarh — but RailKit kept returning TODAY's fresh
+                # re-departure of the SAME daily train number instead (only
+                # ~44km in), relabeled, not the real older run, even after
+                # the anchor-date correction pass just above. That pass can
+                # only ever change the DATE LABEL RailKit stamps on
+                # whichever run it's already attached to (see its own
+                # comment) — it can't make RailKit switch which of two
+                # overlapping real runs of a long, multi-day daily train
+                # that attachment actually is. This only matters for a
+                # long-journey train genuinely spanning more than one
+                # calendar day; a short same-day train has no second
+                # overlapping run to confuse it with, so this never fires
+                # for one (date_ddmmyyyy already matches by construction).
+                #
+                # RailRadar's OWN `date` query param is documented
+                # differently from RailKit's — "Journey start date" (see
+                # railradar_fallback._fetch_raw's docstring), a genuine
+                # per-run selector, not just a display label. Round 18
+                # already tried leaning on RailRadar for exactly this and
+                # had to be reverted (commit be544d8) — but that attempt
+                # used RailRadar's BLANK-date AUTO-DETECT to guess which of
+                # two simultaneously-live runs to prefer with no explicit
+                # ask from the user, and auto-detect resolved the OTHER
+                # overlapping run than the one RailKit had live GPS for.
+                # This is narrower and only fires when the user gave an
+                # EXPLICIT date AND RailKit is confirmed to have not
+                # honored it. It also never trusts RailRadar blindly:
+                # get_real_journey_start_date is called WITH that same
+                # explicit date, and its own resolved startDate must come
+                # back matching it EXACTLY before anything here is used —
+                # if RailRadar can't confirm it either (no key configured,
+                # the call fails, or its answer doesn't match), nothing
+                # changes here and the honest date_reliability_warning
+                # further below still fires exactly as before. Never a
+                # silent guess either way — same real-evidence-or-say-so
+                # rule as the rest of this project.
+                date_corrected_via_railradar = False
+                if original_date_was_explicit and date_ddmmyyyy != original_requested_date_str:
+                    try:
+                        rr_confirmed_start = await asyncio.to_thread(
+                            railradar_fallback.get_real_journey_start_date,
+                            train_number, original_requested_date_str,
+                        )
+                    except Exception:
+                        rr_confirmed_start = None
+                    if rr_confirmed_start == original_requested_date_str:
+                        try:
+                            rr_corrected_stops = await asyncio.to_thread(
+                                railradar_fallback.fetch_railradar_timeline,
+                                train_number, original_requested_date_str,
+                            )
+                        except Exception:
+                            rr_corrected_stops = []
+                        if rr_corrected_stops:
+                            # Same real-data enrichment pass RailKit's own
+                            # timeline always gets (interpolated coordinates/
+                            # distance for stops missing one, "N km from
+                            # <last stop>" captions, origin/destination
+                            # sentinel mirroring) - see finalize_timeline_
+                            # stops' own docstring for why this must not be
+                            # skipped just because the stops came from a
+                            # different provider this time.
+                            gps_tracking.finalize_timeline_stops(rr_corrected_stops)
+                            timeline_stops = rr_corrected_stops
+                            position = gps_tracking.position_from_stops(
+                                train_number, rr_corrected_stops,
+                                train_name=position.train_name, status_note=position.status_note,
+                            )
+                            date_ddmmyyyy = original_requested_date_str
+                            date_corrected_via_railradar = True
+                payload["date"] = date_ddmmyyyy
+
                 distance_km, route_progress_ratio = _distance_and_progress_from_route(
                     train_info_data, source or position.current_station_code
                 )
@@ -5957,7 +6034,14 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # real GPS fix wins below.
                 current_station_code_display = position.current_station_code
                 next_station_code_display = position.next_station_code
-                current_station_source = "railkit"
+                # Reflects which provider `position`/`timeline_stops` above
+                # actually came from — "railkit" normally, but the explicit-
+                # date correction pass further up can have already swapped
+                # both in for a RailRadar-date-verified run instead (see
+                # date_corrected_via_railradar there). Set here, before the
+                # segment_info override below gets a chance to relabel it
+                # again for the live-GPS-confirmed case specifically.
+                current_station_source = "railradar_date_corrected" if date_corrected_via_railradar else "railkit"
                 # BUGFIX (reported twice: app's live position lagged well
                 # behind RailRadar's OWN live page for the exact same
                 # train, e.g. RailRadar showing the train at Ghanapur while
@@ -6004,7 +6088,19 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 rr_code = _norm_code(segment_info.get("station_code"))
                 rr_is_actual = segment_info.get("is_actual_position")
                 current_code_norm = _norm_code(position.current_station_code)
-                if rr_code and rr_code != current_code_norm:
+                # GUARD: segment_info above is fetched via RailRadar's
+                # BLANK-date auto-detect (get_segment_progress never passes
+                # a date), which is exactly the "guess which of two
+                # overlapping runs" behavior round 18 already proved
+                # unreliable for a long-journey daily train (see
+                # date_corrected_via_railradar's own comment + commit
+                # be544d8). The forward_progress check below offers some
+                # protection either way, but once this poll's position has
+                # already been explicitly date-verified (not guessed), an
+                # unverified auto-detected reading has no business
+                # overriding it - skip this override entirely in that case
+                # rather than lean on forward_progress alone to catch it.
+                if rr_code and rr_code != current_code_norm and not date_corrected_via_railradar:
                     rr_entry = next((s for s in timeline_json if _norm_code(s.get("code")) == rr_code), None)
                     rr_name = rr_entry["name"] if rr_entry else (gps_tracking._lookup_station(rr_code) or {}).get("name")
                     forward_progress = False
@@ -6080,8 +6176,16 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # "current station" pointer), so it also directly feeds a
                 # fresh distance_delta_speed reading below on every poll
                 # instead of only when RailKit itself advances stations.
+                # GUARD: segment_info's segment_progress fraction comes from
+                # RailRadar's blank-date auto-detect (same ambiguous-run risk
+                # as the current-station override above) - once this poll's
+                # station/day has been explicitly date-verified instead of
+                # guessed, that unverified fraction doesn't necessarily
+                # belong to the verified run's current segment, so it's
+                # skipped here too rather than blending a possibly-wrong-run
+                # fraction onto the two real, correctly-identified anchors.
                 interp_distance_km, interp_lat, interp_lng = gps_tracking.interpolate_live_position(
-                    timeline_json, segment_info.get("segment_progress")
+                    timeline_json, segment_info.get("segment_progress") if not date_corrected_via_railradar else None
                 )
                 if interp_distance_km is not None:
                     current_position_distance_km = interp_distance_km

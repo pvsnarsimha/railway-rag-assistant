@@ -264,6 +264,71 @@ def parse_live_position(train_number: str, track_data: dict, train_info_data: di
     )
 
 
+def position_from_stops(train_number: str, stops, train_name: Optional[str] = None,
+                         status_note: Optional[str] = None) -> LivePosition:
+    """Builds a LivePosition directly from an already-resolved list of
+    TimelineStop objects, instead of parse_live_position's raw-RailKit-JSON
+    parse. Both parse_full_timeline (RailKit) AND railradar_fallback.
+    fetch_railradar_timeline (RailRadar) already produce the SAME
+    TimelineStop shape (see that function's own docstring), so this works
+    on a corrected stop list from either provider without caring which one
+    it came from.
+
+    NEEDED FOR: app.py's ws_track_train explicit-date correction path. When
+    RailKit is confirmed to have ignored an explicit date (see the
+    self-correcting anchor pass and date_reliability_warning logic there)
+    and a RailRadar date-scoped re-fetch has been independently VERIFIED to
+    have actually honored it (RailRadar's own resolved startDate for that
+    exact request matches what was asked — see railradar_fallback.
+    get_real_journey_start_date's date_ddmmyyyy param), the corrected stop
+    list becomes the new source of truth for the running-status display —
+    but without this, the headline "current station"/delay/ETA (driven by
+    LivePosition, not the stop list) would stay anchored to RailKit's wrong
+    run while only the list underneath got corrected, showing two
+    disagreeing positions on the same screen.
+
+    Mirrors parse_live_position's own real logic — current station, then
+    its real delay from its own arrival/departure timing, then the first
+    upcoming stop after it — just reading it off parsed TimelineStop
+    objects instead of raw provider JSON, since a corrected stop list is
+    the same shape whichever provider it came from.
+    """
+    current = next((s for s in stops if s.status == "current"), None)
+    if current is None:
+        # No live "current" pointer in the corrected data (the requested
+        # day's run hasn't started yet, or has already finished) - fall
+        # back to the last "passed" stop, same "last real entry is ground
+        # truth" convention used elsewhere in this app (e.g. the frontend's
+        # scrollToLivePositionOnce fallback).
+        passed = [s for s in stops if s.status == "passed"]
+        current = passed[-1] if passed else None
+
+    if current is None:
+        return LivePosition(train_number=train_number, train_name=train_name, status_note=status_note)
+
+    delay_minutes = current.departure.delay_minutes
+    if delay_minutes is None:
+        delay_minutes = current.arrival.delay_minutes
+
+    current_idx = stops.index(current)
+    next_stop = next((s for s in stops[current_idx + 1:] if s.status == "upcoming"), None)
+
+    position_source = {
+        "provider": "provider",
+        "fallback_table": "estimated_from_last_station",
+        "interpolated": "interpolated_on_route",
+    }.get(current.coordinates_from, "unavailable")
+
+    return LivePosition(
+        train_number=train_number, train_name=train_name, status_note=status_note,
+        current_station_code=current.code, current_station_name=current.name,
+        next_station_code=next_stop.code if next_stop else None,
+        next_station_name=next_stop.name if next_stop else None,
+        delay_minutes=delay_minutes, lat=current.lat, lng=current.lng,
+        position_source=position_source, raw={},
+    )
+
+
 def _first_present_nested(d: dict, keys, default=None):
     """Same idea as _first_present but tolerant of the value being 0/False
     (only None/"" are treated as absent) - times like "00:00" are valid."""
@@ -445,42 +510,42 @@ def parse_full_timeline(track_data: dict, train_info_data: dict = None):
             departure=_parse_timing(point.get("departure")),
         ))
 
-    # Small stations RailKit doesn't give a direct coordinate for still get
-    # a real position along the route line, interpolated between the
-    # nearest two stops that DO have one - see _interpolate_missing_coordinates.
+    finalize_timeline_stops(stops)
+    return stops
+
+
+def finalize_timeline_stops(stops) -> None:
+    """The shared enrichment pass every raw stop list needs before it's fit
+    to display or feed the rest of the pipeline — factored out of
+    parse_full_timeline so railradar_fallback.fetch_railradar_timeline's
+    own stop list (used as-is by app.py's explicit-date correction path
+    when RailKit is confirmed to have ignored an explicit date — see
+    date_corrected_via_railradar there) gets the SAME real-data enrichment
+    RailKit's own timeline always got, not a degraded version of it just
+    because it came from a different provider. Mutates `stops` in place;
+    returns nothing, same convention as the three helpers it calls.
+
+    Small stations without a direct coordinate/distance still get a real
+    position/figure interpolated along the route between the nearest two
+    stops that DO have one (never a flat guess, never extrapolated past a
+    known anchor), every small passing/intermediate stop gets a RailYatri-
+    style "N km from <last reporting station>" caption, and the origin's
+    non-existent "arrival" / destination's non-existent "departure" (RailKit
+    sends literal "SRC"/"DSTN" sentinels for these; RailRadar just leaves
+    them empty — _timing_has_no_real_event treats both the same way) get
+    mirrored from that same halt's one real recorded event, so every
+    downstream consumer just sees a normal real timing either way.
+    """
     _interpolate_missing_coordinates(stops)
-    # SAME idea, for distance_km: any stop still missing one after the
-    # static-route fallback above (i.e. it's not on the live timeline OR
-    # the static commercial route with a distance) gets a genuine linear
-    # estimate between the nearest earlier/later stops that DO have a real
-    # distance_km — anchored to real numbers on both sides, never a flat
-    # guess, and never extrapolated past the last known anchor.
     _interpolate_missing_distance_km(stops)
-    # RailYatri-style "N km from <last reporting station>" for every small
-    # passing/intermediate stop - see _annotate_distance_since_last_stoppage.
     _annotate_distance_since_last_stoppage(stops)
-    # BUGFIX: RailKit returns a literal sentinel word instead of a real
-    # clock time for the one event a station genuinely doesn't have -
-    # "SRC" for the ORIGIN's arrival (the train starts there, it never
-    # "arrives") and "DSTN" for the DESTINATION's departure (the train
-    # ends there, it never "departs" again). That sentinel was passed
-    # straight through into scheduled/expected/actual untouched, so the
-    # UI rendered it raw ("Exp DSTN Act DSTN") as if it were a real,
-    # unconfirmed time - reading as broken data rather than what it
-    # actually means. The origin and destination each genuinely only have
-    # ONE real clock event (the single arrival+departure pair recorded
-    # for that halt), so mirroring that one real event onto the
-    # placeholder side is honest, matches how a station board actually
-    # treats it, and means every downstream consumer (delay badges,
-    # formatting) just sees a normal real timing - no sentinel-specific
-    # handling needed anywhere else in the app.
     if stops:
         # ROBUSTNESS: use the first/last REPORTING (kind != "intermediate")
-        # stop rather than stops[0]/stops[-1] - RailKit's raw timeline can
-        # carry a small passing/signalling point before the real origin or
-        # after the real destination's own entry, which would otherwise
-        # make this mirror check (and set) the wrong stop entirely, leaving
-        # the actual origin/destination halt's sentinel untouched.
+        # stop rather than stops[0]/stops[-1] - the raw timeline can carry a
+        # small passing/signalling point before the real origin or after the
+        # real destination's own entry, which would otherwise make this
+        # mirror check (and set) the wrong stop entirely, leaving the actual
+        # origin/destination halt's sentinel untouched.
         reporting_stops = [s for s in stops if s.kind != "intermediate"]
         origin = reporting_stops[0] if reporting_stops else stops[0]
         if _timing_has_no_real_event(origin.arrival) and not _timing_has_no_real_event(origin.departure):
@@ -494,7 +559,6 @@ def parse_full_timeline(track_data: dict, train_info_data: dict = None):
                 scheduled=destination.arrival.scheduled, expected=destination.arrival.expected,
                 actual=destination.arrival.actual, delay_minutes=destination.arrival.delay_minutes,
             )
-    return stops
 
 
 def _timing_has_no_real_event(timing: StopTiming) -> bool:

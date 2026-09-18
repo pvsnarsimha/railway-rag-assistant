@@ -284,7 +284,7 @@ def _iso_to_datetime(raw: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def get_real_journey_start_date(train_number: str) -> Optional[str]:
+def get_real_journey_start_date(train_number: str, date_ddmmyyyy: Optional[str] = None) -> Optional[str]:
     """
     BUGFIX SUPPORT ("long journey trains ... it should [not] start day 1 as
     today when no date is given"): the real DD-MM-YYYY (this app's own
@@ -308,14 +308,23 @@ def get_real_journey_start_date(train_number: str) -> Optional[str]:
     Resolving the REAL start date here (once, before the RailKit call) and
     using THAT instead of "today" fixes it at the source.
 
-    Returns None (never a guess) if RailRadar isn't configured, the call
-    fails, or the response has no real startDate (e.g. the train hasn't
-    started running yet today) — callers must keep their own existing
-    "default to today" fallback for that case; this is a best-effort
-    improvement layered on top, not a stricter requirement.
+    `date_ddmmyyyy`, optional: also lets a caller VERIFY a specific
+    explicit date, not just auto-detect the blank-date default — passed
+    straight through to RailRadar's own `date` param, documented as
+    "Journey start date" (not a hint/filter — a real per-run selector,
+    unlike RailKit's `date`, which round-18/round-22 evidence showed just
+    relabels whichever run RailKit is already attached to; see app.py's
+    ws_track_train comment for the full history). When given, this
+    returns RailRadar's own resolved startDate for THAT specific request —
+    compare it against the date_ddmmyyyy you passed in: if they match,
+    RailRadar genuinely found and returned the requested run, not a guess.
+    If they don't match (or this returns None), RailRadar couldn't
+    disambiguate it either — the caller must not treat the result as
+    verified. Only ever changes what's passed to `_fetch_raw`; the blank-
+    date auto-detect behavior below is untouched when this stays None.
     """
     try:
-        data = _fetch_raw(train_number)
+        data = _fetch_raw(train_number, _ddmmyyyy_to_iso(date_ddmmyyyy))
     except RailRadarFallbackError:
         return None
     start_date_iso = data.get("startDate")
