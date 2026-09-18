@@ -166,11 +166,39 @@ function firstRealDatedStop(timelineArr) {
   }
   return null;
 }
+// BUGFIX ("if I choose 17th sept then day 1 17th sept day 2 18th sept day 3
+// 19th sept but in my app it is completely reverse"): this used to trust an
+// EXPLICIT trackDateInput verbatim as Day 1's calendar anchor, only falling
+// back to the self-consistent real-timestamp derivation below when the date
+// field was left blank. That was built on the same assumption rounds 24-26
+// (see backend/app.py's ws_track_train) already disproved for the blank-date
+// case and had to fix there instead: RailKit cannot actually select a
+// DIFFERENT run by date - whatever date is requested, it returns whichever
+// run it's currently live-attached to. So typing "17-09-2026" for a train
+// whose real live-attached run genuinely departed "18-09-2026" doesn't make
+// RailKit switch runs; it just means every REAL dated timestamp RailKit
+// sends back (the same ones dayNumberForEntry below reads for each row) is
+// stamped with the true 18-Sep/19-Sep run, while this function alone kept
+// insisting Day 1 was 17-Sep - two different sources of truth for what
+// should be the same fact, exactly the bug the "Day1: 17 Sept" vs. "16-Sep"
+// mismatch further up this file was already fixed for once before.
+//
+// REAL FIX: always derive Day 1 the same self-consistent way regardless of
+// whether the user typed a date - from the FIRST real dated timestamp
+// RailKit itself sent, minus that same stop's own real day number. This can
+// never disagree with dayNumberForEntry's per-row math below, because both
+// read the identical real field. Only when there's no real dated stop at
+// all yet (nothing to derive from) does this fall back to trusting what the
+// user typed, and only then to today - same honest-fallback order as
+// before, just no longer skipped whenever real data IS available.
 function resolveJourneyStartDate(trackDateInput, timelineArr) {
-  if ((trackDateInput || "").trim()) return parseTrackDateInput(trackDateInput);
   const arr = Array.isArray(timelineArr) ? timelineArr : [];
   const found = firstRealDatedStop(arr);
-  if (!found) return new Date(); // no real dated timestamp anywhere yet - today is the best honest fallback
+  if (!found) {
+    // no real dated timestamp anywhere yet - trust what the user typed if
+    // they typed something, otherwise today is the best honest fallback
+    return (trackDateInput || "").trim() ? parseTrackDateInput(trackDateInput) : new Date();
+  }
   const realDayNumber = journeyDayNumber(found.stop);
   const anchor = new Date(found.date);
   anchor.setDate(anchor.getDate() - (realDayNumber - 1));
