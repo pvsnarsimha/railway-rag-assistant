@@ -6826,6 +6826,33 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 except Exception:
                     pass
 
+                # DIAGNOSTIC (temporary): reported live - "Coordinates: —,
+                # Position source: unavailable" persists for minutes across
+                # several different current stations on ONE open /ws/track
+                # connection for train 20834, WHILE a fresh one-off call to
+                # /api/advanced/live-position-debug/{train} for the exact
+                # same train, at the exact same time, resolves a real
+                # lat/lng/position_source every time. Since that debug
+                # endpoint is supposed to mirror this exact block's own
+                # logic (see its own docstring), the two should never
+                # disagree - this print exposes, poll by poll, straight from
+                # Render's live log stream, which of the three tiers this
+                # ACTUAL long-running connection is landing on (or failing
+                # all three of) for this exact payload, without needing a
+                # second debug endpoint call that might compute on
+                # different (fresher) state than what this connection is
+                # actually holding. Safe to remove once the real divergence
+                # is found - this changes no behavior, only visibility.
+                print(
+                    f"[coord_debug] train={train_number} "
+                    f"interp_lat={interp_lat!r} "
+                    f"current_timeline_entry_code={(current_timeline_entry or {}).get('code')!r} "
+                    f"current_timeline_entry_lat={(current_timeline_entry or {}).get('lat')!r} "
+                    f"position_lat={position.lat!r} "
+                    f"position_source_raw={position.position_source!r} "
+                    f"segment_progress={segment_info.get('segment_progress')!r} "
+                    f"date_corrected_via_railradar={date_corrected_via_railradar!r}"
+                )
                 payload.update({
                     # FEATURE: prefer the RailRadar segment-progress
                     # interpolated lat/lng for the map marker when
