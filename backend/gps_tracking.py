@@ -281,6 +281,7 @@ def parse_live_position(train_number: str, track_data: dict, train_info_data: di
                 "provider": "provider",
                 "fallback_table": "estimated_from_last_station",
                 "interpolated": "interpolated_on_route",
+                "nearest_known_station": "estimated_from_nearest_station",
             }.get(stn.coordinates_from, "unavailable")
             break
 
@@ -346,6 +347,7 @@ def position_from_stops(train_number: str, stops, train_name: Optional[str] = No
         "provider": "provider",
         "fallback_table": "estimated_from_last_station",
         "interpolated": "interpolated_on_route",
+        "nearest_known_station": "estimated_from_nearest_station",
     }.get(current.coordinates_from, "unavailable")
 
     return LivePosition(
@@ -389,7 +391,7 @@ class TimelineStop:
     status: str  # "passed" | "current" | "upcoming"
     lat: Optional[float]
     lng: Optional[float]
-    coordinates_from: str  # "provider" | "fallback_table" | "interpolated" | "none"
+    coordinates_from: str  # "provider" | "fallback_table" | "interpolated" | "nearest_known_station" | "none"
     distance_km: Optional[str]
     halt_minutes: Optional[str]
     day: Optional[str]
@@ -1402,10 +1404,25 @@ def _interpolate_missing_coordinates(stops) -> None:
     list. This is a genuine geometric estimate anchored to two real
     coordinates on the train's real route, not a guess - and it's labelled
     "interpolated" (never "provider") so callers can always tell the
-    difference. Stops before the first, or after the last, known
-    coordinate are deliberately left unavailable rather than extrapolated -
-    extrapolating past the last real anchor point has no route line to
-    follow and would be a genuine guess.
+    difference.
+
+    BUGFIX ("Coordinates: —, Position source: unavailable" reported for
+    train 20833 while genuinely at a small station, "Intekanne", not in
+    our ~8,700-entry static table): a stop with NO known-coordinate
+    anchor on one side - before the first, or after the last, station in
+    THIS SPECIFIC response that resolved a coordinate - used to be left
+    entirely unavailable rather than extrapolated, since there's no real
+    route line to interpolate along without both ends. That's the right
+    call when it's a genuine geometric extrapolation (no anchor at all on
+    one side), but it meant the small handful of intermediate stations
+    RailKit's timeline sometimes returns right at the very edge of what
+    it also gives coordinates for - most often the CURRENT station, the
+    one that matters most - went completely blank instead of getting the
+    single closest real station's own real coordinate, which is still a
+    far better position than nothing for a small station that's at most
+    a few km from it. Labelled "nearest_known_station" (mapped to
+    position_source "estimated_from_nearest_station" below) so it's never
+    confused with the more precise two-sided interpolation above.
     """
     known_idx = [i for i, s in enumerate(stops) if s.lat is not None]
     if not known_idx:
@@ -1416,24 +1433,27 @@ def _interpolate_missing_coordinates(stops) -> None:
             continue
         earlier = [j for j in known_idx if j < i]
         later = [j for j in known_idx if j > i]
-        if not earlier or not later:
-            continue  # can't interpolate off the edge of known data
-        prev_i, next_i = earlier[-1], later[0]
-        prev_s, next_s = stops[prev_i], stops[next_i]
+        if earlier and later:
+            prev_i, next_i = earlier[-1], later[0]
+            prev_s, next_s = stops[prev_i], stops[next_i]
 
-        d_prev = _distance_km_value(prev_s.distance_km)
-        d_cur = _distance_km_value(s.distance_km)
-        d_next = _distance_km_value(next_s.distance_km)
-        if d_prev is not None and d_cur is not None and d_next is not None and d_next != d_prev:
-            frac = (d_cur - d_prev) / (d_next - d_prev)
-        else:
-            span = next_i - prev_i
-            frac = (i - prev_i) / span if span else 0.5
-        frac = max(0.0, min(1.0, frac))
+            d_prev = _distance_km_value(prev_s.distance_km)
+            d_cur = _distance_km_value(s.distance_km)
+            d_next = _distance_km_value(next_s.distance_km)
+            if d_prev is not None and d_cur is not None and d_next is not None and d_next != d_prev:
+                frac = (d_cur - d_prev) / (d_next - d_prev)
+            else:
+                span = next_i - prev_i
+                frac = (i - prev_i) / span if span else 0.5
+            frac = max(0.0, min(1.0, frac))
 
-        s.lat = prev_s.lat + (next_s.lat - prev_s.lat) * frac
-        s.lng = prev_s.lng + (next_s.lng - prev_s.lng) * frac
-        s.coordinates_from = "interpolated"
+            s.lat = prev_s.lat + (next_s.lat - prev_s.lat) * frac
+            s.lng = prev_s.lng + (next_s.lng - prev_s.lng) * frac
+            s.coordinates_from = "interpolated"
+        elif earlier or later:
+            nearest_s = stops[earlier[-1] if earlier else later[0]]
+            s.lat, s.lng = nearest_s.lat, nearest_s.lng
+            s.coordinates_from = "nearest_known_station"
 
 
 def offline_station_pair_map(source_code: Optional[str], dest_code: Optional[str]) -> Optional[dict]:
