@@ -2109,9 +2109,31 @@ def _sync_station_delay_history(
     live feed itself.
     """
     record_date = (date_ddmmyyyy or "").strip() or datetime.now().strftime("%d-%m-%Y")
+    # BUGFIX: sequence_index used to be `idx` - this stop's raw position in
+    # timeline_json, which also contains "intermediate" GPS-ping points that
+    # accumulate as a journey progresses (more of them get recorded earlier
+    # in the list on later polls than on earlier ones did). Since this same
+    # reporting station's row gets upserted on EVERY poll it's seen on (the
+    # UNIQUE(train_number, date, station_code) constraint in
+    # delay_accuracy_store.py already guarantees it stays ONE row, never a
+    # duplicate), its persisted sequence_index silently drifted upward poll
+    # to poll purely from intermediate-point growth elsewhere in the list,
+    # not from anything about the station itself - the real-world symptom
+    # was the same single station logged with two different sequence_index
+    # values (and RailKit's own raw stationName casing flip-flopping too,
+    # e.g. "Khammam" vs "KHAMMAM") across successive WRITE log lines.
+    # `reporting_rank` instead counts only non-intermediate stops - a
+    # train's real reporting/stoppage stations are fixed for the whole
+    # journey, so this rank is the same every poll no matter how many
+    # intermediate GPS pings have shown up in the meantime, keeping the
+    # predicted-vs-actual chart's route ordering (get_run_records() sorts by
+    # this column) stable rather than drifting mid-journey.
+    reporting_rank = 0
     for idx, stop in enumerate(timeline_json):
         if stop.get("kind") == "intermediate":
             continue
+        stop_rank = reporting_rank
+        reporting_rank += 1
         code = (stop.get("code") or "").strip().upper()
         if not code:
             continue
@@ -2186,7 +2208,7 @@ def _sync_station_delay_history(
                         predicted_delay_confidence=snapshot.get("predicted_delay_confidence"),
                         predicted_delay_locked=bool(snapshot.get("predicted_delay_locked")),
                         predicted_delay_grounded_via=snapshot.get("predicted_delay_grounded_via"),
-                        sequence_index=idx,
+                        sequence_index=stop_rank,
                         feature_values=snapshot.get("ml_feature_values"),
                     )
                 except Exception:
@@ -2233,7 +2255,7 @@ def _sync_station_delay_history(
                 actual_delay_minutes=actual_delay,
                 scheduled_time=arrival.get("expected") or arrival.get("scheduled"),
                 actual_time=arrival.get("actual"),
-                sequence_index=idx,
+                sequence_index=stop_rank,
                 feature_values=stop.get("final_ml_feature_values"),
             )
         except Exception:
