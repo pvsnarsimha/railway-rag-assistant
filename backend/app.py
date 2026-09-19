@@ -6289,8 +6289,31 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # interpolate_live_position) — shares the same underlying
                 # RailRadar response as live_gps_speed above (cached), so
                 # this costs no extra RailRadar call.
+                #
+                # BUGFIX ("but it should use railradar segment progress also
+                # right" — confirmed via last-ws-poll-debug on train 20834:
+                # segment_progress came back a real 0.24 while
+                # date_corrected_via_railradar was true, but interp_lat/lng
+                # stayed null because the interpolation guard further below
+                # unconditionally discarded ANY segment_progress once that
+                # flag was set): get_segment_progress used to always call
+                # RailRadar with a blank date (auto-detect), which is the
+                # ambiguous-run risk that guard existed to protect against.
+                # Now that get_segment_progress can take an explicit date
+                # (see its own docstring), passing the SAME date this poll
+                # already independently verified via get_real_journey_start_
+                # date (that's exactly what date_corrected_via_railradar
+                # means) makes segment_progress itself trustworthy for that
+                # verified run, instead of an unverified guess — so the
+                # blanket disable further below is no longer needed. Only
+                # ever passes a date once date_corrected_via_railradar is
+                # already true; ordinary live polling still omits it and
+                # behaves exactly as before.
                 try:
-                    segment_info = await asyncio.to_thread(railradar_fallback.get_segment_progress, train_number)
+                    segment_info = await asyncio.to_thread(
+                        railradar_fallback.get_segment_progress, train_number,
+                        date_ddmmyyyy if date_corrected_via_railradar else None,
+                    )
                 except Exception:
                     segment_info = {"segment_progress": None}
 
@@ -6542,16 +6565,16 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # "current station" pointer), so it also directly feeds a
                 # fresh distance_delta_speed reading below on every poll
                 # instead of only when RailKit itself advances stations.
-                # GUARD: segment_info's segment_progress fraction comes from
-                # RailRadar's blank-date auto-detect (same ambiguous-run risk
-                # as the current-station override above) - once this poll's
-                # station/day has been explicitly date-verified instead of
-                # guessed, that unverified fraction doesn't necessarily
-                # belong to the verified run's current segment, so it's
-                # skipped here too rather than blending a possibly-wrong-run
-                # fraction onto the two real, correctly-identified anchors.
+                # BUGFIX (see the BUGFIX comment on segment_info's own fetch
+                # above): this used to unconditionally drop segment_progress
+                # whenever date_corrected_via_railradar was true, since a
+                # blank-date auto-detected fraction couldn't be trusted to
+                # belong to the same run this poll had already verified.
+                # segment_info is now fetched WITH that verified date in
+                # exactly that case, so its segment_progress already belongs
+                # to the correct run and no longer needs discarding here.
                 interp_distance_km, interp_lat, interp_lng = gps_tracking.interpolate_live_position(
-                    timeline_json, segment_info.get("segment_progress") if not date_corrected_via_railradar else None
+                    timeline_json, segment_info.get("segment_progress")
                 )
                 if interp_distance_km is not None:
                     current_position_distance_km = interp_distance_km

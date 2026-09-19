@@ -406,7 +406,7 @@ def get_live_speed_kmph(train_number: str) -> "tuple[Optional[float], Optional[s
     return speed, "RailRadar live GPS speed reading (currentLocation.speedKmh), not a distance/time calculation"
 
 
-def get_segment_progress(train_number: str) -> dict:
+def get_segment_progress(train_number: str, date_ddmmyyyy: Optional[str] = None) -> dict:
     """
     FEATURE: smooth position/ETA between real station-crossing updates.
     RailKit's own "current station" only flips when the train actually
@@ -421,6 +421,20 @@ def get_segment_progress(train_number: str) -> dict:
     smoothly poll-to-poll instead of only jumping when RailKit's own
     "current station" pointer advances.
 
+    `date_ddmmyyyy`, optional (added for the date_corrected_via_railradar
+    case in app.py's ws_track_train — see the BUGFIX there): same real
+    per-run date selector fetch_railradar_timeline/get_real_journey_start_
+    date already use, passed straight through to RailRadar's own `date`
+    query param instead of always auto-detecting. Omit it (the default)
+    for ordinary live polling of today's running train, where blank-date
+    auto-detect is exactly what's wanted and this behaves exactly as
+    before. Pass the SAME date a caller already independently confirmed
+    via get_real_journey_start_date to get segment_progress for that exact
+    verified run instead of whichever run auto-detect happens to return -
+    the two calls share _fetch_raw's own cache, so this is normally free
+    (no extra RailRadar request) when called moments after that
+    confirmation, as ws_track_train does.
+
     Returns a dict (all keys None if unavailable/failed — never guessed):
       {"segment_progress": float|None, "station_code": str|None,
        "sequence": int|None, "is_actual_position": bool|None,
@@ -431,7 +445,7 @@ def get_segment_progress(train_number: str) -> dict:
         "is_actual_position": None, "bearing_degrees": None, "note": None,
     }
     try:
-        data = _fetch_raw(train_number)
+        data = _fetch_raw(train_number, _ddmmyyyy_to_iso(date_ddmmyyyy))
     except RailRadarFallbackError:
         return empty
 
