@@ -4229,9 +4229,34 @@ def api_coach_composition(train_number: str, station: Optional[str] = None):
 # =============================================================================
 @app.get("/api/advanced/live-position-debug/{train_number}")
 def api_live_position_debug(train_number: str, date: Optional[str] = None):
+    """
+    RESTORE NOTE: this endpoint had briefly regressed to an older version
+    (no force-refresh, none of the diagnostic fields below) - a full-file
+    copy of app.py delivered for the unrelated "Ghatkesar coordinates"
+    fix (see ws_track_train's own BUGFIX comment further down) was built
+    from a checkout that predated this endpoint's own force-refresh +
+    diagnostics work, and got pasted over this file wholesale instead of
+    merged, silently reverting this function back to its pre-diagnostic
+    state even though the git history still shows the commit that added
+    them. Restored here, AND updated so effective_lat_lng_position_source_
+    in_ws_payload mirrors ws_track_train's CURRENT real fallback chain
+    (interp_lat/lng -> current_timeline_entry's own resolved coordinate ->
+    position.lat/lng) instead of the two-tier version this endpoint was
+    originally written against, before that third tier existed.
+    """
     date_ddmmyyyy = date or datetime.now().strftime("%d-%m-%Y")
+    # BUGFIX (this endpoint was reporting an old, cached poll — e.g. still
+    # showing WANGAPALLI as current well after the live /ws/track loop and
+    # the mobile app had both already moved on to GHATKESAR — because it
+    # never bypassed get_live_train_status's 45s cache the way the live
+    # loop does on a fresh page load. That meant this debug endpoint could
+    # never actually reproduce the specific poll a screenshot was taken
+    # against, only whatever the LAST poll happened to be. Forced fresh
+    # here, same as the live loop's own first-connect poll, so hitting this
+    # URL right when "Coordinates: —" is on screen reflects that exact
+    # moment, not a stale one.
     try:
-        live_data = railway_api.get_live_train_status(train_number, date_ddmmyyyy)
+        live_data = railway_api.get_live_train_status(train_number, date_ddmmyyyy, _force_refresh=True)
     except railway_api.RailwayAPIError as e:
         return {"train_number": train_number, "ok": False, "error": f"RailKit live status: {e}"}
     try:
@@ -4243,6 +4268,15 @@ def api_live_position_debug(train_number: str, date: Optional[str] = None):
     timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
     timeline_json = gps_tracking.timeline_to_json(timeline_stops)
     segment_info = railradar_fallback.get_segment_progress(train_number)
+
+    # DIAGNOSTIC: the raw RailKit stationCode for whichever timeline entry
+    # is genuinely "current" in THIS poll, straight from the untouched
+    # provider response — this is what every earlier round of this bug
+    # traced back to being blank even when the station's name and real
+    # coordinate were available elsewhere.
+    _payload_for_raw = live_data.get("data", live_data) if isinstance(live_data, dict) else {}
+    _raw_timeline = _payload_for_raw.get("timeline") or []
+    _raw_current_point = next((p for p in _raw_timeline if p.get("status") == "current"), None)
 
     def _norm_code(c):
         return c.strip().upper() if isinstance(c, str) else c
@@ -4265,6 +4299,33 @@ def api_live_position_debug(train_number: str, date: Optional[str] = None):
         and rr_entry is not None and forward_progress
     )
 
+    # From here on, mirror ws_track_train's own real sequence exactly (see
+    # that function's matching BUGFIX comments), on a throwaway copy of
+    # timeline_json's statuses, so every field below reflects what the
+    # live /ws/track loop would ACTUALLY send for this poll, override
+    # included, not just RailKit's raw pre-override reading.
+    _sim_timeline_json = [dict(s) for s in timeline_json]
+    if override_would_fire:
+        for i, s in enumerate(_sim_timeline_json):
+            s["status"] = "passed" if i < rr_idx else ("current" if i == rr_idx else "upcoming")
+
+    current_timeline_entry = next((s for s in _sim_timeline_json if s.get("status") == "current"), None)
+    interp_distance_km, interp_lat, interp_lng = gps_tracking.interpolate_live_position(
+        _sim_timeline_json, segment_info.get("segment_progress")
+    )
+    effective_lat = interp_lat if interp_lat is not None else (
+        current_timeline_entry.get("lat") if current_timeline_entry else position.lat
+    )
+    effective_lng = interp_lng if interp_lng is not None else (
+        current_timeline_entry.get("lng") if current_timeline_entry else position.lng
+    )
+    effective_position_source = (
+        "railradar_segment_progress" if interp_lat is not None
+        else gps_tracking.position_source_label(current_timeline_entry.get("coordinates_from"))
+        if current_timeline_entry and current_timeline_entry.get("lat") is not None
+        else position.position_source
+    )
+
     return {
         "train_number": train_number,
         "ok": True,
@@ -4277,6 +4338,13 @@ def api_live_position_debug(train_number: str, date: Optional[str] = None):
              "distance_km": current_entry.get("distance_km"), "index": current_idx}
             if current_entry else None
         ),
+        # DIAGNOSTIC: the untouched RailKit field, before any of this app's
+        # own fallback/normalization logic runs on it. A blank/null/"?"
+        # here (while raw_current_point_name is real) is the exact root
+        # cause behind every earlier round of "Coordinates: —" - confirms
+        # or rules it out directly, instead of inferring it indirectly.
+        "raw_current_point_station_code": (_raw_current_point or {}).get("stationCode"),
+        "raw_current_point_station_name": (_raw_current_point or {}).get("stationName"),
         "railradar_segment_info_raw": segment_info,
         "railradar_station_resolves_in_timeline": bool(rr_entry),
         "railradar_station_matched_entry": (
@@ -4285,13 +4353,51 @@ def api_live_position_debug(train_number: str, date: Optional[str] = None):
         ),
         "forward_progress": forward_progress,
         "override_would_fire_this_poll": override_would_fire,
+        # DIAGNOSTIC: exactly what parse_live_position resolved, BEFORE the
+        # override above - the station RailKit itself thinks is current,
+        # not necessarily what gets displayed once RailRadar's own reading
+        # wins (see current_effective_timeline_entry / effective_* below).
+        "resolved_position": {
+            "lat": position.lat, "lng": position.lng, "position_source": position.position_source,
+        },
+        # DIAGNOSTIC: the stop current_timeline_entry actually resolved to
+        # AFTER folding in the override above (if it fired) - this is the
+        # SAME "current" stop the app's headline current_station text is
+        # built from, together with its own already-resolved coordinate
+        # (real provider fix, static table, or route interpolation).
+        "current_effective_timeline_entry": (
+            {"code": current_timeline_entry.get("code"), "name": current_timeline_entry.get("name"),
+             "lat": current_timeline_entry.get("lat"), "lng": current_timeline_entry.get("lng"),
+             "coordinates_from": current_timeline_entry.get("coordinates_from")}
+            if current_timeline_entry else None
+        ),
+        # DIAGNOSTIC: exactly what the live loop's RailRadar segment-progress
+        # interpolation would compute - this WINS over everything else
+        # whenever interp_lat is not None (see effective_* below).
+        "interpolated_position": {
+            "distance_km": interp_distance_km, "lat": interp_lat, "lng": interp_lng,
+        },
+        # DIAGNOSTIC: exactly what the mobile/web app's Coordinates/Position
+        # source fields would show for this precise poll - computed the
+        # SAME three-tier way ws_track_train's own payload.update() does:
+        # RailRadar segment-progress interpolation first, then current_
+        # effective_timeline_entry's own already-resolved coordinate, then
+        # RailKit's raw resolved_position as the last resort.
+        "effective_lat_lng_position_source_in_ws_payload": {
+            "lat": effective_lat, "lng": effective_lng, "position_source": effective_position_source,
+        },
         "note": (
             "override_would_fire_this_poll mirrors the live /ws/track loop's CURRENT logic: "
             "RailRadar's station_code is trusted whenever it resolves to a real stop on this "
             "train's own real route (railradar_station_resolves_in_timeline) that is at or beyond "
             "RailKit's own current position (forward_progress) - is_actual_position is no longer a "
             "hard requirement (it was found to be frequently null even on valid reads), it's only "
-            "used to label current_station_source as confirmed vs unconfirmed in the actual payload."
+            "used to label current_station_source as confirmed vs unconfirmed in the actual payload. "
+            "effective_lat_lng_position_source_in_ws_payload is exactly what the app's Coordinates/"
+            "Position source fields would show for this exact poll - if that's real here but the app "
+            "still shows unavailable, the app itself is stale (see the WebSocket watchdog fix in "
+            "LiveTrackingScreen.web.js); if it's unavailable here too, this poll's real data "
+            "genuinely doesn't resolve yet on any tier."
         ),
     }
 
