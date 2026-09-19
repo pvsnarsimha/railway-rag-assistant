@@ -1530,7 +1530,13 @@ function NoHaltGroupRow({
         <TouchableOpacity onPress={onToggle} style={styles.noHaltToggleBody}>
           <Text style={styles.noHaltToggleText}>
             + {group.count} No-Halt station{group.count === 1 ? "" : "s"}
-            {group.distance_km != null ? ` (${group.distance_km} km)` : ""}
+            {/* BUGFIX (see the expanded sub-station row's own comment
+                below): this is the SPAN across the whole collapsed group
+                (last stop's distance_km minus first stop's, see _flush()
+                in group_timeline_for_display) — real, but easily misread
+                as a cumulative distance-from-origin figure the same way
+                the sub-station rows were. "span" makes that explicit. */}
+            {group.distance_km != null ? ` (${group.distance_km} km span)` : ""}
           </Text>
           <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={13} color={colors.primary} />
         </TouchableOpacity>
@@ -1553,33 +1559,24 @@ function NoHaltGroupRow({
                 {toDisplayCase(s.name)} <Text style={styles.tlCode}>({s.code})</Text>
                 <Text style={styles.timelineKind}>  · passing</Text>
               </Text>
-              {/* BUGFIX ("it is showing 707/720 km for [a station that also
-                  shows 90 km right here]" — train 20833): this figure is
-                  gps_tracking.py's own distance_since_last_stoppage_km —
-                  real km relative to the last REPORTING (halting) station
-                  before this one (Rajahmundry, say), NOT distance-from-
-                  origin — see finalize_timeline_stops' own docstring: every
-                  small passing/intermediate stop is meant to get a
-                  RailYatri-style "N km from <last reporting station>"
-                  caption. This was rendering the bare number alone with no
-                  "from <station>" qualifier, so it LOOKED exactly like the
-                  plain from-origin figure every other (halting) station's
-                  row shows via stop.distance_km (see TimelineStopRow's
-                  metaBits below) - hence reading as flatly contradicting the
-                  live callout's real cumulative "(N km covered so far)"
-                  figure directly underneath it on the current station's own
-                  row, when the two were never the same measurement to begin
-                  with. The plain (non-mobile) web frontend already renders
-                  this correctly (frontend/app.js's noHaltGroupRow: "N km
-                  past/before <station>") - this brings the mobile web
-                  screen's wording in line with it, using the same real
-                  last_reporting_station field already threaded through
-                  gps_tracking.timeline_to_json (s.last_reporting_station),
-                  just not previously rendered here. */}
-              {s.distance_since_last_stoppage_km != null && (
+              {/* BUGFIX ("707.2 km covered so far ... not a real
+                  cumulative distance from origin" — this row used to show
+                  ONLY distance_since_last_stoppage_km (e.g. "90 km") with a
+                  bare "km" label, indistinguishable from every OTHER "km"
+                  figure on this screen that IS cumulative-from-origin (the
+                  reporting-station rows, and the live callout's own "X km
+                  covered so far" just below on the current row) — even
+                  though this one deliberately means something smaller and
+                  more local: distance since the last HALTING station, not
+                  since origin. Both real numbers are now shown, each
+                  plainly labeled, so neither can be misread as the other. */}
+              {(s.distance_since_last_stoppage_km != null || s.distance_km != null) && (
                 <Text style={styles.tlMeta}>
-                  {Math.abs(s.distance_since_last_stoppage_km)} km {s.distance_since_last_stoppage_km >= 0 ? "past" : "before"}{" "}
-                  {s.last_reporting_station ? toDisplayCase(s.last_reporting_station) : "last stop"}
+                  {s.distance_since_last_stoppage_km != null
+                    ? `${s.distance_since_last_stoppage_km} km since ${group.from_station ? toDisplayCase(group.from_station) : "last stop"}`
+                    : null}
+                  {s.distance_since_last_stoppage_km != null && s.distance_km != null ? "  ·  " : ""}
+                  {s.distance_km != null ? `${s.distance_km} km from origin` : ""}
                 </Text>
               )}
               {current && (

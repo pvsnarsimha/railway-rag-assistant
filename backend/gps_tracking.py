@@ -1184,8 +1184,28 @@ def group_timeline_for_display(timeline_json: list) -> list:
       {"display_type": "no_halt_group", "count": N, "distance_km": <float|None>,
        "from_station": <name|None>, "to_station": <name|None>,
        "stations": [{"code","name","status","distance_since_last_stoppage_km",
-       "predicted_delay_minutes","predicted_delay_confidence","predicted_eta",
-       "distance_ahead_km"}, ...]}
+       "distance_km","predicted_delay_minutes","predicted_delay_confidence",
+       "predicted_eta","distance_ahead_km"}, ...]}
+
+    BUGFIX ("707.2 km covered so far ... not a real cumulative distance
+    from origin" — reported on train 20833's Eluru row, inside an expanded
+    "+N No-Halt stations" group): each sub-station here only ever carried
+    `distance_since_last_stoppage_km` — a genuine, real figure, but
+    deliberately scoped to "since the last HALTING station", not "since
+    origin" (see `_annotate_distance_since_last_stoppage`'s own docstring).
+    The mobile app's expanded-group row rendered that number under a bare
+    "km" label with nothing distinguishing it from every OTHER "km" figure
+    on the same screen (the reporting-station rows above/below it, and the
+    live-position callout's own "X km covered so far", which both use the
+    real cumulative `distance_km` instead) — so a small, correct, locally-
+    scoped number (e.g. 90 km since the last halt) sat right next to a
+    much larger, ALSO correct, cumulative one (e.g. 720.9 km since origin)
+    with no way to tell they answer different questions. Each sub-station's
+    own real cumulative `distance_km` (already computed for every stop by
+    parse_full_timeline/_interpolate_missing_distance_km — just never
+    carried through this grouping step before) is now included too, so the
+    frontend can label both real numbers plainly instead of only ever
+    showing the smaller, easily-misread one.
     """
     out = []
     pending = []
@@ -1213,6 +1233,13 @@ def group_timeline_for_display(timeline_json: list) -> list:
                  # were passed.
                  "status": p.get("status"),
                  "distance_since_last_stoppage_km": p.get("distance_since_last_stoppage_km"),
+                 # BUGFIX (see this function's own docstring): the real
+                 # cumulative-from-origin figure, same field/meaning as
+                 # every reporting station's own "distance_km" elsewhere on
+                 # this same screen — was missing here before, leaving the
+                 # frontend with only the smaller "since last halt" number
+                 # to show for every non-reporting station.
+                 "distance_km": p.get("distance_km"),
                  # FEATURE: per-station predicted delay/ETA/distance now
                  # computed for non-reporting points too (see app.py's
                  # _predict_delay_per_reporting_station) — carried through
