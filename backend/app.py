@@ -4424,6 +4424,40 @@ def api_live_position_debug(train_number: str, date: Optional[str] = None):
     }
 
 
+@app.get("/api/advanced/last-ws-poll-debug/{train_number}")
+def api_last_ws_poll_debug(train_number: str):
+    """
+    DIAGNOSTIC (temporary): unlike live-position-debug above (which runs
+    this app's resolution logic completely fresh, on its own, whenever it's
+    called - useful, but only a SIMULATION of what a live connection would
+    do), this serves the actual snapshot an already-open /ws/track
+    connection captured on its OWN most recent real poll (see
+    _last_ws_poll_debug and the capture right after payload.update() inside
+    ws_track_train). Written specifically to settle a real disagreement:
+    live-position-debug kept resolving a real coordinate for train 20834
+    while an actual open connection kept sending "unavailable" for minutes
+    across several stations - this shows what that connection itself
+    actually computed, poll by poll, with no risk of comparing against
+    fresher/different state the way two separate one-off calls could.
+
+    Returns a "not found" note (never a fabricated snapshot) when no
+    /ws/track connection for this train_number has completed a poll since
+    this server process started - e.g. nobody has Live Tracking open for it
+    right now, or the service only just restarted.
+    """
+    snapshot = _last_ws_poll_debug.get(str(train_number).strip())
+    if snapshot is None:
+        return {
+            "train_number": train_number, "ok": False,
+            "note": (
+                "No /ws/track connection for this train_number has completed a poll since this "
+                "server process last started. Open Live Tracking for this train, wait a few "
+                "seconds for a poll to complete, then call this again."
+            ),
+        }
+    return {"train_number": train_number, "ok": True, **snapshot}
+
+
 @app.get("/api/advanced/railradar-route-history-debug/{train_number}")
 def api_railradar_route_history_debug(train_number: str, lookback_days: Optional[int] = 14):
     """
@@ -5525,6 +5559,21 @@ def api_station_now(station_code: str, hours: int = 2):
         "platform_heatmap": advanced_features.build_platform_heatmap(trains),
         "error": None if trains else "No trains reported for this station/window right now.",
     }
+
+
+# DIAGNOSTIC (temporary): the ground-truth snapshot of what the LAST poll of
+# an actual, already-open /ws/track connection computed for its coordinate
+# tiers - see the "[coord_debug]" print inside ws_track_train and the
+# /api/advanced/last-ws-poll-debug/{train_number} route below. A one-off
+# call to /api/advanced/live-position-debug/{train} runs this SAME app's
+# resolution logic completely fresh each time, which is supposed to mirror
+# what a live connection would compute - this dict instead captures what an
+# ACTUAL running connection genuinely computed, poll by poll, so the two can
+# be compared directly instead of trusting they always agree. Keyed by
+# train_number; only ever holds the single most recent poll per train (not a
+# history) - plain module-level dict is fine here since it's only ever
+# overwritten wholesale by one value, never read-modified-written.
+_last_ws_poll_debug: dict = {}
 
 
 # =============================================================================
@@ -6826,33 +6875,6 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 except Exception:
                     pass
 
-                # DIAGNOSTIC (temporary): reported live - "Coordinates: —,
-                # Position source: unavailable" persists for minutes across
-                # several different current stations on ONE open /ws/track
-                # connection for train 20834, WHILE a fresh one-off call to
-                # /api/advanced/live-position-debug/{train} for the exact
-                # same train, at the exact same time, resolves a real
-                # lat/lng/position_source every time. Since that debug
-                # endpoint is supposed to mirror this exact block's own
-                # logic (see its own docstring), the two should never
-                # disagree - this print exposes, poll by poll, straight from
-                # Render's live log stream, which of the three tiers this
-                # ACTUAL long-running connection is landing on (or failing
-                # all three of) for this exact payload, without needing a
-                # second debug endpoint call that might compute on
-                # different (fresher) state than what this connection is
-                # actually holding. Safe to remove once the real divergence
-                # is found - this changes no behavior, only visibility.
-                print(
-                    f"[coord_debug] train={train_number} "
-                    f"interp_lat={interp_lat!r} "
-                    f"current_timeline_entry_code={(current_timeline_entry or {}).get('code')!r} "
-                    f"current_timeline_entry_lat={(current_timeline_entry or {}).get('lat')!r} "
-                    f"position_lat={position.lat!r} "
-                    f"position_source_raw={position.position_source!r} "
-                    f"segment_progress={segment_info.get('segment_progress')!r} "
-                    f"date_corrected_via_railradar={date_corrected_via_railradar!r}"
-                )
                 payload.update({
                     # FEATURE: prefer the RailRadar segment-progress
                     # interpolated lat/lng for the map marker when
@@ -7066,6 +7088,31 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "route_deviation": route_deviation.to_dict(route_deviation_status),
                     "error": None,
                 })
+
+                # DIAGNOSTIC (temporary, see _last_ws_poll_debug's own
+                # comment above ws_track_train and the coord_debug print
+                # above): captured HERE, after payload.update() above, so
+                # final_lat/final_lng/final_position_source are read straight
+                # from the actual dict this poll is about to send - not a
+                # re-derivation that could itself drift from what payload.
+                # update() really did. This is what /api/advanced/
+                # last-ws-poll-debug/{train_number} serves.
+                _last_ws_poll_debug[train_number] = {
+                    "computed_at": datetime.now().isoformat(),
+                    "interp_lat": interp_lat,
+                    "interp_lng": interp_lng,
+                    "current_timeline_entry_code": (current_timeline_entry or {}).get("code"),
+                    "current_timeline_entry_lat": (current_timeline_entry or {}).get("lat"),
+                    "current_timeline_entry_coordinates_from": (current_timeline_entry or {}).get("coordinates_from"),
+                    "position_lat_raw": position.lat,
+                    "position_source_raw": position.position_source,
+                    "segment_progress": segment_info.get("segment_progress"),
+                    "date_corrected_via_railradar": date_corrected_via_railradar,
+                    "final_lat": payload.get("lat"),
+                    "final_lng": payload.get("lng"),
+                    "final_position_source": payload.get("position_source"),
+                    "final_current_station": payload.get("current_station"),
+                }
                 try:
                     analytics.record_event(
                         intent="live_tracking", train_number=train_number,
