@@ -466,6 +466,14 @@ export default function LiveTrackingScreen({ navigation }) {
   const manualStopRef = useRef(true);
   const activeParamsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  // BUGFIX ("Coordinates / Position source frozen on a station the train
+  // already left, 9 km to next station never ticking down to 7.5 km etc,
+  // even though the backend genuinely pushes a fresh position every 5s and
+  // the plain web frontend for the SAME train updates fine) — see the
+  // watchdog effect below for the real mechanism. Tracks when the last
+  // real WS message actually arrived, independent of React state, so the
+  // watchdog can check it on its own timer without re-subscribing.
+  const lastMessageAtRef = useRef(0);
   const reconnectDelayRef = useRef(3000);
   // RailYatri-style collapsed "+N No-Halt stations" groups — which ones the
   // user has tapped open, keyed by index within timelineGrouped below.
@@ -717,6 +725,67 @@ export default function LiveTrackingScreen({ navigation }) {
     };
   }, [disconnect]);
 
+  // BUGFIX ("Coordinates: —, Position source: unavailable" frozen on a
+  // station the train already left, "9 km to next station" never ticking
+  // down — reported live against train 20833, confirmed via the backend's
+  // own /api/train/live-status and /api/advanced/live-position-debug that
+  // the SAME train's data was genuinely fresh and resolving fine the whole
+  // time, and that the plain web frontend for the SAME train was updating
+  // normally): the existing auto-reconnect above (openSocket's onclose
+  // handler) only ever fires when the browser/OS actually tells this page
+  // the socket closed. On a phone, locking the screen or backgrounding the
+  // browser tab very commonly suspends the network stack WITHOUT ever
+  // firing that close event — the WebSocket object just sits there
+  // "open" (readyState-wise) forever, silently not receiving the fresh
+  // position the backend is genuinely still pushing every ~5s. No close
+  // event ever arrives, so the existing reconnect logic never even
+  // triggers, and the UI freezes on whatever the last real message was
+  // — permanently, since nothing here was watching for THAT failure mode.
+  //
+  // Two independent, real signals — neither a guess about why the
+  // connection died, just "is it actually still delivering":
+  //   1. A watchdog timer: if nominally open but no message has arrived
+  //      in several multiples of the backend's real ~5s push cadence, the
+  //      connection is dead in practice. Force-closing it hands off to the
+  //      existing onclose auto-reconnect already above, so there's still
+  //      only one reconnect code path.
+  //   2. The page becoming visible again (phone unlocked, tab
+  //      foregrounded) — the single most common real moment a mobile
+  //      browser's suspended socket needs replacing — checked immediately
+  //      instead of waiting out the watchdog's own poll interval.
+  useEffect(() => {
+    const STALE_MS = 25000; // ~5x the backend's real 5s push cadence
+    const watchdog = setInterval(() => {
+      if (manualStopRef.current || !wsRef.current) return;
+      if (wsRef.current.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - lastMessageAtRef.current > STALE_MS) {
+        wsRef.current.close(); // -> existing onclose handler auto-reconnects
+      }
+    }, 8000);
+
+    function onVisibilityChange() {
+      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+      if (manualStopRef.current || !activeParamsRef.current) return;
+      const stale = Date.now() - lastMessageAtRef.current > STALE_MS;
+      const dead = !wsRef.current
+        || wsRef.current.readyState === WebSocket.CLOSED
+        || wsRef.current.readyState === WebSocket.CLOSING;
+      if (stale || dead) {
+        openSocket(activeParamsRef.current, true);
+      }
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
+
+    return () => {
+      clearInterval(watchdog);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
+    };
+  }, []);
+
   // Does the actual work of opening the WebSocket for a fixed set of
   // params (captured once in activeParamsRef when the user presses "Start
   // tracking" / "Reconnect"). Called directly by the button, and again by
@@ -767,6 +836,12 @@ export default function LiveTrackingScreen({ navigation }) {
       dest: params.dest || undefined,
     });
 
+    // Stamped now, not just on the first real message — otherwise the
+    // watchdog below could see a "last message" from a previous connection
+    // that's several STALE_MS old and immediately kill this brand-new
+    // socket before it even gets a chance to open.
+    lastMessageAtRef.current = Date.now();
+
     const socket = new WebSocket(url);
     wsRef.current = socket;
     socket.onopen = () => {
@@ -775,10 +850,12 @@ export default function LiveTrackingScreen({ navigation }) {
       // over — back off from scratch next time, instead of the delay
       // staying stretched out from an earlier stretch of bad connectivity.
       reconnectDelayRef.current = 3000;
+      lastMessageAtRef.current = Date.now();
     };
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        lastMessageAtRef.current = Date.now();
         setPayload(data);
 
         // FEATURE: Live delay-trend sparkline.
