@@ -6117,6 +6117,33 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 except Exception:
                     segment_info = {"segment_progress": None}
 
+                # BUGFIX ("Coordinates: —, Position source: unavailable" for
+                # small stations neither RailKit's own getTrainInfo route
+                # nor our ~8,700-entry static table has a coordinate for,
+                # e.g. Intekanne, Chintapalli — "it should be RailRadar
+                # right, it is not use RailRadar yet"): when RailKit-based
+                # resolution (provider route, static table, and the
+                # bracketed/nearest-station interpolation in gps_tracking.py)
+                # genuinely came up empty for the current station, try
+                # RailRadar's OWN per-station coordinate as a third,
+                # independent source — see railradar_fallback.
+                # get_station_coordinate's own docstring for why this is
+                # safe even from a blank-date auto-detected response (a real
+                # station's location doesn't depend on which run/date got
+                # auto-detected, unlike this app's other RailRadar-derived
+                # fields). Only ever fills a genuine gap - never overrides a
+                # coordinate RailKit-based resolution already found.
+                if position.lat is None and position.current_station_code:
+                    try:
+                        rr_lat, rr_lng = await asyncio.to_thread(
+                            railradar_fallback.get_station_coordinate, train_number, position.current_station_code,
+                        )
+                    except Exception:
+                        rr_lat, rr_lng = None, None
+                    if rr_lat is not None and rr_lng is not None:
+                        position.lat, position.lng = rr_lat, rr_lng
+                        position.position_source = "railradar_route"
+
                 # FEATURE: near-instant "current station" update on a real
                 # arrival - see force_refresh_next_poll declared above. If
                 # RailRadar's real segment progress shows the train is

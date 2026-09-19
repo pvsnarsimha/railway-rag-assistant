@@ -412,6 +412,54 @@ def get_segment_progress(train_number: str) -> dict:
     }
 
 
+def get_station_coordinate(train_number: str, station_code: Optional[str]) -> "tuple[Optional[float], Optional[float]]":
+    """
+    BUGFIX ("Coordinates: —, Position source: unavailable" for small
+    stations RailKit's own getTrainInfo route doesn't have a coordinate
+    for and that also aren't in our own ~8,700-entry static table, e.g.
+    Intekanne, Chintapalli — "it should be RailRadar right, it is not use
+    RailRadar yet"): confirmed against RailRadar's own published schema
+    (https://railradar.in/docs/live-train-status) that `currentLocation`
+    does NOT carry a raw GPS lat/lng itself (only stationCode/
+    segmentProgress/speedKmh/bearingDegrees — see get_segment_progress) —
+    so this isn't "the current position's live GPS fix", it's RailRadar's
+    OWN per-station `route[].lat`/`route[].lng` figures, the same real
+    field fetch_railradar_timeline already reads for its own stop list —
+    just looked up for ONE specific station code here, as a genuinely
+    independent THIRD coordinate source (after RailKit's getTrainInfo
+    route and our static table) for exactly the small stations neither of
+    those two happens to cover. RailRadar maintains this coordinate
+    per PHYSICAL STATION, not per run, so it's safe to use even from a
+    blank-date auto-detected response (see _fetch_raw's own docstring on
+    why blank-date is never trusted for WHICH run/date, only for genuinely
+    live signals) — a station's real-world location doesn't depend on
+    which day's run RailRadar happened to auto-detect.
+
+    Returns (lat, lng) — (None, None) if there's no key configured, the
+    call fails, the station code isn't given, or RailRadar's own route
+    doesn't have a coordinate for it either (never a guessed position).
+    """
+    if not station_code:
+        return None, None
+    try:
+        data = _fetch_raw(train_number)
+    except RailRadarFallbackError:
+        return None, None
+
+    code_norm = station_code.strip().upper()
+    for point in (data.get("route") or []):
+        if (point.get("stationCode") or "").strip().upper() != code_norm:
+            continue
+        lat, lng = point.get("lat"), point.get("lng")
+        if lat is None or lng is None:
+            return None, None
+        try:
+            return float(lat), float(lng)
+        except (TypeError, ValueError):
+            return None, None
+    return None, None
+
+
 def get_major_stop_distances(train_number: str) -> List[dict]:
     """Real km between each MAJOR (halting) stop for a given train number -
     the RailYatri-style per-stop distance display. Every distance here is
