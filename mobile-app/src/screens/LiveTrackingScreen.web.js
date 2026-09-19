@@ -1036,7 +1036,14 @@ export default function LiveTrackingScreen({ navigation }) {
     <ScrollView style={styles.flex} contentContainerStyle={[styles.content, showBottomBar && styles.contentWithBar]}>
       <SectionCard title="Track a train" subtitle="Streams a position + delay + crowd update every ~5s.">
         <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
-        <LabeledInput label="Date (optional \u2014 defaults to today)" placeholder="DD-MM-YYYY" value={trackDate} onChangeText={setTrackDate} />
+        {/* BUGFIX: a plain (non-{}) JSX attribute string doesn't run JS's
+            escape parsing, so "\u2014" rendered as the literal 6 characters
+            backslash-u-2-0-1-4, not an em dash - only visible once this
+            screen's bundle was actually rebuilt and looked at directly
+            (see the mobile_web rebuild note elsewhere in this diff).
+            Wrapping the same text in a {} expression container makes it a
+            real JS string literal, where \u2014 IS a real escape. */}
+        <LabeledInput label={"Date (optional \u2014 defaults to today)"} placeholder="DD-MM-YYYY" value={trackDate} onChangeText={setTrackDate} />
         <View style={styles.row}>
           <LabeledInput label="Source (optional)" placeholder="e.g. SC" value={source} onChangeText={setSource} style={styles.half} />
           <LabeledInput label="Dest (optional)" placeholder="e.g. BZA" value={dest} onChangeText={setDest} style={styles.half} />
