@@ -41,6 +41,27 @@ with open(STATION_COORDS_PATH, "r", encoding="utf-8") as f:
     _STATION_COORDS = json.load(f)
 
 
+def _norm_name(n) -> str:
+    return (n or "").strip().upper()
+
+
+# BUGFIX ("Coordinates: —, Position source: unavailable" for a station RailKit's
+# live timeline gives a BLANK/missing stationCode for, even though our static
+# table genuinely has that exact station, e.g. Kazipet Jn -> "KZJ"): every
+# coordinate tier so far was keyed by CODE only, so a blank live-timeline code
+# meant this ~8,700-entry table's own real entry for that station was
+# unreachable even though it was sitting right there under its real name.
+# Indexed once by NAME (RailKit's stationName field is the one thing that has
+# reliably kept resolving correctly across every one of these reports) so
+# _lookup_station_by_name below can serve as a real, non-interpolated tier
+# before falling back to geometric interpolation between neighbouring stops.
+_STATION_COORDS_BY_NAME = {}
+for _code, _entry in _STATION_COORDS.items():
+    _key = _norm_name(_entry.get("name"))
+    if _key and _key not in _STATION_COORDS_BY_NAME:
+        _STATION_COORDS_BY_NAME[_key] = _entry
+
+
 def _first_present(d: dict, keys, default=None):
     for k in keys:
         if isinstance(d, dict) and k in d and d[k] not in (None, ""):
@@ -52,6 +73,14 @@ def _lookup_station(code: Optional[str]) -> Optional[dict]:
     if not code:
         return None
     return _STATION_COORDS.get(code.strip().upper())
+
+
+def _lookup_station_by_name(name: Optional[str]) -> Optional[dict]:
+    """Same static table as _lookup_station, keyed by station NAME instead
+    of code - see _STATION_COORDS_BY_NAME above for why this tier exists."""
+    if not name:
+        return None
+    return _STATION_COORDS_BY_NAME.get(_norm_name(name))
 
 
 def _parse_delay_minutes(delay_text) -> Optional[int]:
@@ -212,20 +241,47 @@ def parse_live_position(train_number: str, track_data: dict, train_info_data: di
     def _norm_code(c):
         return (c or "").strip().upper()
 
-    current_code_matches = any(
-        _norm_code(point.get("stationCode")) == _norm_code(current_code) for point in timeline
-    ) if current_code else False
-    if not current_code_matches:
-        current_status_stop = next((point for point in timeline if point.get("status") == "current"), None)
-        if current_status_stop is not None:
-            current_code = current_status_stop.get("stationCode")
+    # BUGFIX #2 ("Coordinates: —, Position source: unavailable" for the
+    # CURRENT station specifically, seen live for Intekanne, then
+    # Chintapalli, then Kazipet Jn - three different real stations, one of
+    # them (Kazipet Jn) unambiguously present with a real coordinate in our
+    # own ~8,700-entry static table, ruling out "missing station data" as
+    # the cause): RailKit's raw "current" timeline entry can itself have a
+    # BLANK/missing stationCode - current_name still resolves fine (it
+    # falls back to the "current"-status point directly, same as before),
+    # but everything downstream that tried to re-find that same station by
+    # CODE hit a silent mismatch: parse_full_timeline() gives a blank
+    # stationCode the literal placeholder code "?" (its own "no real code"
+    # marker), while this function's blank-code fallback above leaves
+    # current_code as "" (empty string) - "?" != "" even after
+    # normalization, so the code-matching loop that used to pull the
+    # coordinate below NEVER found the entry, even though
+    # parse_full_timeline's own interpolation pass (position-based, not
+    # code-based) had already worked out a perfectly good coordinate for
+    # that exact stop internally. Tracked here as `current_index` - this
+    # station's real position (0-based) in the SAME `timeline` array -
+    # instead of relying on its code matching anything. parse_full_timeline
+    # builds one TimelineStop per timeline entry, in the same order, with
+    # no filtering, so `current_index` addresses the identical station in
+    # both places regardless of whether its code is real, blank, or "?".
+    current_index = None
+    if current_code:
+        current_index = next(
+            (i for i, point in enumerate(timeline)
+             if _norm_code(point.get("stationCode")) == _norm_code(current_code)),
+            None,
+        )
+    if current_index is None:
+        current_index = next((i for i, point in enumerate(timeline) if point.get("status") == "current"), None)
+        if current_index is not None:
+            current_code = timeline[current_index].get("stationCode")
 
     current_name = None
     next_code = next_name = None
     delay_minutes = None
 
     for i, point in enumerate(timeline):
-        if _norm_code(point.get("stationCode")) == _norm_code(current_code):
+        if i == current_index:
             current_name = point.get("stationName")
             if point.get("type") == "stoppage":
                 # BUGFIX: this used to trust RailKit's raw departure/arrival
@@ -261,29 +317,42 @@ def parse_live_position(train_number: str, track_data: dict, train_info_data: di
                 break
 
     # Coordinate for the current station: sourced from the full timeline
-    # below, which itself resolves each stop through three tiers - a real
+    # below, which itself resolves each stop through several tiers - a real
     # per-station coordinate from RailKit's route (best), our static
-    # fallback table, or a geometric interpolation along the route between
-    # the nearest two stations that DO have a real coordinate (see
+    # fallback table, geometric interpolation along the route between the
+    # nearest two stations that DO have a real coordinate, or the nearest
+    # single known station at the edge of the data (see
     # parse_full_timeline's interpolation pass) - so small stations with no
     # direct coordinate of their own still get a real, honestly-labelled
     # position instead of the map going blank. Only truly falls through to
-    # "unavailable" if none of the three tiers can place this station at
-    # all (e.g. it's before the first or after the last station RailKit
-    # gave any coordinate for).
+    # "unavailable" if none of those tiers can place this station at all.
+    #
+    # BUGFIX #2 (continued from current_index above): looked up by
+    # POSITION in the full-timeline list, not by re-matching `current_code`
+    # against each stop's own code. parse_full_timeline() builds exactly
+    # one TimelineStop per `timeline` entry, in the same order, so
+    # `current_index` (already resolved above, from the SAME timeline
+    # array, via the SAME "current"-status fallback when the top-level code
+    # didn't match anything) addresses the identical station here - even
+    # when that station's own stationCode is blank/"?" and could never
+    # match any code-based search. This is what actually reaches the
+    # coordinate parse_full_timeline's own interpolation tiers had already
+    # worked out for that stop internally, instead of silently missing it.
     lat = lng = None
     position_source = "unavailable"
-    for stn in parse_full_timeline(track_data, train_info_data):
-        if _norm_code(stn.code) == _norm_code(current_code):
+    if current_index is not None:
+        full_stops = parse_full_timeline(track_data, train_info_data)
+        if 0 <= current_index < len(full_stops):
+            stn = full_stops[current_index]
             lat, lng = stn.lat, stn.lng
             current_name = current_name or stn.name
             position_source = {
                 "provider": "provider",
                 "fallback_table": "estimated_from_last_station",
+                "fallback_table_by_name": "estimated_from_last_station",
                 "interpolated": "interpolated_on_route",
                 "nearest_known_station": "estimated_from_nearest_station",
             }.get(stn.coordinates_from, "unavailable")
-            break
 
     return LivePosition(
         train_number=train_number, train_name=train_name, status_note=status_note,
@@ -346,6 +415,7 @@ def position_from_stops(train_number: str, stops, train_name: Optional[str] = No
     position_source = {
         "provider": "provider",
         "fallback_table": "estimated_from_last_station",
+        "fallback_table_by_name": "estimated_from_last_station",
         "interpolated": "interpolated_on_route",
         "nearest_known_station": "estimated_from_nearest_station",
     }.get(current.coordinates_from, "unavailable")
@@ -391,7 +461,7 @@ class TimelineStop:
     status: str  # "passed" | "current" | "upcoming"
     lat: Optional[float]
     lng: Optional[float]
-    coordinates_from: str  # "provider" | "fallback_table" | "interpolated" | "nearest_known_station" | "none"
+    coordinates_from: str  # "provider" | "fallback_table" | "fallback_table_by_name" | "interpolated" | "nearest_known_station" | "none"
     distance_km: Optional[str]
     halt_minutes: Optional[str]
     day: Optional[str]
@@ -515,6 +585,21 @@ def parse_full_timeline(track_data: dict, train_info_data: dict = None):
             if fallback:
                 lat, lng = fallback["lat"], fallback["lng"]
                 coordinates_from = "fallback_table"
+            else:
+                # BUGFIX (Kazipet Jn etc: RailKit's live timeline gave this
+                # exact stop a BLANK stationCode, so the two code-keyed
+                # tiers above could never find it - even though this
+                # station's real coordinate is genuinely sitting in our
+                # static table under "KZJ", reachable by NAME
+                # ("Kazipet Jn"), which RailKit did give us for this same
+                # stop). Tried before falling through to geometric
+                # interpolation, since an exact table match by name is a
+                # real coordinate for THIS station, not an estimate from
+                # its neighbours.
+                by_name = _lookup_station_by_name(point.get("stationName"))
+                if by_name:
+                    lat, lng = by_name["lat"], by_name["lng"]
+                    coordinates_from = "fallback_table_by_name"
 
         # ROOT-CAUSE FIX (this is the earlier "blank Next station ETA" bug's
         # real source): the live tracking timeline sometimes doesn't carry a
