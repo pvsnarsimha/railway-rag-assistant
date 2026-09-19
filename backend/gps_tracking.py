@@ -514,6 +514,59 @@ def parse_full_timeline(track_data: dict, train_info_data: dict = None):
     return stops
 
 
+def _repair_impossible_downstream_statuses(stops) -> None:
+    """
+    BUGFIX ("Vande Bharat 20833 shows Secunderabad Jn — the actual FINAL
+    destination — already reached, with a real-looking '+24m late' pill
+    and 720.9 km covered, while Khammam and Warangal, both EARLIER on the
+    exact same route, still show 'upcoming' with only predicted ETAs" —
+    and the direct cause of the PREVIOUS round's "720.9 km covered so far"
+    while the train was genuinely still sitting at Eluru, ~600km short of
+    that: same 720.9 figure, same root cause, just seen from two different
+    screens): RailKit's own per-stop `status` field can go wrong
+    specifically at a route's terminal station — the exact same failure
+    already documented and worked around once before, in the OTHER
+    direction, for train 20707 ("kept SECUNDERABAD JN 'current' for 9+
+    hours after actually finishing at VISAKHAPATNAM" — see
+    computeJourneyLikelyComplete in LiveTrackingScreen.web.js). This is
+    that same provider inconsistency again: a downstream station marked
+    "passed" (or "current") while a station genuinely earlier on the same
+    route is still "upcoming" — not just unlikely, but physically
+    impossible on a route the train traverses in one direction, since it
+    cannot have reached a later station without first reaching every
+    earlier one.
+
+    Every consumer of `status` trusted RailKit's per-stop field completely
+    instead of checking it against that basic constraint —
+    current_position_distance_km()'s "last reporting passed station"
+    fallback, the frontend's own identical backward scan for "km covered
+    so far", and the timeline row rendering itself all independently
+    picked up the same bad "passed" flag on the real destination and
+    turned it into "the train has already finished the whole ~720km
+    route", each in its own display.
+
+    Real fix, no new guessing: walk `stops` in real route order (this list
+    already IS that order) and find the first one that ISN'T "passed" —
+    that is the genuine leading edge of the journey, whatever it honestly
+    says ("current" if RailKit has a live pointer there, "upcoming" if it
+    doesn't). Nothing AFTER that point can honestly be "passed" or
+    "current" either, so any stop RailKit marked that way anyway is
+    downgraded to "upcoming" — the honest default absent real evidence,
+    never a guessed timestamp or invented status. Stops at or before the
+    leading edge are never touched: this only ever removes an impossible
+    downstream claim, never invents or removes a real one closer to the
+    front. A fully "passed" list (journey genuinely complete) and a fully
+    "upcoming" one (not yet started) both leave this as a no-op, same as
+    the ordinary case where nothing downstream was ever marked done.
+    """
+    frontier = next((i for i, s in enumerate(stops) if s.status != "passed"), None)
+    if frontier is None:
+        return
+    for s in stops[frontier + 1:]:
+        if s.status in ("passed", "current"):
+            s.status = "upcoming"
+
+
 def finalize_timeline_stops(stops) -> None:
     """The shared enrichment pass every raw stop list needs before it's fit
     to display or feed the rest of the pipeline — factored out of
@@ -535,7 +588,13 @@ def finalize_timeline_stops(stops) -> None:
     them empty — _timing_has_no_real_event treats both the same way) get
     mirrored from that same halt's one real recorded event, so every
     downstream consumer just sees a normal real timing either way.
+
+    Also repairs an impossible downstream "passed"/"current" status (see
+    _repair_impossible_downstream_statuses) BEFORE any of the above runs,
+    so every later step — including this same function's own distance/
+    caption logic — works from an already-consistent status sequence.
     """
+    _repair_impossible_downstream_statuses(stops)
     _interpolate_missing_coordinates(stops)
     _interpolate_missing_distance_km(stops)
     _annotate_distance_since_last_stoppage(stops)
