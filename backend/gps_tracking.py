@@ -191,12 +191,41 @@ def parse_live_position(train_number: str, track_data: dict, train_info_data: di
     current_code = payload.get("currentStationCode")
     timeline = payload.get("timeline") or []
 
+    # BUGFIX ("Position source showing unavailable" even when the SAME
+    # response's own per-stop timeline clearly marks one stop "current"):
+    # every lookup below used to match purely on RailKit's TOP-LEVEL
+    # currentStationCode field against each stop's own stationCode - if
+    # that top-level field is missing, blank, or (rarely) formatted
+    # differently than the matching per-stop code in this exact same
+    # response, NOTHING ever matched, so current_name/delay/coordinates all
+    # fell straight through to "unavailable" even though the per-stop
+    # status array - the SAME source of truth this app already trusts
+    # everywhere else (current_position_distance_km, position_from_stops,
+    # the impossible-downstream-status repair pass) - had a real,
+    # unambiguous "current" entry the whole time. Falls back to that
+    # per-stop signal ONLY when the top-level field didn't resolve to
+    # anything real in this response; a genuine match is never overridden,
+    # this only fills the gap when there wasn't one. Compared
+    # case/whitespace-insensitively, same normalization _lookup_station
+    # already applies, so a harmless formatting difference alone can't
+    # trigger this either.
+    def _norm_code(c):
+        return (c or "").strip().upper()
+
+    current_code_matches = any(
+        _norm_code(point.get("stationCode")) == _norm_code(current_code) for point in timeline
+    ) if current_code else False
+    if not current_code_matches:
+        current_status_stop = next((point for point in timeline if point.get("status") == "current"), None)
+        if current_status_stop is not None:
+            current_code = current_status_stop.get("stationCode")
+
     current_name = None
     next_code = next_name = None
     delay_minutes = None
 
     for i, point in enumerate(timeline):
-        if point.get("stationCode") == current_code:
+        if _norm_code(point.get("stationCode")) == _norm_code(current_code):
             current_name = point.get("stationName")
             if point.get("type") == "stoppage":
                 # BUGFIX: this used to trust RailKit's raw departure/arrival
@@ -245,7 +274,7 @@ def parse_live_position(train_number: str, track_data: dict, train_info_data: di
     lat = lng = None
     position_source = "unavailable"
     for stn in parse_full_timeline(track_data, train_info_data):
-        if stn.code == current_code:
+        if _norm_code(stn.code) == _norm_code(current_code):
             lat, lng = stn.lat, stn.lng
             current_name = current_name or stn.name
             position_source = {
@@ -545,19 +574,20 @@ def _repair_impossible_downstream_statuses(stops) -> None:
     turned it into "the train has already finished the whole ~720km
     route", each in its own display.
 
-    Real fix, no new guessing: walk `stops` in real route order (this list
-    already IS that order) and find the first one that ISN'T "passed" —
-    that is the genuine leading edge of the journey, whatever it honestly
-    says ("current" if RailKit has a live pointer there, "upcoming" if it
-    doesn't). Nothing AFTER that point can honestly be "passed" or
-    "current" either, so any stop RailKit marked that way anyway is
-    downgraded to "upcoming" — the honest default absent real evidence,
-    never a guessed timestamp or invented status. Stops at or before the
-    leading edge are never touched: this only ever removes an impossible
-    downstream claim, never invents or removes a real one closer to the
-    front. A fully "passed" list (journey genuinely complete) and a fully
-    "upcoming" one (not yet started) both leave this as a no-op, same as
-    the ordinary case where nothing downstream was ever marked done.
+    Real fix, no new guessing: walk `stops` in their real route order (this
+    list already IS that order) and find the first one that ISN'T
+    "passed" — that is the genuine leading edge of the journey, whatever
+    it honestly says ("current" if RailKit has a live pointer there,
+    "upcoming" if it doesn't). Nothing AFTER that point can honestly be
+    "passed" or "current" either, so any stop RailKit marked that way
+    anyway is downgraded to "upcoming" — the honest default absent real
+    evidence, never a guessed timestamp or invented status. Stops at or
+    before the leading edge are never touched: this only ever removes an
+    impossible downstream claim, never invents or removes a real one
+    closer to the front. A fully "passed" list (journey genuinely
+    complete) and a fully "upcoming" one (not yet started) both leave this
+    as a no-op, same as the ordinary case where nothing downstream was
+    ever marked done.
     """
     frontier = next((i for i, s in enumerate(stops) if s.status != "passed"), None)
     if frontier is None:
