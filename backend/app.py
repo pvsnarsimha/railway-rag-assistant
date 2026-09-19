@@ -5428,6 +5428,33 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     await websocket.accept()
     q = websocket.query_params
     date_ddmmyyyy = (q.get("date") or "").strip() or None
+    # BUGFIX ("for long journey trains ... showing the live tracking data
+    # of before day yesterday" / dates drifting further wrong the longer a
+    # session stays connected, e.g. train 12295's Ara Jn row reading
+    # "21-Sep" — two days past its real 19-Sep): `date_ddmmyyyy` is a
+    # single local var, and BOTH the self-correcting RailKit anchor pass
+    # below AND the explicit-date RailRadar correction pass further down
+    # reassign it whenever they resolve a corrected date - but neither one
+    # used to happen in a fresh copy each poll. Since this whole block
+    # lives inside the `while True:` poll loop, a correction made on poll N
+    # stayed in `date_ddmmyyyy` going into poll N+1 - so poll N+1 started
+    # from an ALREADY-corrected date instead of what the user actually
+    # asked for, and both correction passes captured "original_requested_
+    # date_str = date_ddmmyyyy" at that point too, so from poll N+1 onward
+    # they were no longer comparing against the user's real request either
+    # - they were correcting a correction. On a train whose real journey
+    # spans multiple days, a live session stays open through hundreds of
+    # polls, giving this compounding drift plenty of time to walk the
+    # displayed date further and further from reality - exactly why this
+    # was reported for LONG-journey trains specifically and never for a
+    # short same-day one (too few polls for the drift to become visible
+    # before the journey's done). `requested_date_ddmmyyyy` is the one
+    # true, NEVER-reassigned copy of what the user actually typed (or left
+    # blank) when this connection was opened; `date_ddmmyyyy` itself is
+    # reset back to it at the very top of every poll iteration below,
+    # before either correction pass runs, so each poll starts fresh from
+    # the real request rather than compounding the previous poll's fix.
+    requested_date_ddmmyyyy = date_ddmmyyyy
     # REVERTED (see below): a round-18 fix tried to resolve a "smarter"
     # anchor here via RailRadar's auto-detect (railradar_fallback.
     # get_real_journey_start_date) instead of defaulting to today, to
@@ -5519,6 +5546,10 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
 
     try:
         while True:
+            # See requested_date_ddmmyyyy's comment above `while True:` -
+            # every poll starts fresh from the real original request, never
+            # from whatever a PREVIOUS poll's correction pass left behind.
+            date_ddmmyyyy = requested_date_ddmmyyyy
             payload = {"type": "position_update", "train_number": train_number, "date": date_ddmmyyyy}
 
             # FEATURE: Train Capacity & Crowd Prediction, folded into the
@@ -5622,16 +5653,22 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # surfaced honestly instead of guessed at). A failed
                 # correction attempt keeps the original response rather
                 # than lose live tracking entirely over it.
-                # ROBUSTNESS: captured here (before any correction can
-                # reassign date_ddmmyyyy) so the warning logic further below
-                # can tell whether the ORIGINAL request - blank, or an
-                # explicit date that happens to equal today - implied
-                # "today's fresh departure", not just whether it was blank.
-                # An explicit "18-09-2026" typed on 18-Sep carries the exact
-                # same intent as leaving the field blank; round 25 only
-                # covered the blank case and missed that equally common one.
-                original_requested_date_str = date_ddmmyyyy
-                original_date_was_explicit = date_ddmmyyyy is not None
+                # ROBUSTNESS: reads requested_date_ddmmyyyy (the one
+                # never-reassigned copy of what the user actually asked for
+                # this whole connection - see its own comment above `while
+                # True:`), NOT date_ddmmyyyy itself, so this stays the real
+                # original request even on poll 500 of a long-running
+                # session, after many earlier polls' corrections have
+                # already reassigned date_ddmmyyyy several times over. The
+                # warning logic further below uses this to tell whether the
+                # ORIGINAL request - blank, or an explicit date that happens
+                # to equal today - implied "today's fresh departure", not
+                # just whether it was blank. An explicit "18-09-2026" typed
+                # on 18-Sep carries the exact same intent as leaving the
+                # field blank; round 25 only covered the blank case and
+                # missed that equally common one.
+                original_requested_date_str = requested_date_ddmmyyyy
+                original_date_was_explicit = requested_date_ddmmyyyy is not None
                 current_stop_for_anchor = next((s for s in timeline_stops if s.status == "current"), None)
                 if current_stop_for_anchor is not None:
                     try:
