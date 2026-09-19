@@ -1553,8 +1553,34 @@ function NoHaltGroupRow({
                 {toDisplayCase(s.name)} <Text style={styles.tlCode}>({s.code})</Text>
                 <Text style={styles.timelineKind}>  · passing</Text>
               </Text>
+              {/* BUGFIX ("it is showing 707/720 km for [a station that also
+                  shows 90 km right here]" — train 20833): this figure is
+                  gps_tracking.py's own distance_since_last_stoppage_km —
+                  real km relative to the last REPORTING (halting) station
+                  before this one (Rajahmundry, say), NOT distance-from-
+                  origin — see finalize_timeline_stops' own docstring: every
+                  small passing/intermediate stop is meant to get a
+                  RailYatri-style "N km from <last reporting station>"
+                  caption. This was rendering the bare number alone with no
+                  "from <station>" qualifier, so it LOOKED exactly like the
+                  plain from-origin figure every other (halting) station's
+                  row shows via stop.distance_km (see TimelineStopRow's
+                  metaBits below) - hence reading as flatly contradicting the
+                  live callout's real cumulative "(N km covered so far)"
+                  figure directly underneath it on the current station's own
+                  row, when the two were never the same measurement to begin
+                  with. The plain (non-mobile) web frontend already renders
+                  this correctly (frontend/app.js's noHaltGroupRow: "N km
+                  past/before <station>") - this brings the mobile web
+                  screen's wording in line with it, using the same real
+                  last_reporting_station field already threaded through
+                  gps_tracking.timeline_to_json (s.last_reporting_station),
+                  just not previously rendered here. */}
               {s.distance_since_last_stoppage_km != null && (
-                <Text style={styles.tlMeta}>{s.distance_since_last_stoppage_km} km</Text>
+                <Text style={styles.tlMeta}>
+                  {Math.abs(s.distance_since_last_stoppage_km)} km {s.distance_since_last_stoppage_km >= 0 ? "past" : "before"}{" "}
+                  {s.last_reporting_station ? toDisplayCase(s.last_reporting_station) : "last stop"}
+                </Text>
               )}
               {current && (
                 <LiveStatusCallout
