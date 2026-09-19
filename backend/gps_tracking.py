@@ -83,6 +83,29 @@ def _lookup_station_by_name(name: Optional[str]) -> Optional[dict]:
     return _STATION_COORDS_BY_NAME.get(_norm_name(name))
 
 
+def position_source_label(coordinates_from: Optional[str]) -> str:
+    """Maps a TimelineStop's `coordinates_from` tier (set by
+    parse_full_timeline / _interpolate_missing_coordinates) to the public
+    `position_source` vocabulary the frontend understands: "provider",
+    "estimated_from_last_station", "interpolated_on_route",
+    "estimated_from_nearest_station", or "unavailable". Factored out of
+    parse_live_position/position_from_stops (which both had their own copy
+    of this exact mapping) so app.py's live-tracking payload builder can
+    describe a timeline_json stop's coordinate the same way too - see the
+    BUGFIX in ws_track_train's payload construction for why that mattered
+    ("Coordinates: —, Position source: unavailable" showing for a station
+    a RailRadar override had already correctly resolved a coordinate for,
+    via this exact mapping, just never read from there)."""
+    return {
+        "provider": "provider",
+        "provider_by_name": "provider",
+        "fallback_table": "estimated_from_last_station",
+        "fallback_table_by_name": "estimated_from_last_station",
+        "interpolated": "interpolated_on_route",
+        "nearest_known_station": "estimated_from_nearest_station",
+    }.get(coordinates_from, "unavailable")
+
+
 def _parse_delay_minutes(delay_text) -> Optional[int]:
     """RailKit's delay fields are human text ('On Time', '5m late', or a
     bare number) rather than a guaranteed integer - pull a number out if
@@ -346,14 +369,7 @@ def parse_live_position(train_number: str, track_data: dict, train_info_data: di
             stn = full_stops[current_index]
             lat, lng = stn.lat, stn.lng
             current_name = current_name or stn.name
-            position_source = {
-                "provider": "provider",
-                "provider_by_name": "provider",
-                "fallback_table": "estimated_from_last_station",
-                "fallback_table_by_name": "estimated_from_last_station",
-                "interpolated": "interpolated_on_route",
-                "nearest_known_station": "estimated_from_nearest_station",
-            }.get(stn.coordinates_from, "unavailable")
+            position_source = position_source_label(stn.coordinates_from)
 
     return LivePosition(
         train_number=train_number, train_name=train_name, status_note=status_note,
@@ -413,14 +429,7 @@ def position_from_stops(train_number: str, stops, train_name: Optional[str] = No
     current_idx = stops.index(current)
     next_stop = next((s for s in stops[current_idx + 1:] if s.status == "upcoming"), None)
 
-    position_source = {
-        "provider": "provider",
-        "provider_by_name": "provider",
-        "fallback_table": "estimated_from_last_station",
-        "fallback_table_by_name": "estimated_from_last_station",
-        "interpolated": "interpolated_on_route",
-        "nearest_known_station": "estimated_from_nearest_station",
-    }.get(current.coordinates_from, "unavailable")
+    position_source = position_source_label(current.coordinates_from)
 
     return LivePosition(
         train_number=train_number, train_name=train_name, status_note=status_note,
