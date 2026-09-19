@@ -348,6 +348,7 @@ def parse_live_position(train_number: str, track_data: dict, train_info_data: di
             current_name = current_name or stn.name
             position_source = {
                 "provider": "provider",
+                "provider_by_name": "provider",
                 "fallback_table": "estimated_from_last_station",
                 "fallback_table_by_name": "estimated_from_last_station",
                 "interpolated": "interpolated_on_route",
@@ -414,6 +415,7 @@ def position_from_stops(train_number: str, stops, train_name: Optional[str] = No
 
     position_source = {
         "provider": "provider",
+        "provider_by_name": "provider",
         "fallback_table": "estimated_from_last_station",
         "fallback_table_by_name": "estimated_from_last_station",
         "interpolated": "interpolated_on_route",
@@ -461,7 +463,7 @@ class TimelineStop:
     status: str  # "passed" | "current" | "upcoming"
     lat: Optional[float]
     lng: Optional[float]
-    coordinates_from: str  # "provider" | "fallback_table" | "fallback_table_by_name" | "interpolated" | "nearest_known_station" | "none"
+    coordinates_from: str  # "provider" | "provider_by_name" | "fallback_table" | "fallback_table_by_name" | "interpolated" | "nearest_known_station" | "none"
     distance_km: Optional[str]
     halt_minutes: Optional[str]
     day: Optional[str]
@@ -559,11 +561,15 @@ def parse_full_timeline(track_data: dict, train_info_data: dict = None):
     timeline = payload.get("timeline") or []
 
     route_coords_by_code = {}
+    route_coords_by_name = {}
     route_distance_by_code = {}
     if train_info_data:
         for stn in parse_route(train_info_data):
             if stn.lat is not None:
                 route_coords_by_code[stn.code] = (stn.lat, stn.lng)
+                name_key = _norm_name(stn.name)
+                if name_key and name_key not in route_coords_by_name:
+                    route_coords_by_name[name_key] = (stn.lat, stn.lng)
             d = _distance_km_value(stn.distance_km)
             if d is not None:
                 route_distance_by_code[stn.code] = d
@@ -586,18 +592,23 @@ def parse_full_timeline(track_data: dict, train_info_data: dict = None):
                 lat, lng = fallback["lat"], fallback["lng"]
                 coordinates_from = "fallback_table"
             else:
-                # BUGFIX (Kazipet Jn etc: RailKit's live timeline gave this
-                # exact stop a BLANK stationCode, so the two code-keyed
-                # tiers above could never find it - even though this
-                # station's real coordinate is genuinely sitting in our
-                # static table under "KZJ", reachable by NAME
-                # ("Kazipet Jn"), which RailKit did give us for this same
-                # stop). Tried before falling through to geometric
-                # interpolation, since an exact table match by name is a
+                # BUGFIX (Kazipet Jn, Ippaguda etc: RailKit's live timeline
+                # gave this exact stop a BLANK stationCode, so the two
+                # code-keyed tiers above could never find it - even though
+                # this station's real coordinate may genuinely be sitting
+                # in getTrainInfo's own route data or our static table,
+                # reachable by NAME (e.g. "Kazipet Jn"), which RailKit did
+                # give us for this same stop). Tried in the same
+                # provider-first order as the code-keyed tiers above,
+                # before falling through to geometric interpolation, since
+                # an exact match by name - from either real source - is a
                 # real coordinate for THIS station, not an estimate from
                 # its neighbours.
-                by_name = _lookup_station_by_name(point.get("stationName"))
-                if by_name:
+                name_key = _norm_name(point.get("stationName"))
+                if name_key and name_key in route_coords_by_name:
+                    lat, lng = route_coords_by_name[name_key]
+                    coordinates_from = "provider_by_name"
+                elif (by_name := _lookup_station_by_name(point.get("stationName"))):
                     lat, lng = by_name["lat"], by_name["lng"]
                     coordinates_from = "fallback_table_by_name"
 

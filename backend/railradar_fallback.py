@@ -412,7 +412,9 @@ def get_segment_progress(train_number: str) -> dict:
     }
 
 
-def get_station_coordinate(train_number: str, station_code: Optional[str]) -> "tuple[Optional[float], Optional[float]]":
+def get_station_coordinate(
+    train_number: str, station_code: Optional[str], station_name: Optional[str] = None,
+) -> "tuple[Optional[float], Optional[float]]":
     """
     BUGFIX ("Coordinates: —, Position source: unavailable" for small
     stations RailKit's own getTrainInfo route doesn't have a coordinate
@@ -425,7 +427,7 @@ def get_station_coordinate(train_number: str, station_code: Optional[str]) -> "t
     so this isn't "the current position's live GPS fix", it's RailRadar's
     OWN per-station `route[].lat`/`route[].lng` figures, the same real
     field fetch_railradar_timeline already reads for its own stop list —
-    just looked up for ONE specific station code here, as a genuinely
+    just looked up for ONE specific station here, as a genuinely
     independent THIRD coordinate source (after RailKit's getTrainInfo
     route and our static table) for exactly the small stations neither of
     those two happens to cover. RailRadar maintains this coordinate
@@ -435,21 +437,32 @@ def get_station_coordinate(train_number: str, station_code: Optional[str]) -> "t
     live signals) — a station's real-world location doesn't depend on
     which day's run RailRadar happened to auto-detect.
 
+    BUGFIX #2 ("Ippaguda" - a station not just missing from our own static
+    table by code, but RailKit's own live timeline entry for it ALSO gives
+    a blank stationCode, same failure already fixed for Intekanne/
+    Chintapalli/Kazipet Jn in gps_tracking.py's parse_live_position, which
+    means position.current_station_code reaching this call is blank too):
+    a blank code was silently short-circuiting this lookup before it ever
+    ran, even though RailRadar's own route[] entries also carry a
+    stationName we can match on directly, the exact same "the name always
+    survives, only the code goes missing" pattern behind every one of
+    these reports. `station_name` is tried whenever `station_code` doesn't
+    resolve (or wasn't given) - the same case-insensitive matching
+    already used elsewhere in this app.
+
     Returns (lat, lng) — (None, None) if there's no key configured, the
-    call fails, the station code isn't given, or RailRadar's own route
-    doesn't have a coordinate for it either (never a guessed position).
+    call fails, neither the code nor the name is given, or RailRadar's own
+    route doesn't have a coordinate for this station either (never a
+    guessed position).
     """
-    if not station_code:
+    if not station_code and not station_name:
         return None, None
     try:
         data = _fetch_raw(train_number)
     except RailRadarFallbackError:
         return None, None
 
-    code_norm = station_code.strip().upper()
-    for point in (data.get("route") or []):
-        if (point.get("stationCode") or "").strip().upper() != code_norm:
-            continue
+    def _coords_from(point) -> "tuple[Optional[float], Optional[float]]":
         lat, lng = point.get("lat"), point.get("lng")
         if lat is None or lng is None:
             return None, None
@@ -457,6 +470,26 @@ def get_station_coordinate(train_number: str, station_code: Optional[str]) -> "t
             return float(lat), float(lng)
         except (TypeError, ValueError):
             return None, None
+
+    route = data.get("route") or []
+
+    if station_code:
+        code_norm = station_code.strip().upper()
+        for point in route:
+            if (point.get("stationCode") or "").strip().upper() == code_norm:
+                lat, lng = _coords_from(point)
+                if lat is not None:
+                    return lat, lng
+                break  # matched the station but this entry has no coordinate - try by name below
+
+    if station_name:
+        name_norm = station_name.strip().upper()
+        for point in route:
+            if (point.get("stationName") or "").strip().upper() == name_norm:
+                lat, lng = _coords_from(point)
+                if lat is not None:
+                    return lat, lng
+
     return None, None
 
 
