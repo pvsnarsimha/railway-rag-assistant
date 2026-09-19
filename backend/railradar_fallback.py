@@ -38,7 +38,7 @@ from typing import List, Optional
 import requests
 
 from api_cache import cached
-from gps_tracking import StopTiming, TimelineStop
+from gps_tracking import StopTiming, TimelineStop, _lookup_station, _lookup_station_by_name
 
 
 def _ddmmyyyy_to_iso(date_ddmmyyyy: Optional[str]) -> Optional[str]:
@@ -258,12 +258,52 @@ def fetch_railradar_timeline(train_number: str, date_ddmmyyyy: Optional[str] = N
 
         day_ref = point.get("actualDeparture") or point.get("actualArrival") or point.get("scheduledDeparture")
 
+        # BUGFIX ("Coordinates: —, Position source: unavailable" for
+        # "Vijayawada North Cabin" (VNC) while date_corrected_via_railradar
+        # was active in app.py — confirmed via the /api/advanced/last-ws-
+        # poll-debug/{train} endpoint: current_timeline_entry_coordinates_
+        # from came back "none" even though a real segment_progress (0.41)
+        # was available): unlike gps_tracking.py's own RailKit-timeline
+        # parsing (parse_full_timeline), this RailRadar-sourced stop list
+        # only ever tried RailRadar's OWN per-stop `lat`/`lng` and then gave
+        # up with "none" — it never consulted the same ~8,700-entry static
+        # station_coordinates.json table (by code, then by name) that the
+        # RailKit path has always fallen back to first. A small
+        # signalling/cabin point like VNC often has no coordinate in
+        # RailRadar's own route data either, so without this tier the
+        # station - and every stop after it in the same run, since
+        # _interpolate_missing_coordinates below needs at least ONE known
+        # anchor in the list to interpolate anything at all - could be left
+        # with no coordinate whatsoever, even when a real, nearby, on-route
+        # station (e.g. Vijayawada Jn) IS in the static table and would let
+        # geometric interpolation (or "nearest known station") resolve it
+        # honestly instead of showing nothing. Tried in the same
+        # provider-then-code-then-name order already established for
+        # RailKit's own timeline, so both providers give a coordinate the
+        # exact same way wherever one is genuinely available.
+        lat, lng = point.get("lat"), point.get("lng")
+        if lat is not None:
+            coordinates_from = "provider"
+        else:
+            fallback = _lookup_station(code)
+            if fallback:
+                lat, lng = fallback["lat"], fallback["lng"]
+                coordinates_from = "fallback_table"
+            else:
+                by_name = _lookup_station_by_name(point.get("stationName"))
+                if by_name:
+                    lat, lng = by_name["lat"], by_name["lng"]
+                    coordinates_from = "fallback_table_by_name"
+                else:
+                    lat, lng = None, None
+                    coordinates_from = "none"
+
         stops.append(TimelineStop(
             code=code, name=point.get("stationName"),
             kind="stoppage" if point.get("isHalt") else "intermediate",
             status=status,
-            lat=point.get("lat"), lng=point.get("lng"),
-            coordinates_from="provider" if point.get("lat") is not None else "none",
+            lat=lat, lng=lng,
+            coordinates_from=coordinates_from,
             distance_km=point.get("distance"),
             halt_minutes=None,
             day=_day_offset_from_iso(day_ref, start_date),
