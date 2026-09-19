@@ -5669,6 +5669,19 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # missed that equally common one.
                 original_requested_date_str = requested_date_ddmmyyyy
                 original_date_was_explicit = requested_date_ddmmyyyy is not None
+                # Computed here (not just further below where the
+                # date_reliability_warning branches live) because the
+                # RailRadar verification pass a bit further down needs them
+                # too — see that pass's own comment for why the SAME
+                # explicit-date-verification pattern that already fixed the
+                # explicit-past-date case now also covers the implied-today
+                # case ("blank, or an explicit date equal to today, both mean
+                # today" — same reasoning the warning branches below use).
+                today_str = datetime.now().strftime("%d-%m-%Y")
+                original_request_implied_todays_run = (
+                    original_requested_date_str is None or original_requested_date_str == today_str
+                )
+                effective_requested_date_str = original_requested_date_str or today_str
                 current_stop_for_anchor = next((s for s in timeline_stops if s.status == "current"), None)
                 if current_stop_for_anchor is not None:
                     try:
@@ -5734,19 +5747,61 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # silent guess either way — same real-evidence-or-say-so
                 # rule as the rest of this project.
                 date_corrected_via_railradar = False
-                if original_date_was_explicit and date_ddmmyyyy != original_requested_date_str:
+                # BUGFIX ("when I entered current date 19th sept see it is
+                # showing the live tracking data of before day yesterday ...
+                # for this use railradar if possible" — confirmtkt.com's own
+                # reference for the SAME today query: "Yet to start from
+                # Train Source", i.e. today's fresh run of this daily train
+                # genuinely hasn't departed yet, so RailKit correctly has
+                # nothing to show for it and stays attached to the older,
+                # not-yet-finished run instead — but this app was only ever
+                # disclosing that as a generic warning, never actually
+                # checking it against a second real source the way the
+                # explicit-past-date case right below already does).
+                #
+                # This reuses that EXACT SAME verified-correction pattern for
+                # the implied-today case too, instead of adding a separate
+                # blind-auto-detect path: `effective_requested_date_str` is
+                # already "today" whenever the original request was blank or
+                # explicitly typed today's own date (see its own comment
+                # above), so the condition below now naturally covers BOTH
+                # the already-working explicit-past-date correction AND this
+                # new implied-today one with the same code — the same
+                # EXPLICIT `date` param sent to RailRadar every time (never
+                # blank/auto-detect, which is what caused round 18's real
+                # regression, commit be544d8), and the same "only trust it if
+                # RailRadar's own resolved startDate comes back matching
+                # EXACTLY" rule.
+                #
+                # Two real, independently-meaningful outcomes when RailRadar
+                # does NOT confirm a match:
+                #   - it confirms a DIFFERENT real startDate than requested
+                #     (e.g. still the older run's date) -> today's run
+                #     genuinely hasn't started, matching confirmtkt.com's own
+                #     "Yet to start from Train Source" for the same query.
+                #     Surfaced honestly below (date_reliability_warning),
+                #     with RailRadar named as the confirming source, rather
+                #     than silently continuing to show the older run with no
+                #     explanation.
+                #   - it can't confirm anything at all (no API key configured,
+                #     the call fails, or its own answer doesn't match either)
+                #     -> exactly the same graceful "nothing changes here, the
+                #     existing honest warning still fires" fallback the
+                #     explicit-past-date case has always relied on.
+                railradar_confirmed_not_yet_started = False
+                if date_ddmmyyyy != effective_requested_date_str:
                     try:
                         rr_confirmed_start = await asyncio.to_thread(
                             railradar_fallback.get_real_journey_start_date,
-                            train_number, original_requested_date_str,
+                            train_number, effective_requested_date_str,
                         )
                     except Exception:
                         rr_confirmed_start = None
-                    if rr_confirmed_start == original_requested_date_str:
+                    if rr_confirmed_start == effective_requested_date_str:
                         try:
                             rr_corrected_stops = await asyncio.to_thread(
                                 railradar_fallback.fetch_railradar_timeline,
-                                train_number, original_requested_date_str,
+                                train_number, effective_requested_date_str,
                             )
                         except Exception:
                             rr_corrected_stops = []
@@ -5765,8 +5820,19 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                                 train_number, rr_corrected_stops,
                                 train_name=position.train_name, status_note=position.status_note,
                             )
-                            date_ddmmyyyy = original_requested_date_str
+                            date_ddmmyyyy = effective_requested_date_str
                             date_corrected_via_railradar = True
+                    elif (
+                        original_request_implied_todays_run
+                        and rr_confirmed_start is not None
+                        and rr_confirmed_start != today_str
+                    ):
+                        # RailRadar was asked to verify TODAY specifically and
+                        # came back with a real (not missing) startDate that
+                        # ISN'T today — a second, independent real-data source
+                        # agreeing with RailKit that there's no fresh run yet,
+                        # not just RailKit alone possibly being stale/cached.
+                        railradar_confirmed_not_yet_started = True
                 payload["date"] = date_ddmmyyyy
 
                 distance_km, route_progress_ratio = _distance_and_progress_from_route(
@@ -5902,16 +5968,13 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # date_str (captured BEFORE the self-correcting anchor pass,
                 # which can reassign date_ddmmyyyy to a real corrected date)
                 # rather than re-deriving from the possibly-reassigned
-                # date_ddmmyyyy.
+                # date_ddmmyyyy. today_str / original_request_implied_todays_
+                # run / effective_requested_date_str are already computed
+                # earlier in this same poll (see their own comment, right
+                # before the self-correcting anchor pass) — the RailRadar
+                # verification pass in between needs them too, so they're not
+                # redefined here.
                 has_current_station = any(s.get("status") == "current" for s in timeline_json)
-                today_str = datetime.now().strftime("%d-%m-%Y")
-                original_request_implied_todays_run = (
-                    original_requested_date_str is None or original_requested_date_str == today_str
-                )
-                # The date actually being asked for, in the same "what did the
-                # user mean" sense as original_request_implied_todays_run
-                # above — blank means "today" by definition.
-                effective_requested_date_str = original_requested_date_str or today_str
                 if original_date_was_explicit and not has_current_station:
                     payload["date_reliability_warning"] = (
                         "RailKit doesn't reliably support looking up a specific past run by date "
@@ -5924,12 +5987,35 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     and date_ddmmyyyy
                     and date_ddmmyyyy != today_str
                 ):
-                    payload["date_reliability_warning"] = (
-                        "RailKit appears to still be tracking an earlier run of this train that "
-                        "hasn't finished yet, not today's fresh departure — what's shown below may "
-                        "be a day (or more) behind. There's currently no way to make RailKit switch "
-                        "to today's specific run."
-                    )
+                    # BUGFIX ("...for this use railradar if possible" —
+                    # confirmtkt.com's own reference for the identical today
+                    # query reads "Yet to start from Train Source"): when the
+                    # RailRadar verification pass above independently
+                    # confirmed (via its own real startDate field, not a
+                    # guess) that today's run genuinely hasn't departed yet,
+                    # say that plainly and specifically instead of the older,
+                    # vaguer "there's no way to make RailKit switch" message —
+                    # this is no longer just RailKit maybe being stale, it's
+                    # two independent real sources agreeing there's nothing to
+                    # switch TO yet. When RailRadar couldn't confirm either
+                    # way (no key configured, call failed), the original
+                    # honest-but-generic message is unchanged.
+                    if railradar_confirmed_not_yet_started:
+                        payload["date_reliability_warning"] = (
+                            f"Today's ({today_str}) run of this train hasn't started yet — confirmed "
+                            f"independently via RailRadar's own live data, which still resolves this "
+                            f"train's real active run to {date_ddmmyyyy}, not today. What's shown below "
+                            f"is that earlier, still-unfinished run (dated {date_ddmmyyyy}) — not a wrong "
+                            "date, just the wrong one of two overlapping runs — the same thing other "
+                            "trackers show as \"Yet to start from Train Source\" for the same query."
+                        )
+                    else:
+                        payload["date_reliability_warning"] = (
+                            "RailKit appears to still be tracking an earlier run of this train that "
+                            "hasn't finished yet, not today's fresh departure — what's shown below may "
+                            "be a day (or more) behind. There's currently no way to make RailKit switch "
+                            "to today's specific run."
+                        )
                 elif (
                     not original_request_implied_todays_run
                     and has_current_station
