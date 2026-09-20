@@ -8,9 +8,11 @@ import PrimaryButton from "../components/PrimaryButton";
 import MicButton from "../components/MicButton";
 import QueryToolbar from "../components/QueryToolbar";
 import TrackedTrainCard from "../components/TrackedTrainCard";
+import DayPickerModal from "../components/DayPickerModal";
 import { useSettings } from "../context/SettingsContext";
 import { sendChatMessage } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
+import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 
 let trackIdCounter = 0;
 function nextTrackId() {
@@ -29,6 +31,7 @@ export default function LiveTrackingScreen() {
   const [tracked, setTracked] = useState([]);
   const [trainNumber, setTrainNumber] = useState("");
   const [trackDate, setTrackDate] = useState(""); // DD-MM-YYYY, optional - blank = today
+  const [dayPickerVisible, setDayPickerVisible] = useState(false);
   const [source, setSource] = useState("");
   const [dest, setDest] = useState("");
 
@@ -110,6 +113,7 @@ export default function LiveTrackingScreen() {
   }
 
   return (
+    <>
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
       <SectionCard
         title="Track a train"
@@ -122,12 +126,14 @@ export default function LiveTrackingScreen() {
           onChangeText={setTrainNumber}
           keyboardType="number-pad"
         />
-        <LabeledInput
-          label="Date (optional — defaults to today)"
-          placeholder="DD-MM-YYYY, e.g. 20-08-2026"
-          value={trackDate}
-          onChangeText={setTrackDate}
-        />
+        <Text style={styles.fieldLabel}>Date (optional — defaults to today)</Text>
+        <TouchableOpacity style={styles.dateField} onPress={() => setDayPickerVisible(true)} activeOpacity={0.7}>
+          <Ionicons name="calendar-outline" size={16} color={colors.primary} />
+          <Text style={styles.dateFieldText}>
+            {trackDate.trim() ? formatLongLabel(fromDdMmYyyy(trackDate)) || trackDate : "Today"}
+          </Text>
+          <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
+        </TouchableOpacity>
         <View style={styles.row}>
           <LabeledInput
             label="Source (optional)"
@@ -283,6 +289,13 @@ export default function LiveTrackingScreen() {
         />
       ))}
     </ScrollView>
+    <DayPickerModal
+      visible={dayPickerVisible}
+      selected={trackDate}
+      onSelect={setTrackDate}
+      onClose={() => setDayPickerVisible(false)}
+    />
+    </>
   );
 }
 
@@ -300,6 +313,20 @@ const styles = StyleSheet.create({
   content: { padding: spacing.lg },
   row: { flexDirection: "row", gap: spacing.md },
   half: { flex: 1 },
+  fieldLabel: { fontSize: 12, fontWeight: "600", color: colors.textMuted, marginBottom: spacing.xs },
+  dateField: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+    backgroundColor: colors.bg,
+    marginBottom: spacing.md,
+  },
+  dateFieldText: { flex: 1, fontSize: 15, color: colors.text, fontWeight: "600" },
   errorText: { fontSize: 12, color: colors.danger, marginTop: spacing.sm },
   basisList: { marginTop: spacing.sm },
   basisItem: { fontSize: 12, color: colors.textMuted, marginBottom: 2 },

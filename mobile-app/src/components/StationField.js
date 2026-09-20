@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, StyleSheet } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import { searchStations } from "../api/railwayApi";
 
@@ -28,6 +29,7 @@ export default function StationField({
   onSelectStation,
   apiBaseUrl,
   style,
+  icon = "location-outline",
 }) {
   const [focused, setFocused] = useState(false);
   const [matches, setMatches] = useState([]);
@@ -86,20 +88,35 @@ export default function StationField({
   return (
     <View style={[styles.wrap, style]}>
       <Text style={styles.label}>{label}</Text>
-      <TextInput
-        style={styles.codeInput}
-        value={value}
-        onChangeText={onChangeText}
-        onFocus={handleFocus}
-        onBlur={handleBlur}
-        placeholder={placeholder}
-        placeholderTextColor={colors.textMuted}
-        autoCapitalize="characters"
-        autoCorrect={false}
-      />
-      {resolvedName ? (
-        <Text numberOfLines={1} style={styles.nameLine}>{resolvedName}</Text>
-      ) : null}
+      <View style={[styles.box, focused && styles.boxFocused]}>
+        <Ionicons name={icon} size={16} color={focused ? colors.orange : colors.textMuted} style={styles.boxIcon} />
+        <View style={styles.boxTextCol}>
+          <TextInput
+            style={styles.codeInput}
+            value={value}
+            onChangeText={onChangeText}
+            onFocus={handleFocus}
+            onBlur={handleBlur}
+            placeholder={placeholder}
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="characters"
+            autoCorrect={false}
+            numberOfLines={1}
+          />
+          {resolvedName ? (
+            <Text numberOfLines={1} style={styles.nameLine}>{resolvedName}</Text>
+          ) : null}
+        </View>
+        {value ? (
+          <TouchableOpacity
+            onPress={() => { onChangeText(""); }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={styles.clearBtn}
+          >
+            <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        ) : null}
+      </View>
 
       {showDropdown ? (
         <View style={styles.dropdown}>
@@ -134,13 +151,36 @@ const styles = StyleSheet.create({
   // its row is exactly the kind of thing that gets clipped or loses its
   // z-index ordering inside a ScrollView/FlatList on Android — inline is
   // the version that's guaranteed to actually show up everywhere.
-  wrap: {},
-  label: { fontSize: 11, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 2 },
+  wrap: { minWidth: 0 },
+  label: { fontSize: 11, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 },
+  box: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.bg,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: spacing.sm,
+    minHeight: 52,
+  },
+  boxFocused: {
+    borderColor: colors.orange,
+    backgroundColor: colors.card,
+    shadowColor: colors.orange,
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  boxIcon: { marginRight: 6 },
+  boxTextCol: { flex: 1, minWidth: 0 },
+  clearBtn: { marginLeft: 4, padding: 2 },
   codeInput: {
-    fontSize: 20,
+    fontSize: 16,
     fontWeight: "700",
     color: colors.text,
-    paddingVertical: 2,
+    padding: 0,
   },
   nameLine: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
   dropdown: {

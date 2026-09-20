@@ -276,7 +276,11 @@ export default function TrainSearchScreen() {
 
       <FlatList
         style={styles.flex}
-        data={filteredTrains}
+        // Gated on formCollapsed (not just "do we have trains") so a
+        // result set that's already in state can never render underneath
+        // the still-open search form — the two must only ever be visible
+        // one at a time, matching the toolbar/orange-header switch below.
+        data={formCollapsed ? filteredTrains : []}
         keyExtractor={(item, idx) => `${item.train_number}_${idx}`}
         contentContainerStyle={styles.listContent}
         // NOTE: the search form used to sit in its own fixed View above a
@@ -295,16 +299,27 @@ export default function TrainSearchScreen() {
                 title="Search trains"
                 subtitle="Real-time filter by source, destination, date, class and quota — dropdowns and live suggestions, just like IRCTC."
               >
-                <View style={styles.row}>
+                <View style={styles.stationRow}>
                   <StationField
-                    label="From" placeholder="e.g. NDLS or Delhi"
+                    label="From" placeholder="e.g. NDLS or Delhi" icon="radio-button-on-outline"
                     value={source} resolvedName={sourceName}
                     onChangeText={(t) => { setSource(t); setSourceName(null); }}
                     onSelectStation={(m) => { setSource(m.code); setSourceName(m.name); }}
                     apiBaseUrl={apiBaseUrl} style={styles.half}
                   />
+                  <TouchableOpacity
+                    style={styles.swapBtn}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      const s = source, sn = sourceName, d = dest, dn = destName;
+                      setSource(d); setSourceName(dn);
+                      setDest(s); setDestName(sn);
+                    }}
+                  >
+                    <Ionicons name="swap-horizontal" size={16} color={colors.orange} />
+                  </TouchableOpacity>
                   <StationField
-                    label="To" placeholder="e.g. BCT or Mumbai"
+                    label="To" placeholder="e.g. BCT or Mumbai" icon="flag-outline"
                     value={dest} resolvedName={destName}
                     onChangeText={(t) => { setDest(t); setDestName(null); }}
                     onSelectStation={(m) => { setDest(m.code); setDestName(m.name); }}
@@ -482,10 +497,10 @@ export default function TrainSearchScreen() {
           );
         }}
         ListEmptyComponent={
-          trains ? <Text style={styles.emptyText}>No trains to show.</Text> : null
+          formCollapsed && trains ? <Text style={styles.emptyText}>No trains to show.</Text> : null
         }
         ListFooterComponent={
-          meta && meta.totalPages > 1 ? (
+          formCollapsed && meta && meta.totalPages > 1 ? (
             <View style={styles.pagination}>
               <PrimaryButton
                 title="← Prev"
@@ -552,6 +567,18 @@ const styles = StyleSheet.create({
   content: { padding: spacing.lg, paddingBottom: 0 },
   row: { flexDirection: "row", gap: spacing.md },
   half: { flex: 1 },
+  stationRow: { flexDirection: "row", alignItems: "flex-end", gap: spacing.sm },
+  swapBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.card,
+    borderWidth: 1.5,
+    borderColor: colors.orange,
+    marginBottom: 10,
+  },
   listContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.lg },
   error: { color: colors.danger, fontSize: 12, marginTop: spacing.sm },
   note: { color: colors.textMuted, fontSize: 12, marginTop: spacing.sm },
