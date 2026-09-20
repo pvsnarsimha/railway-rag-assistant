@@ -15,13 +15,23 @@ export const colors = {
   bubbleUser: "#0B3D91",
   bubbleAssistant: "#FFFFFF",
   chip: "#EEF2FA",
-  // IRCTC-style warm accent, used only by the Train Search screen's
-  // header/date-chips/search button (see TrainSearchScreen.js) — kept as
-  // its own tokens rather than repurposing `accent` so every other screen
-  // that already uses `accent` (signal amber) is completely unaffected.
-  orange: "#EF6C1B",
-  orangeDark: "#C6510F",
-  orangeSoft: "#FDECE0",
+
+  // IRCTC-style orange — used by the Trains Between Stations redesign
+  // (results header, Class/Quota picker checkmarks, Tatkal accents,
+  // StationField.js's From/To dropdown, OptionSheetModal.js's selected
+  // row) so that flow reads as its own distinct "booking" surface rather
+  // than reusing the app's railway-blue chrome everywhere.
+  orange: "#E85D25",
+  orangeDark: "#C94A1B",
+  orangeLight: "#FCE8DD",
+  // Two flat tones stood in for the header's real diagonal gradient (no
+  // gradient library in this project's deps — see the header comment in
+  // TrainSearchScreen.js) — kept here so the "gradient" is defined once,
+  // not re-picked per screen.
+  headerGradientFrom: "#F0742E",
+  headerGradientTo: "#C94A1B",
+  runDayActive: "#1E8E3E",
+  runDayInactive: "#B7BECB",
 };
 
 export const spacing = {

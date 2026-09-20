@@ -447,6 +447,38 @@ def filter_by_time_bands(trains: List[TrainSummary], departure_start: Optional[s
     return fallback, False, sample_diagnostics
 
 
+def _duration_minutes(departure_hhmm: Optional[str], arrival_hhmm: Optional[str]) -> Optional[int]:
+    """Real elapsed time computed from the provider's own departure/arrival
+    clock times - same approach journey_planner.py's _duration_minutes()
+    uses (kept as its own small copy here rather than a cross-module import,
+    since this module has no other dependency on journey_planner). Assumes
+    a same-day-or-next-day journey (wraps once past midnight); genuinely
+    multi-day trains read as their same-clock-time-tomorrow duration, the
+    honest limit of clock-only data with no explicit day-offset field."""
+    if not departure_hhmm or not arrival_hhmm:
+        return None
+    try:
+        dh, dm = str(departure_hhmm).split(":")[:2]
+        ah, am = str(arrival_hhmm).split(":")[:2]
+        dep = int(dh) * 60 + int(dm)
+        arr = int(ah) * 60 + int(am)
+    except (ValueError, TypeError):
+        return None
+    diff = arr - dep
+    if diff < 0:
+        diff += 1440
+    return diff
+
+
+def _format_duration_hm(minutes: Optional[int]) -> Optional[str]:
+    """IRCTC-style "4h:45m" display, for the dep—duration—arr line on the
+    Trains Between Stations results card."""
+    if minutes is None:
+        return None
+    h, m = divmod(minutes, 60)
+    return f"{h}h:{m:02d}m"
+
+
 def train_to_dict(t: TrainSummary) -> dict:
     """Plain-dict shape for JSON API responses (frontend/mobile train-search
     endpoint) - only ever built from an already-parsed TrainSummary, so
@@ -454,7 +486,27 @@ def train_to_dict(t: TrainSummary) -> dict:
     time (at destination) are both included, under two names each -
     source_departure/dest_arrival (original field names, kept for anything
     already reading them) and departure_time/arrival_time (clearer names
-    for new callers) - same values, not two separate lookups."""
+    for new callers) - same values, not two separate lookups.
+
+    Also includes two IRCTC-style presentation fields, both honestly
+    derived (never guessed) from data already on the TrainSummary:
+      - running_days: which weekdays (0=Mon..6=Sun) this train is
+        confirmed to run, parsed from the same running_days_raw field
+        filter_by_running_date() already uses server-side — or null if the
+        provider's shape for this train couldn't be recognised (never
+        rendered as "runs no days", since that would misreport an unknown
+        as a confirmed no).
+      - duration_display/duration_minutes: computed from the train's own
+        real departure/arrival clock times (same formula journey_planner.py
+        uses for its "fastest" ranking) rather than trusted as-is from
+        whatever raw "travel_time"-shaped field the provider sent, which
+        varies in format/units across providers. Falls back to the raw
+        provider string only when both real times aren't available to
+        compute from.
+    """
+    parsed_days = _parse_running_days(t.running_days_raw)
+    duration_minutes = _duration_minutes(t.source_departure, t.dest_arrival)
+    duration_display = _format_duration_hm(duration_minutes) or t.duration
     return {
         "train_number": t.train_number,
         "train_name": t.train_name,
@@ -462,8 +514,10 @@ def train_to_dict(t: TrainSummary) -> dict:
         "dest_arrival": t.dest_arrival,
         "departure_time": t.source_departure,
         "arrival_time": t.dest_arrival,
-        "duration": t.duration,
+        "duration": duration_display,
+        "duration_minutes": duration_minutes,
         "classes": t.classes,
+        "running_days": sorted(parsed_days) if parsed_days is not None else None,
         "minutes_from_requested_time": t.minutes_from_requested_time,
     }
 

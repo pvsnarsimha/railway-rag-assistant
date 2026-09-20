@@ -54,7 +54,17 @@ export async function searchStations(baseUrl, { query, topK = 5 }) {
  * trains_between.py path the chat TRAINS_BETWEEN intent uses, just as a
  * structured form endpoint instead of free-text chat.
  */
-export async function searchTrains(baseUrl, { source, dest, date, time, travelClass, quota, limit = 10, page = 1 }) {
+export async function searchTrains(baseUrl, {
+  source, dest, date, time, travelClass, quota, limit = 10, page = 1,
+  // IRCTC-REDESIGN: the backend's TrainSearchRequest (app.py) has always
+  // accepted these four time-band fields plus available_only/
+  // waitlisted_only — the mobile Trains Between Stations screen just
+  // never sent them, so the Filter sheet had nothing real to wire into.
+  // Same "around this exact time" convention as the backend: start==end
+  // means a point-in-time match, not a range.
+  departureStart, departureEnd, arrivalStart, arrivalEnd,
+  availableOnly, waitlistedOnly,
+} = {}) {
   // BUGFIX: picking a real class (not "Any") together with a date makes
   // the backend run up to ~36 real per-train availability/fare checks
   // against RapidAPI (now parallelized server-side, but still real
@@ -72,6 +82,12 @@ export async function searchTrains(baseUrl, { source, dest, date, time, travelCl
     time: time || null,
     travel_class: travelClass || null,
     quota: quota || "GN",
+    departure_start: departureStart || null,
+    departure_end: departureEnd || null,
+    arrival_start: arrivalStart || null,
+    arrival_end: arrivalEnd || null,
+    available_only: !!availableOnly,
+    waitlisted_only: !!waitlistedOnly,
     limit: Math.max(1, Math.min(50, limit)),
     page,
   });

@@ -1,21 +1,26 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Linking, Alert, ScrollView } from "react-native";
-import * as Clipboard from "expo-clipboard";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import React, { useState, useMemo } from "react";
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, ScrollView, Linking, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import * as Clipboard from "expo-clipboard";
 import { colors, spacing, radius } from "../theme/colors";
+import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
 import StationField from "../components/StationField";
 import OptionSheetModal from "../components/OptionSheetModal";
+import DateStrip from "../components/DateStrip";
+import MonthCalendarModal from "../components/MonthCalendarModal";
+import FilterSheetModal from "../components/FilterSheetModal";
+import RunningDaysRow from "../components/RunningDaysRow";
+import ClassAvailabilityChip from "../components/ClassAvailabilityChip";
 import { useSettings } from "../context/SettingsContext";
 import { searchTrains } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
-import { STORAGE_KEYS } from "../config";
+import { fromDdMmYyyy, formatLongLabel, hhmmToMinutes, addDays } from "../utils/dateFormat";
 
 const MIN_LIMIT = 1;
 const MAX_LIMIT = 50;
-const RECENT_SEARCHES_MAX = 6;
+const DEFAULT_LIMIT = 20;
 
 // Real official IRCTC booking portal — this app shows real train info but
 // can't book tickets itself (no IRCTC booking API access), so booking is
@@ -57,167 +62,132 @@ async function bookOnIrctc(details) {
   }
 }
 
-// REDESIGN (IRCTC-style Train Search): full display names for the Class
-// picker's bottom sheet — the field itself still stores/sends the plain
-// code (searchTrains only ever takes "1A"/"3A"/etc., same as before).
+// Full IRCTC-style names for the Class picker sheet — same codes the
+// backend's travel_class filter has always accepted (see app.py's
+// TrainSearchRequest docstring), just given the long label IRCTC itself
+// shows rather than the bare 2-3 letter code.
 const CLASS_OPTIONS = [
-  { code: "Any", label: "All Classes" },
-  { code: "1A", label: "AC First Class (1A)" },
-  { code: "2A", label: "AC 2 Tier (2A)" },
-  { code: "3A", label: "AC 3 Tier (3A)" },
-  { code: "3E", label: "AC 3 Economy (3E)" },
-  { code: "CC", label: "AC Chair Car (CC)" },
-  { code: "EC", label: "Executive Chair Car (EC)" },
-  { code: "SL", label: "Sleeper (SL)" },
-  { code: "2S", label: "Second Sitting (2S)" },
+  { key: "Any", label: "All Classes" },
+  { key: "1A", label: "AC First Class (1A)" },
+  { key: "2A", label: "AC 2 Tier (2A)" },
+  { key: "3A", label: "AC 3 Tier (3A)" },
+  { key: "3E", label: "AC 3 Economy (3E)" },
+  { key: "CC", label: "AC Chair car (CC)" },
+  { key: "EC", label: "Exec. Chair Car (EC)" },
+  { key: "SL", label: "Sleeper (SL)" },
+  { key: "2S", label: "Second Sitting (2S)" },
 ];
-
-// Same real quota codes the backend/RapidAPI already accepted before this
-// redesign — just reordered and relabelled to read the way IRCTC's own
-// Quota sheet does (General, Ladies, Tatkal, Lower Berth/Sr. Citizen,
-// Premium Tatkal, Person with disability, ...). No code was invented or
-// removed to chase the screenshot; a quota IRCTC shows that has no real
-// equivalent here (e.g. "Duty Pass") is left out rather than faked.
 const QUOTA_OPTIONS = [
-  { code: "GN", label: "General" },
-  { code: "LD", label: "Ladies" },
-  { code: "TQ", label: "Tatkal" },
-  { code: "LB", label: "Lower Berth" },
-  { code: "SS", label: "Senior Citizen" },
-  { code: "PT", label: "Premium Tatkal" },
-  { code: "HP", label: "Person with Disability" },
-  { code: "DF", label: "Defence" },
-  { code: "HO", label: "HQ" },
-  { code: "PQ", label: "Pooled" },
-  { code: "RL", label: "Remote Location" },
-  { code: "RS", label: "Road Side" },
-  { code: "PH", label: "Parliament" },
-  { code: "FT", label: "Foreign Tourist" },
+  { key: "GN", label: "General" }, { key: "PQ", label: "Pooled Quota" },
+  { key: "RL", label: "Remote Location" }, { key: "RS", label: "Road Side" },
+  { key: "TQ", label: "Tatkal" }, { key: "PT", label: "Premium Tatkal" },
+  { key: "LD", label: "Ladies" }, { key: "SS", label: "Lower Berth/Sr. Citizen" },
+  { key: "HP", label: "Person with Disability" }, { key: "LB", label: "Lower Berth" },
+  { key: "DF", label: "Defence" }, { key: "HO", label: "Duty Pass" },
+  { key: "PH", label: "Parliament" }, { key: "FT", label: "Foreign Tourist" },
+];
+const SORT_OPTIONS = [
+  { key: "departure", label: "Departure Time" },
+  { key: "arrival", label: "Arrival Time" },
+  { key: "duration", label: "Duration (shortest first)" },
 ];
 
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-function pad2(n) {
-  return n < 10 ? `0${n}` : String(n);
+function classLabel(code) {
+  return CLASS_OPTIONS.find((c) => c.key === code)?.label || code;
 }
-
-function toDdMmYyyy(d) {
-  return `${pad2(d.getDate())}-${pad2(d.getMonth() + 1)}-${d.getFullYear()}`;
-}
-
-// IRCTC's own search screen shows a horizontal row of the next several
-// days instead of a free-text date box — this builds that same row from
-// today's real device date (no server round trip needed for it).
-function buildDateChips(count = 7) {
-  const today = new Date();
-  const chips = [];
-  for (let i = 0; i < count; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() + i);
-    chips.push({
-      value: toDdMmYyyy(d),
-      dayLabel: i === 0 ? "Today" : WEEKDAYS[d.getDay()],
-      dayNum: d.getDate(),
-      month: MONTHS[d.getMonth()],
-    });
-  }
-  return chips;
-}
-
-function findLabel(options, code) {
-  return options.find((o) => o.code === code)?.label || code;
+function quotaLabel(code) {
+  const opt = QUOTA_OPTIONS.find((q) => q.key === code);
+  return opt ? `${opt.label} (${opt.key})` : code;
 }
 
 export default function TrainSearchScreen() {
   const { apiBaseUrl } = useSettings();
-  const dateChips = useMemo(() => buildDateChips(7), []);
 
+  // --- search form state ---
   const [source, setSource] = useState("");
-  const [sourceName, setSourceName] = useState("");
   const [dest, setDest] = useState("");
-  const [destName, setDestName] = useState("");
-  const [date, setDate] = useState(dateChips[0].value);
-  const [showTimeFilter, setShowTimeFilter] = useState(false);
-  const [time, setTime] = useState("");
+  const [sourceName, setSourceName] = useState(null);
+  const [destName, setDestName] = useState(null);
+  const [date, setDate] = useState("");
   const [travelClass, setTravelClass] = useState("Any");
   const [quota, setQuota] = useState("GN");
-  const [limitText, setLimitText] = useState("10");
-  const [classPickerOpen, setClassPickerOpen] = useState(false);
-  const [quotaPickerOpen, setQuotaPickerOpen] = useState(false);
+  const [limitText, setLimitText] = useState(String(DEFAULT_LIMIT));
 
-  const [recentSearches, setRecentSearches] = useState([]);
+  // --- filters (Filter sheet — real backend fields, previously unwired) ---
+  const [filters, setFilters] = useState({
+    departureBand: null, arrivalBand: null,
+    departureStart: null, departureEnd: null, arrivalStart: null, arrivalEnd: null,
+    availableOnly: false, waitlistedOnly: false,
+  });
 
+  // --- results state ---
   const [trains, setTrains] = useState(null);
-  const [meta, setMeta] = useState(null); // { total, page, total_pages, limit }
+  const [meta, setMeta] = useState(null);
   const [note, setNote] = useState(null);
   const [fareNote, setFareNote] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [formCollapsed, setFormCollapsed] = useState(false);
 
-  useEffect(() => {
-    AsyncStorage.getItem(STORAGE_KEYS.RECENT_TRAIN_SEARCHES)
-      .then((raw) => {
-        if (!raw) return;
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) setRecentSearches(parsed);
-      })
-      .catch(() => {});
-  }, []);
+  // --- toolbar state ---
+  const [sortBy, setSortBy] = useState("departure");
+  const [resultQuery, setResultQuery] = useState("");
+  const [classModalVisible, setClassModalVisible] = useState(false);
+  const [quotaModalVisible, setQuotaModalVisible] = useState(false);
+  const [sortModalVisible, setSortModalVisible] = useState(false);
+  const [calendarVisible, setCalendarVisible] = useState(false);
+  const [filterVisible, setFilterVisible] = useState(false);
 
-  function clampedLimit(text) {
-    const n = parseInt(text, 10);
-    if (!Number.isFinite(n)) return 10;
+  function clampedLimit() {
+    const n = parseInt(limitText, 10);
+    if (!Number.isFinite(n)) return DEFAULT_LIMIT;
     return Math.max(MIN_LIMIT, Math.min(MAX_LIMIT, n));
   }
 
-  function swapStations() {
-    setSource(dest);
-    setSourceName(destName);
-    setDest(source);
-    setDestName(sourceName);
-  }
-
-  async function rememberSearch(entry) {
-    const deduped = [entry, ...recentSearches.filter((r) => !(r.source === entry.source && r.dest === entry.dest && r.travelClass === entry.travelClass))];
-    const capped = deduped.slice(0, RECENT_SEARCHES_MAX);
-    setRecentSearches(capped);
-    try {
-      await AsyncStorage.setItem(STORAGE_KEYS.RECENT_TRAIN_SEARCHES, JSON.stringify(capped));
-    } catch (e) {
-      // Recent searches are a convenience, not core functionality — never
-      // block or error the actual search over a failed local save.
+  function sortTrains(list, key) {
+    const sorted = [...list];
+    if (key === "duration") {
+      sorted.sort((a, b) => (a.duration_minutes ?? 1e9) - (b.duration_minutes ?? 1e9));
+    } else if (key === "arrival") {
+      sorted.sort((a, b) => (hhmmToMinutes(a.dest_arrival) ?? 1e9) - (hhmmToMinutes(b.dest_arrival) ?? 1e9));
+    } else {
+      sorted.sort((a, b) => (hhmmToMinutes(a.source_departure) ?? 1e9) - (hhmmToMinutes(b.source_departure) ?? 1e9));
     }
+    return sorted;
   }
 
-  // Centralised so both the Search button (uses whatever is currently in
-  // state), pagination (Prev/Next, also current state, just a different
-  // page), and a tapped "Recent Search" card (which needs to search with
-  // values the state setters above it haven't necessarily flushed to yet)
-  // all go through the same real request-building + error-handling path.
-  async function performSearch({ source: srcArg, dest: destArg, date: dateArg, travelClass: classArg, quota: quotaArg, page = 1 } = {}) {
-    const src = srcArg !== undefined ? srcArg : source;
-    const dst = destArg !== undefined ? destArg : dest;
-    const dt = dateArg !== undefined ? dateArg : date;
-    const cls = classArg !== undefined ? classArg : travelClass;
-    const qt = quotaArg !== undefined ? quotaArg : quota;
+  // `overrides` lets a toolbar action (Tatkal toggle, date strip, filter
+  // sheet Apply) pass the field(s) it just changed straight into this
+  // call, instead of relying on React state that won't have updated yet
+  // inside the same event handler (classic stale-closure trap).
+  async function runSearch(page, overrides = {}) {
+    const effSource = overrides.source ?? source;
+    const effDest = overrides.dest ?? dest;
+    const effDate = overrides.date ?? date;
+    const effClass = overrides.travelClass ?? travelClass;
+    const effQuota = overrides.quota ?? quota;
+    const effFilters = overrides.filters ?? filters;
 
-    if (!src.trim() || !dst.trim()) {
+    if (!effSource.trim() || !effDest.trim()) {
       setError("Enter both source and destination.");
       return;
     }
-    const limit = clampedLimit(limitText);
-    setLimitText(String(limit));
+    const limit = clampedLimit();
     setLoading(true);
     setError(null);
     try {
       const data = await searchTrains(apiBaseUrl, {
-        source: src.trim(),
-        dest: dst.trim(),
-        date: dt?.trim() || null,
-        time: time.trim() || null,
-        travelClass: cls === "Any" ? null : cls,
-        quota: qt,
+        source: effSource.trim(),
+        dest: effDest.trim(),
+        date: effDate.trim() || null,
+        travelClass: effClass === "Any" ? null : effClass,
+        quota: effQuota,
+        departureStart: effFilters.departureStart,
+        departureEnd: effFilters.departureEnd,
+        arrivalStart: effFilters.arrivalStart,
+        arrivalEnd: effFilters.arrivalEnd,
+        availableOnly: effFilters.availableOnly,
+        waitlistedOnly: effFilters.waitlistedOnly,
         limit,
         page,
       });
@@ -225,19 +195,18 @@ export default function TrainSearchScreen() {
         setError(data.error);
         setTrains([]);
         setMeta(null);
+        // Still switch to the results view (orange header + toolbar) even
+        // on a genuine error, same as the rest of this flow — staying on
+        // the plain form would bury the error below an unrelated "Search"
+        // button instead of showing it where results normally appear.
+        setFormCollapsed(true);
         return;
       }
-      setTrains(data.trains || []);
+      setTrains(sortTrains(data.trains || [], sortBy));
       setMeta({ total: data.total, page: data.page, totalPages: data.total_pages, limit: data.limit });
       setNote(data.availability_note || data.error || null);
-      // FEATURE: fare-on-every-result (was previously only in the
-      // separate Route Compare / Fare Heatmap tools) — see fare_note for
-      // the honest cap/limitation text (e.g. "class needed" or "only the
-      // first N trains checked").
       setFareNote(data.fare_note || null);
-      if (page === 1) {
-        rememberSearch({ source: src.trim(), dest: dst.trim(), date: dt || null, travelClass: cls, quota: qt });
-      }
+      setFormCollapsed(true);
     } catch (e) {
       setError(describeApiError(e));
       setTrains(null);
@@ -247,224 +216,271 @@ export default function TrainSearchScreen() {
     }
   }
 
-  function runRecentSearch(entry) {
-    setSource(entry.source);
-    setSourceName("");
-    setDest(entry.dest);
-    setDestName("");
-    if (entry.date) setDate(entry.date);
-    setTravelClass(entry.travelClass || "Any");
-    setQuota(entry.quota || "GN");
-    performSearch({ source: entry.source, dest: entry.dest, date: entry.date, travelClass: entry.travelClass, quota: entry.quota, page: 1 });
+  function applySort(key) {
+    setSortBy(key);
+    if (trains) setTrains((prev) => sortTrains(prev, key));
   }
+
+  function toggleTatkal() {
+    const next = quota === "TQ" ? "GN" : "TQ";
+    setQuota(next);
+    if (formCollapsed) runSearch(1, { quota: next });
+  }
+
+  function pickDate(ddmmyyyy) {
+    setDate(ddmmyyyy);
+    if (formCollapsed) runSearch(1, { date: ddmmyyyy });
+  }
+
+  function applyFilters(next) {
+    setFilters(next);
+    if (formCollapsed) runSearch(1, { filters: next });
+  }
+
+  const selectedDateObj = fromDdMmYyyy(date);
+  const headerDateLabel = selectedDateObj ? formatLongLabel(selectedDateObj) : "any date";
+
+  const filteredTrains = useMemo(() => {
+    if (!trains) return [];
+    const q = resultQuery.trim().toLowerCase();
+    if (!q) return trains;
+    return trains.filter(
+      (t) => t.train_number?.toLowerCase().includes(q) || t.train_name?.toLowerCase().includes(q),
+    );
+  }, [trains, resultQuery]);
 
   const canPrev = meta && meta.page > 1;
   const canNext = meta && meta.page < meta.totalPages;
-  const selectedDateChip = dateChips.find((c) => c.value === date);
+  const activeFilterCount =
+    (filters.departureBand ? 1 : 0) + (filters.arrivalBand ? 1 : 0) + (filters.availableOnly ? 1 : 0) + (filters.waitlistedOnly ? 1 : 0);
 
   return (
     <View style={styles.flex}>
-    <FlatList
-      style={styles.flex}
-      data={trains || []}
-      keyExtractor={(item, idx) => `${item.train_number}_${idx}`}
-      contentContainerStyle={styles.listContent}
-      keyboardShouldPersistTaps="handled"
-      // NOTE: the search form used to sit in its own fixed View above a
-      // separate FlatList. On a short viewport (a phone, or — especially —
-      // the web build, where the page can't fall back to body scrolling)
-      // that left no way to reach the results below a tall form: two
-      // sibling scroll regions inside one flex column both default to
-      // flex-shrink, so the results pane could get squeezed to ~0 height
-      // instead of getting its own scrollbar. Making the whole screen ONE
-      // FlatList (form as its header) gives everything a single, always-
-      // reachable scroll container — same idiom used to fix StationSearchScreen.
-      ListHeaderComponent={
-        <View style={styles.content}>
-          <View style={styles.searchCard}>
-            <View style={styles.stationRow}>
-              <StationField
-                label="From"
-                placeholder="Enter city or station"
-                value={source}
-                resolvedName={sourceName}
-                apiBaseUrl={apiBaseUrl}
-                onChangeText={(t) => { setSource(t); setSourceName(""); }}
-                onSelectStation={(m) => { setSource(m.code); setSourceName(m.name); }}
-                style={styles.stationHalf}
-              />
-              <TouchableOpacity style={styles.swapBtn} onPress={swapStations} accessibilityLabel="Swap source and destination">
-                <Ionicons name="swap-horizontal" size={20} color={colors.orange} />
-              </TouchableOpacity>
-              <StationField
-                label="To"
-                placeholder="Enter city or station"
-                value={dest}
-                resolvedName={destName}
-                apiBaseUrl={apiBaseUrl}
-                onChangeText={(t) => { setDest(t); setDestName(""); }}
-                onSelectStation={(m) => { setDest(m.code); setDestName(m.name); }}
-                style={styles.stationHalf}
-              />
-            </View>
-
-            <Text style={styles.sectionLabel}>Departure Date</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.dateRow} contentContainerStyle={styles.dateRowContent}>
-              {dateChips.map((chip) => {
-                const active = chip.value === date;
-                return (
-                  <TouchableOpacity
-                    key={chip.value}
-                    style={[styles.dateChip, active && styles.dateChipActive]}
-                    onPress={() => setDate(chip.value)}
-                  >
-                    <Text style={[styles.dateChipDay, active && styles.dateChipTextActive]}>{chip.dayLabel}</Text>
-                    <Text style={[styles.dateChipDate, active && styles.dateChipTextActive]}>{chip.dayNum} {chip.month}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-
-            {showTimeFilter ? (
-              <LabeledInput
-                label="Time (HH:MM, optional)"
-                placeholder="15:30"
-                value={time}
-                onChangeText={setTime}
-                autoCapitalize="none"
-                keyboardType="numbers-and-punctuation"
-              />
-            ) : (
-              <TouchableOpacity onPress={() => setShowTimeFilter(true)} style={styles.linkRow}>
-                <Ionicons name="add-circle-outline" size={15} color={colors.primary} />
-                <Text style={styles.linkText}>Filter by a specific departure time</Text>
-              </TouchableOpacity>
-            )}
-
-            <View style={styles.pickerRow}>
-              <TouchableOpacity style={[styles.pickerField, styles.pickerHalf]} onPress={() => setClassPickerOpen(true)}>
-                <Text style={styles.sectionLabel}>Class</Text>
-                <View style={styles.pickerValueRow}>
-                  <Text style={styles.pickerValue} numberOfLines={1}>{findLabel(CLASS_OPTIONS, travelClass)}</Text>
-                  <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-                </View>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.pickerField, styles.pickerHalf]} onPress={() => setQuotaPickerOpen(true)}>
-                <Text style={styles.sectionLabel}>Quota</Text>
-                <View style={styles.pickerValueRow}>
-                  <Text style={styles.pickerValue} numberOfLines={1}>{findLabel(QUOTA_OPTIONS, quota)}</Text>
-                  <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-                </View>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.limitRow}>
-              <Text style={styles.limitLabel}>Results per page ({MIN_LIMIT}-{MAX_LIMIT})</Text>
-              <LabeledInput
-                value={limitText}
-                onChangeText={setLimitText}
-                keyboardType="number-pad"
-                style={styles.limitInput}
-              />
-            </View>
-
-            <PrimaryButton title="SEARCH TRAINS" onPress={() => performSearch({ page: 1 })} loading={loading} style={styles.searchBtn} />
-            {error ? <Text style={styles.error}>{error}</Text> : null}
-            {meta ? (
-              <Text style={styles.note}>
-                {meta.total} train{meta.total === 1 ? "" : "s"} found — page {meta.page} of {meta.totalPages} ({meta.limit}/page)
-                {note ? ` — ${note}` : ""}
-              </Text>
-            ) : null}
-            {fareNote ? <Text style={styles.note}>💰 {fareNote}</Text> : null}
-          </View>
-
-          {recentSearches.length > 0 ? (
-            <View style={styles.recentWrap}>
-              <Text style={styles.sectionLabel}>Recent Searches</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentRowContent}>
-                {recentSearches.map((entry, idx) => (
-                  <TouchableOpacity key={`${entry.source}_${entry.dest}_${idx}`} style={styles.recentCard} onPress={() => runRecentSearch(entry)}>
-                    <View style={styles.recentCardTop}>
-                      <Text style={styles.recentCode}>{entry.source}</Text>
-                      <Ionicons name="arrow-forward" size={13} color={colors.textMuted} style={{ marginHorizontal: 4 }} />
-                      <Text style={styles.recentCode}>{entry.dest}</Text>
-                    </View>
-                    <Text style={styles.recentMeta}>
-                      {entry.date || "any date"}{entry.travelClass && entry.travelClass !== "Any" ? ` · ${entry.travelClass}` : ""}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            </View>
-          ) : null}
-
-          {trains && trains.length > 0 ? (
-            <Text style={styles.resultsHeading}>
-              {(sourceName || source).toString().toUpperCase()} → {(destName || dest).toString().toUpperCase()}
-              {selectedDateChip ? ` · ${selectedDateChip.dayLabel !== "Today" ? selectedDateChip.dayLabel + ", " : ""}${selectedDateChip.dayNum} ${selectedDateChip.month}` : ""}
+      {formCollapsed ? (
+        // IRCTC-style orange results header — a real gradient library isn't
+        // in this project's deps, so a solid orange tone stands in for the
+        // diagonal gradient in the reference screenshots (see colors.js's
+        // headerGradientFrom/To, kept defined for if one gets added later).
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => setFormCollapsed(false)} style={styles.backBtn}>
+            <Ionicons name="arrow-back" size={22} color={colors.textInverse} />
+          </TouchableOpacity>
+          <View style={styles.headerTextWrap}>
+            <Text numberOfLines={1} style={styles.headerRoute}>
+              {(sourceName || source).toString().toUpperCase()} TO {(destName || dest).toString().toUpperCase()}
             </Text>
-          ) : null}
-        </View>
-      }
-      renderItem={({ item }) => (
-          <View style={styles.trainRow}>
-            <View style={styles.trainHeaderRow}>
-              <Text style={styles.trainName} numberOfLines={1}>{item.train_name}</Text>
-              <View style={styles.numberBadge}>
-                <Text style={styles.numberBadgeText}>{item.train_number}</Text>
-              </View>
-            </View>
-
-            <View style={styles.timingRow}>
-              <View style={styles.timingSide}>
-                <Text style={styles.timingValue}>{item.source_departure || "—"}</Text>
-              </View>
-              <View style={styles.timingMiddle}>
-                <View style={styles.timingLine} />
-                <Text style={styles.timingDuration}>{item.duration || "duration n/a"}</Text>
-                <View style={styles.timingLine} />
-              </View>
-              <View style={[styles.timingSide, { alignItems: "flex-end" }]}>
-                <Text style={styles.timingValue}>{item.dest_arrival || "—"}</Text>
-              </View>
-            </View>
-
-            {!item.source_departure && !item.dest_arrival ? (
-              <Text style={styles.trainMeta}>timing not available</Text>
-            ) : null}
-
-            {!!item.classes?.length && (
-              <View style={styles.classPillRow}>
-                {item.classes.map((c) => (
-                  <View key={c} style={styles.classPill}>
-                    <Text style={styles.classPillText}>{c}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-            {item.availability_status ? (
-              <Text style={styles.availabilityBadge}>{item.availability_status}</Text>
-            ) : item.availability_error ? (
-              <Text style={styles.trainMeta}>availability unavailable</Text>
-            ) : null}
-            {item.fare != null ? (
-              <Text style={styles.fareBadge}>₹{item.fare}{item.quota ? ` (${item.quota})` : ""} — est. via RailKit, not live IRCTC pricing</Text>
-            ) : item.fare_error ? (
-              <Text style={styles.trainMeta}>fare unavailable</Text>
-            ) : null}
-            <TouchableOpacity
-              onPress={() => bookOnIrctc({
-                trainNumber: item.train_number, trainName: item.train_name,
-                source: source.trim(), dest: dest.trim(), date: date.trim(),
-                travelClass: travelClass === "Any" ? null : travelClass, quota,
-              })}
-              style={styles.bookBtn}
-            >
-              <Text style={styles.bookBtnText}>🎫 Book on IRCTC</Text>
-            </TouchableOpacity>
+            <Text style={styles.headerDate}>{headerDateLabel}</Text>
           </View>
-        )}
+        </View>
+      ) : null}
+
+      <FlatList
+        style={styles.flex}
+        data={filteredTrains}
+        keyExtractor={(item, idx) => `${item.train_number}_${idx}`}
+        contentContainerStyle={styles.listContent}
+        // NOTE: the search form used to sit in its own fixed View above a
+        // separate FlatList. On a short viewport (a phone, or — especially —
+        // the web build, where the page can't fall back to body scrolling)
+        // that left no way to reach the results below a tall form: two
+        // sibling scroll regions inside one flex column both default to
+        // flex-shrink, so the results pane could get squeezed to ~0 height
+        // instead of getting its own scrollbar. Making the whole screen ONE
+        // FlatList (form as its header) gives everything a single, always-
+        // reachable scroll container — same idiom used to fix StationSearchScreen.
+        ListHeaderComponent={
+          <View style={styles.content}>
+            {!formCollapsed ? (
+              <SectionCard
+                title="Search trains"
+                subtitle="Real-time filter by source, destination, date, class and quota — dropdowns and live suggestions, just like IRCTC."
+              >
+                <View style={styles.row}>
+                  <StationField
+                    label="From" placeholder="e.g. NDLS or Delhi"
+                    value={source} resolvedName={sourceName}
+                    onChangeText={(t) => { setSource(t); setSourceName(null); }}
+                    onSelectStation={(m) => { setSource(m.code); setSourceName(m.name); }}
+                    apiBaseUrl={apiBaseUrl} style={styles.half}
+                  />
+                  <StationField
+                    label="To" placeholder="e.g. BCT or Mumbai"
+                    value={dest} resolvedName={destName}
+                    onChangeText={(t) => { setDest(t); setDestName(null); }}
+                    onSelectStation={(m) => { setDest(m.code); setDestName(m.name); }}
+                    apiBaseUrl={apiBaseUrl} style={styles.half}
+                  />
+                </View>
+
+                <Text style={styles.fieldLabel}>Departure date</Text>
+                <TouchableOpacity style={styles.dateRow} onPress={() => setCalendarVisible(true)}>
+                  <Ionicons name="calendar-outline" size={16} color={colors.orange} />
+                  <Text style={styles.dateRowText}>
+                    {selectedDateObj ? formatLongLabel(selectedDateObj) : "Any date (whole weekly timetable)"}
+                  </Text>
+                </TouchableOpacity>
+                <DateStrip selected={date} onSelect={pickDate} />
+
+                <View style={styles.row}>
+                  <TouchableOpacity style={[styles.pickerField, styles.half]} onPress={() => setClassModalVisible(true)}>
+                    <Text style={styles.fieldLabel}>Class</Text>
+                    <Text style={styles.pickerValue}>{classLabel(travelClass)}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.pickerField, styles.half]} onPress={() => setQuotaModalVisible(true)}>
+                    <Text style={styles.fieldLabel}>Quota</Text>
+                    <Text style={styles.pickerValue}>{quotaLabel(quota)}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <LabeledInput
+                  label={`Results per page (${MIN_LIMIT}-${MAX_LIMIT})`}
+                  placeholder={String(DEFAULT_LIMIT)}
+                  value={limitText}
+                  onChangeText={setLimitText}
+                  keyboardType="number-pad"
+                />
+                <PrimaryButton title="Search" onPress={() => runSearch(1)} loading={loading} />
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+              </SectionCard>
+            ) : (
+              <>
+                {/* Toolbar — Sort By / Tatkal / in-results search / calendar / filter,
+                    matching the IRCTC results screen's own top row. */}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.toolbar} contentContainerStyle={styles.toolbarContent}>
+                  <TouchableOpacity style={styles.toolbarBtn} onPress={() => setSortModalVisible(true)}>
+                    <Ionicons name="swap-vertical" size={14} color={colors.text} />
+                    <Text style={styles.toolbarBtnText}>Sort By</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.toolbarBtn, quota === "TQ" && styles.toolbarBtnActive]}
+                    onPress={toggleTatkal}
+                  >
+                    <Text style={[styles.toolbarBtnText, quota === "TQ" && styles.toolbarBtnTextActive]}>Tatkal</Text>
+                  </TouchableOpacity>
+                  <View style={styles.resultSearchBox}>
+                    <Ionicons name="search" size={13} color={colors.textMuted} />
+                    <TextInput
+                      style={styles.resultSearchInput}
+                      value={resultQuery}
+                      onChangeText={setResultQuery}
+                      placeholder="Train name/number"
+                      placeholderTextColor={colors.textMuted}
+                    />
+                    <Text style={styles.resultSearchCount}>({meta?.total ?? trains?.length ?? 0})</Text>
+                  </View>
+                  <TouchableOpacity style={styles.iconBtn} onPress={() => setCalendarVisible(true)}>
+                    <Ionicons name="calendar-outline" size={18} color={colors.text} />
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.iconBtn} onPress={() => setFilterVisible(true)}>
+                    <Ionicons name="filter" size={18} color={colors.text} />
+                    {activeFilterCount > 0 ? (
+                      <View style={styles.filterBadge}><Text style={styles.filterBadgeText}>{activeFilterCount}</Text></View>
+                    ) : null}
+                  </TouchableOpacity>
+                </ScrollView>
+
+                <DateStrip selected={date} onSelect={pickDate} />
+
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryText}>
+                    {classLabel(travelClass)} · {quotaLabel(quota)}
+                  </Text>
+                  <TouchableOpacity onPress={() => setFormCollapsed(false)}>
+                    <Text style={styles.modifyLink}>Modify search</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+                {meta ? (
+                  <Text style={styles.note}>
+                    {meta.total} train{meta.total === 1 ? "" : "s"} found — page {meta.page} of {meta.totalPages} ({meta.limit}/page)
+                    {note ? ` — ${note}` : ""}
+                  </Text>
+                ) : null}
+                {fareNote ? <Text style={styles.note}>💰 {fareNote}</Text> : null}
+              </>
+            )}
+          </View>
+        }
+        renderItem={({ item }) => {
+          const depMin = hhmmToMinutes(item.source_departure);
+          const wrapsToNextDay = depMin != null && item.duration_minutes != null && depMin + item.duration_minutes >= 1440;
+          const arrivalDateLabel = selectedDateObj
+            ? formatLongLabel(wrapsToNextDay ? addDays(selectedDateObj, 1) : selectedDateObj)
+            : null;
+          const departureDateLabel = selectedDateObj ? formatLongLabel(selectedDateObj) : null;
+
+          return (
+            <View style={styles.trainCard}>
+              <View style={styles.trainHeaderRow}>
+                <Text style={styles.trainName}>{item.train_name}</Text>
+                <Text style={styles.trainNumber}>({item.train_number})</Text>
+              </View>
+              <RunningDaysRow runningDays={item.running_days} />
+
+              <View style={styles.timingRow}>
+                <View style={styles.timingCol}>
+                  <Text style={styles.timeText}>{item.source_departure || "--:--"}</Text>
+                  {departureDateLabel ? <Text style={styles.dateSubText}>{departureDateLabel}</Text> : null}
+                </View>
+                <View style={styles.timingMid}>
+                  <View style={styles.timingLine} />
+                  <Text style={styles.durationText}>{item.duration || "duration n/a"}</Text>
+                </View>
+                <View style={[styles.timingCol, { alignItems: "flex-end" }]}>
+                  <Text style={styles.timeText}>{item.dest_arrival || "--:--"}</Text>
+                  {arrivalDateLabel ? <Text style={styles.dateSubText}>{arrivalDateLabel}</Text> : null}
+                </View>
+              </View>
+
+              {!!item.classes?.length && (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.classRow}>
+                  {item.classes.map((cls) => (
+                    <ClassAvailabilityChip
+                      key={cls}
+                      classCode={cls}
+                      trainNumber={item.train_number}
+                      source={source.trim()}
+                      dest={dest.trim()}
+                      date={date.trim()}
+                      quota={quota}
+                      apiBaseUrl={apiBaseUrl}
+                      initialStatusText={cls === travelClass ? item.availability_status : null}
+                      onNeedDate={() => {
+                        Alert.alert("Pick a date first", "Live availability needs a travel date — pick one from the calendar.", [
+                          { text: "Pick date", onPress: () => setCalendarVisible(true) },
+                          { text: "Cancel", style: "cancel" },
+                        ]);
+                      }}
+                    />
+                  ))}
+                </ScrollView>
+              )}
+
+              {item.availability_status ? (
+                <Text style={styles.availabilityBadge}>{item.availability_status}</Text>
+              ) : item.availability_error ? (
+                <Text style={styles.trainMeta}>availability unavailable</Text>
+              ) : null}
+              {item.fare != null ? (
+                <Text style={styles.fareBadge}>₹{item.fare}{item.quota ? ` (${item.quota})` : ""} — est. via RailKit, not live IRCTC pricing</Text>
+              ) : item.fare_error ? (
+                <Text style={styles.trainMeta}>fare unavailable</Text>
+              ) : null}
+
+              <TouchableOpacity
+                onPress={() => bookOnIrctc({
+                  trainNumber: item.train_number, trainName: item.train_name,
+                  source: source.trim(), dest: dest.trim(), date: date.trim(),
+                  travelClass: travelClass === "Any" ? null : travelClass, quota,
+                })}
+                style={styles.bookBtn}
+              >
+                <Text style={styles.bookBtnText}>🎫 Book on IRCTC</Text>
+              </TouchableOpacity>
+            </View>
+          );
+        }}
         ListEmptyComponent={
           trains ? <Text style={styles.emptyText}>No trains to show.</Text> : null
         }
@@ -475,7 +491,7 @@ export default function TrainSearchScreen() {
                 title="← Prev"
                 variant="secondary"
                 disabled={!canPrev || loading}
-                onPress={() => performSearch({ page: meta.page - 1 })}
+                onPress={() => runSearch(meta.page - 1)}
                 style={styles.pageBtn}
               />
               <Text style={styles.pageInfo}>Page {meta.page} / {meta.totalPages}</Text>
@@ -483,28 +499,49 @@ export default function TrainSearchScreen() {
                 title="Next →"
                 variant="secondary"
                 disabled={!canNext || loading}
-                onPress={() => performSearch({ page: meta.page + 1 })}
+                onPress={() => runSearch(meta.page + 1)}
                 style={styles.pageBtn}
               />
             </View>
           ) : null
         }
       />
+
       <OptionSheetModal
-        visible={classPickerOpen}
-        title="Class"
-        options={CLASS_OPTIONS.map((c) => ({ key: c.code, label: c.label }))}
+        visible={classModalVisible}
+        title="Select Class"
+        options={CLASS_OPTIONS}
         selectedKey={travelClass}
         onSelect={setTravelClass}
-        onClose={() => setClassPickerOpen(false)}
+        onClose={() => setClassModalVisible(false)}
       />
       <OptionSheetModal
-        visible={quotaPickerOpen}
+        visible={quotaModalVisible}
         title="Quota"
-        options={QUOTA_OPTIONS.map((q) => ({ key: q.code, label: q.label }))}
+        options={QUOTA_OPTIONS}
         selectedKey={quota}
         onSelect={setQuota}
-        onClose={() => setQuotaPickerOpen(false)}
+        onClose={() => setQuotaModalVisible(false)}
+      />
+      <OptionSheetModal
+        visible={sortModalVisible}
+        title="Sort By"
+        options={SORT_OPTIONS}
+        selectedKey={sortBy}
+        onSelect={applySort}
+        onClose={() => setSortModalVisible(false)}
+      />
+      <MonthCalendarModal
+        visible={calendarVisible}
+        selected={date}
+        onSelect={pickDate}
+        onClose={() => setCalendarVisible(false)}
+      />
+      <FilterSheetModal
+        visible={filterVisible}
+        initial={filters}
+        onApply={applyFilters}
+        onClose={() => setFilterVisible(false)}
       />
     </View>
   );
@@ -513,96 +550,52 @@ export default function TrainSearchScreen() {
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   content: { padding: spacing.lg, paddingBottom: 0 },
+  row: { flexDirection: "row", gap: spacing.md },
+  half: { flex: 1 },
   listContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.lg },
-
-  searchCard: {
-    backgroundColor: colors.card,
-    borderRadius: radius.lg,
-    padding: spacing.lg,
-    marginBottom: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderTopWidth: 3,
-    borderTopColor: colors.orange,
-    shadowColor: colors.orangeDark,
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 1,
-  },
-
-  stationRow: { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm },
-  stationHalf: { flex: 1 },
-  swapBtn: {
-    width: 34, height: 34, borderRadius: 17,
-    alignItems: "center", justifyContent: "center",
-    backgroundColor: colors.orangeSoft,
-    marginTop: 14,
-    borderWidth: 1, borderColor: colors.orange,
-  },
-
-  sectionLabel: { fontSize: 11, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginTop: spacing.md, marginBottom: spacing.xs },
-
-  dateRow: { marginBottom: 4 },
-  dateRowContent: { gap: spacing.sm, paddingRight: spacing.sm },
-  dateChip: {
-    minWidth: 64,
-    alignItems: "center",
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.sm,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bg,
-  },
-  dateChipActive: { backgroundColor: colors.orange, borderColor: colors.orange },
-  dateChipDay: { fontSize: 10, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase" },
-  dateChipDate: { fontSize: 13, fontWeight: "700", color: colors.text, marginTop: 2 },
-  dateChipTextActive: { color: colors.textInverse },
-
-  linkRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: spacing.sm, marginBottom: spacing.xs },
-  linkText: { fontSize: 12, fontWeight: "600", color: colors.primary },
-
-  pickerRow: { flexDirection: "row", gap: spacing.md },
-  pickerField: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    backgroundColor: colors.bg,
-  },
-  pickerHalf: { flex: 1 },
-  pickerValueRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  pickerValue: { fontSize: 14, fontWeight: "700", color: colors.text, flexShrink: 1, marginRight: 4 },
-
-  limitRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.md },
-  limitLabel: { fontSize: 12, color: colors.textMuted, flex: 1, marginRight: spacing.sm },
-  limitInput: { width: 70, marginBottom: 0 },
-
-  searchBtn: { backgroundColor: colors.orange, marginTop: spacing.md },
-
   error: { color: colors.danger, fontSize: 12, marginTop: spacing.sm },
   note: { color: colors.textMuted, fontSize: 12, marginTop: spacing.sm },
 
-  recentWrap: { marginBottom: spacing.md },
-  recentRowContent: { gap: spacing.sm, paddingRight: spacing.sm },
-  recentCard: {
-    backgroundColor: colors.card,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingVertical: spacing.sm,
+  fieldLabel: { fontSize: 11, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4, marginTop: spacing.sm },
+  dateRow: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.bg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm + 2 },
+  dateRowText: { fontSize: 13, color: colors.text, fontWeight: "600" },
+  pickerField: { backgroundColor: colors.bg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, marginBottom: spacing.md },
+  pickerValue: { fontSize: 13, fontWeight: "700", color: colors.text },
+
+  // --- IRCTC-style results header ---
+  header: {
+    backgroundColor: colors.orange,
+    flexDirection: "row",
+    alignItems: "center",
     paddingHorizontal: spacing.md,
-    minWidth: 140,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.md,
+    gap: spacing.sm,
   },
-  recentCardTop: { flexDirection: "row", alignItems: "center" },
-  recentCode: { fontSize: 14, fontWeight: "700", color: colors.text },
-  recentMeta: { fontSize: 11, color: colors.textMuted, marginTop: 3 },
+  backBtn: { padding: 4 },
+  headerTextWrap: { flex: 1 },
+  headerRoute: { color: colors.textInverse, fontWeight: "700", fontSize: 15 },
+  headerDate: { color: colors.orangeLight, fontSize: 11, marginTop: 2 },
 
-  resultsHeading: { fontSize: 13, fontWeight: "700", color: colors.textMuted, marginBottom: spacing.sm },
+  toolbar: { marginTop: spacing.sm },
+  toolbarContent: { flexDirection: "row", alignItems: "center", gap: 8, paddingRight: spacing.md },
+  toolbarBtn: { flexDirection: "row", alignItems: "center", gap: 4, borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: colors.card },
+  toolbarBtnActive: { backgroundColor: colors.orange, borderColor: colors.orange },
+  toolbarBtnText: { fontSize: 12, fontWeight: "700", color: colors.text },
+  toolbarBtnTextActive: { color: colors.textInverse },
+  resultSearchBox: { flexDirection: "row", alignItems: "center", gap: 4, borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: colors.card, minWidth: 140 },
+  resultSearchInput: { fontSize: 12, color: colors.text, flex: 1, padding: 0 },
+  resultSearchCount: { fontSize: 11, color: colors.textMuted, fontWeight: "600" },
+  iconBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill, padding: 8, backgroundColor: colors.card },
+  filterBadge: { position: "absolute", top: -4, right: -4, backgroundColor: colors.orange, borderRadius: radius.pill, minWidth: 16, height: 16, alignItems: "center", justifyContent: "center", paddingHorizontal: 3 },
+  filterBadgeText: { color: colors.textInverse, fontSize: 9, fontWeight: "700" },
 
-  trainRow: {
+  summaryRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.xs, marginBottom: spacing.xs },
+  summaryText: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
+  modifyLink: { fontSize: 12, color: colors.orange, fontWeight: "700" },
+
+  // --- train result card ---
+  trainCard: {
     backgroundColor: colors.card,
     borderRadius: radius.md,
     padding: spacing.md,
@@ -610,37 +603,27 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
-  trainHeaderRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.sm },
-  trainName: { fontSize: 14, fontWeight: "700", color: colors.text, flexShrink: 1, marginRight: spacing.sm },
-  numberBadge: {
-    backgroundColor: colors.chip,
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-    minWidth: 56,
-    alignItems: "center",
-  },
-  numberBadgeText: { fontSize: 12, fontWeight: "700", color: colors.primary },
+  trainHeaderRow: { flexDirection: "row", alignItems: "baseline", gap: 6 },
+  trainName: { fontSize: 14, fontWeight: "700", color: colors.text, flexShrink: 1 },
+  trainNumber: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
+  trainMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
 
-  timingRow: { flexDirection: "row", alignItems: "center" },
-  timingSide: { minWidth: 56 },
-  timingValue: { fontSize: 17, fontWeight: "700", color: colors.text },
-  timingMiddle: { flex: 1, alignItems: "center", flexDirection: "row", marginHorizontal: spacing.sm },
-  timingLine: { flex: 1, height: 1, backgroundColor: colors.border },
-  timingDuration: { fontSize: 11, color: colors.textMuted, marginHorizontal: 6 },
+  timingRow: { flexDirection: "row", alignItems: "center", marginTop: spacing.sm, marginBottom: spacing.sm },
+  timingCol: { minWidth: 64 },
+  timeText: { fontSize: 18, fontWeight: "700", color: colors.text },
+  dateSubText: { fontSize: 10, color: colors.textMuted, marginTop: 1 },
+  timingMid: { flex: 1, alignItems: "center", paddingHorizontal: spacing.sm },
+  timingLine: { height: 1, backgroundColor: colors.border, width: "100%", marginBottom: 4 },
+  durationText: { fontSize: 11, color: colors.textMuted, fontWeight: "600" },
 
-  classPillRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: spacing.sm },
-  classPill: { backgroundColor: colors.chip, borderRadius: radius.sm, paddingHorizontal: 8, paddingVertical: 3 },
-  classPillText: { fontSize: 11, fontWeight: "700", color: colors.primary },
-
-  trainMeta: { fontSize: 11, color: colors.textMuted, marginTop: spacing.xs },
-  availabilityBadge: { fontSize: 11, color: colors.primary, marginTop: 6, fontWeight: "700" },
+  classRow: { marginBottom: spacing.sm },
+  availabilityBadge: { fontSize: 11, color: colors.primary, marginTop: 3, fontWeight: "700" },
   fareBadge: { fontSize: 11, color: colors.text, marginTop: 3, fontWeight: "600" },
   bookBtn: {
-    marginTop: 8, alignSelf: "flex-start", backgroundColor: colors.orange,
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: radius.pill,
+    marginTop: 8, alignSelf: "flex-start", backgroundColor: colors.accent,
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.pill,
   },
-  bookBtnText: { fontSize: 11, fontWeight: "700", color: colors.textInverse },
+  bookBtnText: { fontSize: 11, fontWeight: "700", color: colors.primaryDark },
 
   emptyText: { textAlign: "center", color: colors.textMuted, marginTop: spacing.lg },
   pagination: {
