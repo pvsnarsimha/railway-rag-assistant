@@ -15,6 +15,13 @@ export const colors = {
   bubbleUser: "#0B3D91",
   bubbleAssistant: "#FFFFFF",
   chip: "#EEF2FA",
+  // IRCTC-style warm accent, used only by the Train Search screen's
+  // header/date-chips/search button (see TrainSearchScreen.js) — kept as
+  // its own tokens rather than repurposing `accent` so every other screen
+  // that already uses `accent` (signal amber) is completely unaffected.
+  orange: "#EF6C1B",
+  orangeDark: "#C6510F",
+  orangeSoft: "#FDECE0",
 };
 
 export const spacing = {
