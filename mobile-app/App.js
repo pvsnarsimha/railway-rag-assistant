@@ -61,7 +61,19 @@ function HomeStackNavigator() {
       <HomeStack.Screen name="TrainSchedule" component={TrainScheduleScreen} options={{ title: "Time Table" }} />
       <HomeStack.Screen name="SeatAvailability" component={SeatAvailabilityScreen} options={{ title: "Seat Availability" }} />
       <HomeStack.Screen name="FareEnquiry" component={FareEnquiryScreen} options={{ title: "Fare Calculator" }} />
-      <HomeStack.Screen name="TrainsBetween" component={TrainSearchScreen} options={{ title: "Trains Between Stations" }} />
+      {/* REDESIGN (IRCTC-style Train Search): this one screen gets its own
+          orange header — matching IRCTC's own "TRAIN SEARCH" top bar —
+          instead of the blue header every other Home-stack screen shares,
+          via a per-screen options override. Nothing else in the stack's
+          shared screenOptions above changes. */}
+      <HomeStack.Screen
+        name="TrainsBetween"
+        component={TrainSearchScreen}
+        options={{
+          title: "Train Search",
+          headerStyle: { backgroundColor: colors.orange },
+        }}
+      />
       <HomeStack.Screen name="StationSearch" component={StationSearchScreen} options={{ title: "Station Search" }} />
     </HomeStack.Navigator>
   );
