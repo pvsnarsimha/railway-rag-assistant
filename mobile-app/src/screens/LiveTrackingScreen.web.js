@@ -269,17 +269,28 @@ function minutesFromNowClockTime(hhmm) {
   return diffMin;
 }
 
-// REDESIGN (RailYatri-style live position marker): "As of N mins ago" —
-// same real field (backend app.py's status_updated_at, set fresh every
-// poll) and same wording as the native card's own formatAsOfAgo. Kept as a
-// duplicate copy rather than shared, matching this file's existing
+// REDESIGN (RailYatri-style live position marker): "As of N secs/mins ago"
+// — backed by the REAL last-genuine-fetch field (backend app.py's
+// status_updated_at). BUGFIX: that field used to be re-stamped "now" on
+// EVERY ~5s poll regardless of whether the position data had actually
+// changed, so this always read "less than a min ago" even when the
+// underlying live status was up to 45s stale — looking live while quietly
+// not being live. The backend now reports the true last real-fetch time,
+// and separately guarantees that real fetch happens at least every 60s
+// (see REAL_DATA_MAX_STALENESS_SECONDS in ws_track_train). Shown down to
+// the second here (not just whole minutes) so that real <=60s cadence is
+// actually visible ticking up between genuine refreshes, instead of
+// always reading the same vague "less than a min ago" either way. Kept as
+// a duplicate copy rather than shared, matching this file's existing
 // separate-Metro-entry-point pattern (see extractHostname's comment above).
 function formatAsOfAgo(iso) {
   if (!iso) return "just now";
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "just now";
-  const diffMin = Math.max(0, Math.round((Date.now() - then) / 60000));
-  if (diffMin < 1) return "less than a min ago";
+  const diffSec = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (diffSec < 5) return "just now";
+  if (diffSec < 60) return `${diffSec} secs ago`;
+  const diffMin = Math.round(diffSec / 60);
   return `${diffMin} min${diffMin === 1 ? "" : "s"} ago`;
 }
 
@@ -412,12 +423,21 @@ export default function LiveTrackingScreen({ navigation }) {
   const [lastUpdated, setLastUpdated] = useState(null);
 
   // REDESIGN (RailYatri-style live position marker): a real countdown to
-  // the next auto-refresh — the backend genuinely pushes a fresh position
-  // every 5s once connected (see backend/app.py's
-  // _TRACK_POLL_INTERVAL_SECONDS), so this just displays that real
-  // cadence rather than an invented number, resetting to 5 every time a
-  // payload actually arrives (lastUpdated changes) and ticking down once
-  // a second in between.
+  // the next WebSocket message — the backend sends a message every 5s
+  // once connected (see backend/app.py's _TRACK_POLL_INTERVAL_SECONDS),
+  // so this displays that real send cadence rather than an invented
+  // number, resetting to 5 every time a payload actually arrives
+  // (lastUpdated changes) and ticking down once a second in between.
+  //
+  // CLARIFICATION (see the BUGFIX in formatAsOfAgo above and in backend
+  // app.py's ws_track_train): a message arriving every 5s is the
+  // connection's heartbeat, NOT proof the underlying live position data
+  // itself changed — most of those messages re-serve the same
+  // still-cached data. This countdown is genuinely accurate as "next
+  // check-in", but the "As of X ago" label next to it (statusUpdatedAt,
+  // not this) is the one that reports real DATA freshness, guaranteed
+  // <=60s by the backend. Don't read this 5s number as the data's actual
+  // refresh rate.
   const [refreshCountdown, setRefreshCountdown] = useState(5);
   useEffect(() => {
     if (!lastUpdated) return undefined;
@@ -1037,7 +1057,7 @@ export default function LiveTrackingScreen({ navigation }) {
   return (
     <View style={styles.flex}>
     <ScrollView style={styles.flex} contentContainerStyle={[styles.content, showBottomBar && styles.contentWithBar]}>
-      <SectionCard title="Track a train" subtitle="Streams a position + delay + crowd update every ~5s.">
+      <SectionCard title="Track a train" subtitle="Connects instantly and checks in every ~5s; the live position itself refreshes at least every 60s.">
         <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
         {/* BUGFIX: a plain (non-{}) JSX attribute string doesn't run JS's
             escape parsing, so "\u2014" rendered as the literal 6 characters
@@ -1067,8 +1087,21 @@ export default function LiveTrackingScreen({ navigation }) {
           {connection === "open" && (
             <TouchableOpacity onPress={refreshNow} disabled={refreshing} style={styles.refreshRow}>
               <Ionicons name="refresh" size={14} color={colors.primary} />
+              {/* BUGFIX: this used to show lastUpdated.toLocaleTimeString()
+                  \u2014 the CLIENT's own receipt clock time for the last
+                  WebSocket message, which advances every ~5s regardless of
+                  whether the position data itself actually changed (most
+                  messages just re-serve the same still-cached data). Now
+                  shows the real data freshness via the same
+                  payload.status_updated_at + formatAsOfAgo the position
+                  callout below uses, so this line and that callout never
+                  disagree about how fresh the data really is. */}
               <Text style={styles.refreshText}>
-                {refreshing ? "Refreshing\u2026" : lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : "Refresh now"}
+                {refreshing
+                  ? "Refreshing\u2026"
+                  : payload?.status_updated_at
+                    ? `Position as of ${formatAsOfAgo(payload.status_updated_at)}`
+                    : "Refresh now"}
               </Text>
             </TouchableOpacity>
           )}
@@ -1410,8 +1443,11 @@ function TrainMarkerIcon() {
 
 // REDESIGN (RailYatri-style live position marker): the speech-bubble
 // callout at the train's real current position — "As of X ago" (real
-// status_updated_at) + a live refresh countdown (the real ~5s server push
-// cadence, see _TRACK_POLL_INTERVAL_SECONDS), the real distance to the
+// status_updated_at — the true last-real-fetch time, guaranteed <=60s
+// stale, see formatAsOfAgo's BUGFIX comment above) + a connection
+// heartbeat countdown (the real ~5s server push cadence, see
+// _TRACK_POLL_INTERVAL_SECONDS — this is how often a message arrives, not
+// how often the position data itself changes), the real distance to the
 // next station, the real distance covered so far this run, and a working
 // "Report Inaccuracy" link wired to the real /api/feedback endpoint.
 function LiveStatusCallout({

@@ -31,7 +31,7 @@ import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -71,7 +71,7 @@ import delay_accuracy_store
 import public_share
 import alt_transport
 from deep_extract import top_level_keys
-from api_cache import cache_stats
+from api_cache import cache_stats, entry_fetched_at
 from help_content import build_help_answer
 import rag_engine
 from rag_engine import get_engine
@@ -5611,11 +5611,23 @@ _last_ws_poll_debug: dict = {}
 async def ws_track_train(websocket: WebSocket, train_number: str):
     """
     Streams live position updates for a train every _TRACK_POLL_INTERVAL_SECONDS
-    without the client having to re-poll `/api/chat`. Each fetch goes through
-    the SAME cached railway_api calls (get_live_train_status / get_train_info)
-    used by the regular chat flow — the cache TTLs there (120s / 24h) mean this
-    doesn't hammer the provider even with several tabs open, it just serves
-    the already-cached response between real refreshes.
+    (5s) without the client having to re-poll `/api/chat`. Each fetch goes
+    through the SAME cached railway_api calls (get_live_train_status /
+    get_train_info) used by the regular chat flow — the cache TTLs there
+    (45s / 24h) mean this doesn't hammer the provider even with several tabs
+    open, it just serves the already-cached response between real refreshes.
+
+    That 5s figure is the connection's heartbeat/send cadence, NOT how often
+    the underlying live position/status data itself actually changes — it
+    normally refreshes on the provider caches' own TTL (<=45-60s), and this
+    loop additionally GUARANTEES a genuine, uncached re-fetch at least every
+    REAL_DATA_MAX_STALENESS_SECONDS (60s) even if nothing else forced one
+    sooner (see last_real_fetch_epoch below). The payload's
+    `status_updated_at` reports the real fetch time (from the cache's own
+    fetched_at, via api_cache.entry_fetched_at) rather than the moment this
+    poll happened to run, so a client's "As of X ago" reflects genuine data
+    age instead of resetting every 5s regardless of whether anything new
+    was actually fetched.
 
     Optional query params (all optional — the feed still works with none of
     them, it just has less to work with):
@@ -5737,6 +5749,22 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     # a real, uncached RailKit fetch right when the station change is
     # actually expected, instead of waiting out the rest of the cache TTL.
     force_refresh_next_poll = False
+    # BUGFIX/FEATURE: guaranteed real-data refresh cadence. The 5s poll
+    # loop below sends a message every 5s regardless, but the live
+    # position/status itself only genuinely changes when get_live_train_status
+    # (45s TTL) or the RailRadar GPS lookup (60s TTL) actually re-fetches -
+    # everything in between was a cache hit re-serving the same data. Report
+    # (below) explicitly asked that the underlying location data itself,
+    # not just the on-screen timestamp, keep genuinely refreshing at least
+    # once every 60s. The two providers' own TTLs already imply that in
+    # practice, but only as a side effect of being polled every 5s - there
+    # was no actual guarantee. `last_real_fetch_epoch` tracks (in wall-clock
+    # seconds) when THIS connection last got a real, non-cached read; once
+    # 60s have passed with no real refresh for any other reason (route
+    # deviation, imminent-arrival force_refresh_next_poll, or the cache
+    # simply expiring on its own), this poll loop now forces one itself.
+    last_real_fetch_epoch = None
+    REAL_DATA_MAX_STALENESS_SECONDS = 60
     # FEATURE: per-station predicted-delay "lock-in" — see
     # _lock_grounded_station_predictions. Lives for the lifetime of THIS
     # connection only, same reasoning as the trackers above: a fresh
@@ -5804,8 +5832,19 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # for just this one call when the PREVIOUS poll's real
                 # RailRadar segment progress showed the train essentially
                 # at the next station - see the arrival-detection block
-                # further down, which sets force_refresh_next_poll.
-                this_poll_force_refresh = force_refresh_next_poll
+                # further down, which sets force_refresh_next_poll - OR
+                # when this connection's real data has gone
+                # REAL_DATA_MAX_STALENESS_SECONDS without a genuine
+                # refresh (see last_real_fetch_epoch's comment above the
+                # while loop): the 45s/60s provider cache TTLs already tend
+                # to keep this under a minute as a side effect, but this
+                # makes the <=60s real-refresh cadence an explicit
+                # guarantee instead of a TTL coincidence.
+                stale_past_60s = (
+                    last_real_fetch_epoch is not None
+                    and (time.time() - last_real_fetch_epoch) >= REAL_DATA_MAX_STALENESS_SECONDS
+                )
+                this_poll_force_refresh = force_refresh_next_poll or stale_past_60s
                 force_refresh_next_poll = False
                 live_data, train_info_result = await asyncio.gather(
                     asyncio.to_thread(railway_api.get_live_train_status, train_number, date_ddmmyyyy, _force_refresh=this_poll_force_refresh),
@@ -5815,6 +5854,16 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 if isinstance(live_data, BaseException):
                     raise live_data
                 train_info_data = None if isinstance(train_info_result, BaseException) else train_info_result
+                # The real wall-clock moment get_live_train_status's cache
+                # entry for THIS (train_number, date_ddmmyyyy) was actually
+                # last populated - whether that happened on this exact poll
+                # (a forced or naturally-expired refresh) or several polls
+                # ago (a cache hit just now). This, not datetime.now(), is
+                # what status_updated_at below reports - so "As of X ago" on
+                # the client reflects genuine data age, not poll cadence.
+                real_fetch_epoch = entry_fetched_at("live_status", (train_number, date_ddmmyyyy), {})
+                if real_fetch_epoch is not None:
+                    last_real_fetch_epoch = real_fetch_epoch
                 position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
                 timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
 
@@ -7088,7 +7137,50 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # this id via the existing POST /api/feedback, so a report
                 # is real, traceable feedback data, not a no-op button.
                 status_response_id = uuid.uuid4().hex
-                status_updated_at = datetime.now().isoformat()
+                # BUGFIX ("live tracking screen's timestamp/counter ticks
+                # every ~5s but the actual position data behind it doesn't
+                # really change that often"): this used to be
+                # datetime.now().isoformat() here, i.e. re-stamped "now" on
+                # EVERY poll regardless of whether get_live_train_status
+                # actually made a fresh provider call this poll or just
+                # re-served its cached value (up to 45s old, before the
+                # <=60s guarantee added above) - so the UI's "As of X ago"
+                # kept resetting to "just now" even on a poll that served
+                # stale data, looking live while quietly not being live.
+                # last_real_fetch_epoch (set right after the real fetch,
+                # from the cache's own fetched_at) is the genuine last time
+                # this train's data was actually pulled from the provider -
+                # falling back to "now" only on the very first poll of a
+                # connection, before any real fetch has completed yet.
+                #
+                # BUGFIX #2 (found verifying #1 above): datetime.now() /
+                # datetime.fromtimestamp() without a tz produces a NAIVE
+                # timestamp with no UTC/offset marker in its isoformat()
+                # string (e.g. "2026-09-21T15:34:15.945236"). The frontend
+                # parses it with plain JS `new Date(iso)`, which — for a
+                # string with no timezone designator — treats it as the
+                # BROWSER's own local time, not the server's. Whenever the
+                # server's OS clock/timezone and the viewer's device
+                # timezone disagree (the normal case: a Render/cloud server
+                # is UTC, a phone in India is UTC+5:30), that mismatch gets
+                # silently reinterpreted as a several-HOUR offset — either
+                # showing a wildly stale "N hours ago", or (the more common
+                # direction, and what the report actually showed: "As of
+                # less than a min ago" no matter what) a timestamp that
+                # LOOKS like it's in the future relative to the browser's
+                # clock, which formatAsOfAgo's `Math.max(0, ...)` clamps
+                # straight to "just now" — masking real staleness instead
+                # of just failing to show it. tz=timezone.utc makes this an
+                # unambiguous, self-describing UTC instant (isoformat()
+                # then ends in "+00:00", which `new Date()` parses
+                # correctly as real UTC on any device, any timezone) -
+                # exactly what api_cache's fetched_at/time.time() already
+                # is under the hood, so this is just labeling it honestly.
+                status_updated_at = (
+                    datetime.fromtimestamp(last_real_fetch_epoch, tz=timezone.utc).isoformat()
+                    if last_real_fetch_epoch is not None
+                    else datetime.now(timezone.utc).isoformat()
+                )
                 try:
                     feedback_rlhf.record_response(
                         status_response_id,

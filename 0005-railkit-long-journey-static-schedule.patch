@@ -1,0 +1,158 @@
+From 699c74f41c7bed1494a4e50c6778c15f7fb4b32b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 03:53:57 +0000
+Subject: [PATCH] Live Tracking: base long-journey detection on the static
+ schedule, not live data
+
+Users reported the RailRadar-preferred long-journey behavior working
+on the first connect but flipping back to RailKit-only on a
+reconnect for the exact same train/date. Root cause: is_long_journey
+was computed from timeline_json, rebuilt from RailKit's LIVE
+trackTrain response every poll - RailKit's well-documented live-state
+flakiness (this module's whole history of long-journey-only bugs)
+could make that duration calc fail on one poll and succeed on the
+next, for the same real journey.
+
+Added gps_tracking.estimate_journey_duration_minutes_from_route,
+which reads the same day+time fields off the STATIC schedule
+(train_info_data/getTrainInfo's route, parsed via parse_route - now
+captures each stop's `day` field too) instead of the live timeline.
+A train's published schedule can't change poll to poll, so this
+gives the same answer on the first connect and the hundredth
+reconnect. app.py now prefers this and only falls back to the old
+live-timeline calc on the rare poll where train_info_data itself
+couldn't be fetched.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MGKaCWBEc2rtTTsPnQDkYV
+---
+ backend/app.py          | 35 ++++++++++++++++++---------
+ backend/gps_tracking.py | 52 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 76 insertions(+), 11 deletions(-)
+
+diff --git a/backend/app.py b/backend/app.py
+index e53cda2..5eaaeb7 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -6110,17 +6110,30 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
+                 # specifically (see gps_tracking.LONG_JOURNEY_MINUTES's own
+                 # comment for why that's not a surprise given this module's
+                 # whole documented history of long-journey-only bugs above).
+-                # Real arithmetic on THIS poll's own timeline_json (day +
+-                # scheduled/expected/actual times) via
+-                # gps_tracking.estimate_journey_duration_minutes — None
+-                # (treated as "assume short/normal") whenever either
+-                # endpoint's real timing can't be read, never a guessed
+-                # duration. Used just below to PREFER RailRadar's own per-
+-                # station coordinate over RailKit's for a long journey —
+-                # never a hard ban on RailKit ("not strictly prohibited" per
+-                # the original request): RailKit is still used exactly as
+-                # before whenever RailRadar has nothing for that station.
+-                journey_duration_minutes = gps_tracking.estimate_journey_duration_minutes(timeline_json)
++                #
++                # BUGFIX ("for second or mutiple times it is railkit error
++                # message and data ... when I entered current date n no of
++                # times only it should use railradar"): this used to read
++                # timeline_json (RailKit's LIVE per-poll data) - correct on
++                # the first connect, but a later reconnect on the exact same
++                # train/date could flip back to RailKit-only because
++                # RailKit's live state itself (not the schedule) came back
++                # different enough between polls to make the live-timeline
++                # calc fail that time. gps_tracking.
++                # estimate_journey_duration_minutes_from_route reads the
++                # same real day+time fields off the STATIC schedule
++                # (train_info_data, already fetched this poll, cached 86400s
++                # server-side) instead - a train's published schedule can't
++                # flip poll to poll, so this gives the same real answer on
++                # the first connect and the hundredth reconnect alike. Falls
++                # back to the live-timeline version only on the rare poll
++                # where train_info_data itself couldn't be fetched at all -
++                # never a guessed duration either way.
++                journey_duration_minutes = (
++                    gps_tracking.estimate_journey_duration_minutes_from_route(gps_tracking.parse_route(train_info_data))
++                    if train_info_data
++                    else gps_tracking.estimate_journey_duration_minutes(timeline_json)
++                )
+                 is_long_journey = (
+                     journey_duration_minutes is not None
+                     and journey_duration_minutes > gps_tracking.LONG_JOURNEY_MINUTES
+diff --git a/backend/gps_tracking.py b/backend/gps_tracking.py
+index ce91027..1a29031 100644
+--- a/backend/gps_tracking.py
++++ b/backend/gps_tracking.py
+@@ -129,6 +129,10 @@ class RouteStation:
+     distance_km: Optional[str] = None
+     has_coordinates: bool = False
+     coordinates_from: str = "none"  # "provider" | "fallback_table" | "none"
++    # RailKit's per-stop 'day N of the journey' field (1-based), same as
++    # TimelineStop.day - see estimate_journey_duration_minutes_from_route,
++    # which is the whole reason this is captured at all.
++    day: Optional[str] = None
+ 
+ 
+ def get_route_with_coordinates(train_number: str):
+@@ -188,6 +192,7 @@ def parse_route(data: dict):
+             scheduled_arrival=arrival, scheduled_departure=departure,
+             distance_km=distance, has_coordinates=lat is not None,
+             coordinates_from=coordinates_from,
++            day=stop.get("day") if isinstance(stop, dict) else None,
+         ))
+     return route
+ 
+@@ -927,6 +932,53 @@ def estimate_journey_duration_minutes(timeline_json: list) -> Optional[int]:
+     return duration if duration >= 0 else None
+ 
+ 
++def estimate_journey_duration_minutes_from_route(route: list) -> Optional[int]:
++    """Same idea as estimate_journey_duration_minutes (first stop's
++    departure to last stop's arrival, day-offset aware, real arithmetic
++    only, None whenever it can't be read) but computed off the STATIC
++    schedule - parse_route()'s RouteStation list, from getTrainInfo, which
++    railway_api.get_train_info caches for 86400s server-side - instead of
++    the LIVE per-poll timeline.
++
++    BUGFIX ("for second or mutiple times it is railkit error message and
++    data ... make sure when I entered current date n no of times only it
++    should use railradar"): is_long_journey in app.py's /ws/track loop used
++    to be computed from timeline_json, which is rebuilt from RailKit's live
++    trackTrain response on every single poll - the fresh connection right
++    after a Reconnect got a correct RailRadar-preferred read, but a later
++    poll on the SAME train/SAME date flipped back to RailKit-only, because
++    RailKit's own live data (not the schedule, the live tracking state
++    itself - this module's whole documented history of exactly this kind of
++    flakiness) came back different enough between polls that
++    estimate_journey_duration_minutes couldn't resolve a duration from it
++    that time, silently defaulting is_long_journey back to False.
++    A train's own published schedule does not change poll to poll -
++    calling this instead, off train_info_data (already fetched every poll
++    anyway, but cache-cheap and NOT subject to trackTrain's live-state
++    flakiness), gives the exact same real answer whether this is the first
++    connect or the hundredth reconnect. app.py falls back to the live-
++    timeline version only on the rare poll where train_info_data itself
++    couldn't be fetched at all.
++    """
++    if not route or len(route) < 2:
++        return None
++
++    def _stop_minutes(stop, times):
++        day = _day_offset(stop.day)
++        for t in times:
++            minutes = _time_str_to_minutes(t)
++            if minutes is not None:
++                return day * 1440 + minutes
++        return None
++
++    start = _stop_minutes(route[0], (route[0].scheduled_departure, route[0].scheduled_arrival))
++    end = _stop_minutes(route[-1], (route[-1].scheduled_arrival, route[-1].scheduled_departure))
++    if start is None or end is None:
++        return None
++    duration = end - start
++    return duration if duration >= 0 else None
++
++
+ def current_position_distance_km(timeline_json: list) -> Optional[float]:
+     """
+     Real distance-from-origin (RailKit's own distance_km) of the train's
+-- 
+2.43.0
+

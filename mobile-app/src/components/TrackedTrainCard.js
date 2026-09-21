@@ -138,14 +138,24 @@ const STATUS_COLOR = {
   upcoming: colors.danger,
 };
 
-// "As of N mins ago" — best-effort against the device clock vs the
+// "As of N secs/mins ago" — best-effort against the device clock vs the
 // server's status_updated_at timestamp (see backend app.py /ws/track).
+// BUGFIX: status_updated_at used to be re-stamped "now" on every ~5s poll
+// regardless of whether the position data had actually changed, so this
+// always read "less than a min ago" even when the underlying live status
+// was up to 45s stale. The backend now reports the true last real-fetch
+// time and guarantees a genuine refresh at least every 60s (see
+// REAL_DATA_MAX_STALENESS_SECONDS in ws_track_train) — shown here down to
+// the second (not just whole minutes) so that real cadence is actually
+// visible, matching the web app's own version of this helper.
 function formatAsOfAgo(iso) {
   if (!iso) return "just now";
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "just now";
-  const diffMin = Math.max(0, Math.round((Date.now() - then) / 60000));
-  if (diffMin < 1) return "less than a min ago";
+  const diffSec = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (diffSec < 5) return "just now";
+  if (diffSec < 60) return `${diffSec} secs ago`;
+  const diffMin = Math.round(diffSec / 60);
   return `${diffMin} min${diffMin === 1 ? "" : "s"} ago`;
 }
 
@@ -953,8 +963,17 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
         </View>
         {connection === "open" && (
           <Text style={styles.updatedText}>
-            {refreshing ? "Refreshing\u2026" : "Auto-updates every 5s"}
-            {lastUpdated ? ` \u00b7 last update ${lastUpdated.toLocaleTimeString()}` : ""}
+            {/* BUGFIX: this used to show lastUpdated.toLocaleTimeString(),
+                the CLIENT's own receipt time for the last WebSocket
+                message \u2014 which ticks every ~5s regardless of whether the
+                underlying position data actually changed, since most
+                messages just re-serve the same still-cached data. Now
+                shows the real data freshness (payload.status_updated_at,
+                the backend's true last-real-fetch time, guaranteed <=60s
+                stale) via the same formatAsOfAgo used by the status
+                popup below, so this line and that popup never disagree. */}
+            {refreshing ? "Refreshing\u2026" : "Connected \u00b7 checks every 5s"}
+            {payload?.status_updated_at ? ` \u00b7 position as of ${formatAsOfAgo(payload.status_updated_at)}` : ""}
           </Text>
         )}
 
