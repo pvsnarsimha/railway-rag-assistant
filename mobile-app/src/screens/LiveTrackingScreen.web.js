@@ -5,9 +5,11 @@ import { colors, spacing, radius } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
+import DayPickerModal from "../components/DayPickerModal";
 import { useSettings } from "../context/SettingsContext";
 import { buildTrackingWsUrl, saveTripSummary, buildTrackShareUrl, buildTripShareUrl, sendFeedback } from "../api/railwayApi";
 import { formatDelayDuration } from "../utils/formatDelay";
+import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 
 // FEATURE: Live delay-trend sparkline — same rolling-buffer size as the
 // native screen's DelaySparkline and the web app's ltDelaySparkline.
@@ -404,6 +406,7 @@ export default function LiveTrackingScreen({ navigation }) {
   const [source, setSource] = useState("");
   const [dest, setDest] = useState("");
   const [trackDate, setTrackDate] = useState("");
+  const [dayPickerVisible, setDayPickerVisible] = useState(false);
   const [connection, setConnection] = useState("idle");
   const [payload, setPayload] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -1043,7 +1046,14 @@ export default function LiveTrackingScreen({ navigation }) {
             (see the mobile_web rebuild note elsewhere in this diff).
             Wrapping the same text in a {} expression container makes it a
             real JS string literal, where \u2014 IS a real escape. */}
-        <LabeledInput label={"Date (optional \u2014 defaults to today)"} placeholder="DD-MM-YYYY" value={trackDate} onChangeText={setTrackDate} />
+        <Text style={styles.fieldLabel}>{"Date (optional \u2014 defaults to today)"}</Text>
+        <TouchableOpacity style={styles.dateField} onPress={() => setDayPickerVisible(true)} activeOpacity={0.7}>
+          <Ionicons name="calendar-outline" size={16} color={colors.primary} />
+          <Text style={styles.dateFieldText}>
+            {trackDate.trim() ? (formatLongLabel(fromDdMmYyyy(trackDate)) || trackDate) : "Today"}
+          </Text>
+          <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
+        </TouchableOpacity>
         <View style={styles.row}>
           <LabeledInput label="Source (optional)" placeholder="e.g. SC" value={source} onChangeText={setSource} style={styles.half} />
           <LabeledInput label="Dest (optional)" placeholder="e.g. BZA" value={dest} onChangeText={setDest} style={styles.half} />
@@ -1371,6 +1381,12 @@ export default function LiveTrackingScreen({ navigation }) {
         </View>
       </View>
     )}
+    <DayPickerModal
+      visible={dayPickerVisible}
+      selected={trackDate}
+      onSelect={setTrackDate}
+      onClose={() => setDayPickerVisible(false)}
+    />
     </View>
   );
 }
@@ -1819,6 +1835,20 @@ const styles = StyleSheet.create({
   content: { padding: spacing.lg },
   row: { flexDirection: "row", gap: spacing.md, alignItems: "center" },
   half: { flex: 1 },
+  fieldLabel: { fontSize: 12, fontWeight: "600", color: colors.textMuted, marginBottom: spacing.xs },
+  dateField: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+    backgroundColor: colors.bg,
+    marginBottom: spacing.md,
+  },
+  dateFieldText: { flex: 1, fontSize: 15, color: colors.text, fontWeight: "600" },
   refreshRow: { flexDirection: "row", alignItems: "center", gap: 4 },
   refreshText: { fontSize: 12, color: colors.primary, fontWeight: "600" },
 
