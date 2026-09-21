@@ -7333,6 +7333,52 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     analytics.record_event(intent="live_tracking", train_number=train_number, live_error=True)
                 except Exception:
                     pass
+            except Exception as e:
+                # BUGFIX ("at the middle it is disconnecting or it showing
+                # connecting ... until user click on stop it should not
+                # disconnect"): this whole poll body - RailKit/RailRadar
+                # fetches and every downstream feature computed from them
+                # (delay prediction, speed, weather, crowd, the long-
+                # journey RailRadar preference, etc) - used to be guarded
+                # ONLY against railway_api.RailwayAPIError. Any OTHER
+                # exception (a genuine bug in any one of the many features
+                # in here, present or future - this poll body has grown to
+                # roughly 1500 lines) propagated straight out of the whole
+                # `while True:` loop, out of ws_track_train itself, past
+                # the `except WebSocketDisconnect` below (the wrong
+                # exception type to catch it), which closes the actual
+                # server-side connection. The frontend's own auto-reconnect
+                # (see LiveTrackingScreen.web.js's openSocket) then quietly
+                # reconnects a few seconds later - reading exactly like "at
+                # the middle it is disconnecting", when what really
+                # happened was a server-side crash on one bad poll,
+                # invisibly papered over by a fresh connection rather than
+                # a deliberate disconnect.
+                #
+                # Same honest-degradation rule this file already applies to
+                # every individual feature's own best-effort failure (the
+                # many small `try: ... except Exception: pass` blocks
+                # throughout this function) - just applied once more at the
+                # level of the WHOLE poll: whatever payload fields were
+                # already filled in before the crash point (crowd
+                # prediction above, for instance) still get sent, `error`
+                # honestly says a tracking error happened, and the loop
+                # retries next poll instead of ending the connection.
+                # Never masks a REAL disconnect either way - WebSocketDisconnect
+                # is raised outside this try block entirely (at
+                # receive_text()/send_json() below), so it still ends the
+                # loop normally exactly as before.
+                #
+                # Logged with the same traceback.print_exc() pattern already
+                # used for /api/chat's own top-level catch-all above - so
+                # whatever the actual bug was still shows up in the server
+                # logs to fix, instead of vanishing silently into a retry.
+                traceback.print_exc()
+                payload["error"] = f"Temporary tracking error, retrying: {e}"
+                try:
+                    analytics.record_event(intent="live_tracking", train_number=train_number, live_error=True)
+                except Exception:
+                    pass
             await websocket.send_json(payload)
 
             # Auto-refresh every _TRACK_POLL_INTERVAL_SECONDS (5s) — but if the
