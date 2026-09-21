@@ -6129,9 +6129,10 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # back to the live-timeline version only on the rare poll
                 # where train_info_data itself couldn't be fetched at all -
                 # never a guessed duration either way.
+                static_route = gps_tracking.parse_route(train_info_data) if train_info_data else []
                 journey_duration_minutes = (
-                    gps_tracking.estimate_journey_duration_minutes_from_route(gps_tracking.parse_route(train_info_data))
-                    if train_info_data
+                    gps_tracking.estimate_journey_duration_minutes_from_route(static_route)
+                    if static_route
                     else gps_tracking.estimate_journey_duration_minutes(timeline_json)
                 )
                 is_long_journey = (
@@ -6244,11 +6245,56 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # redefined here.
                 has_current_station = any(s.get("status") == "current" for s in timeline_json)
                 if original_date_was_explicit and not has_current_station:
-                    payload["date_reliability_warning"] = (
-                        "RailKit doesn't reliably support looking up a specific past run by date "
-                        "— what's shown below may be a different run than the one you asked for. "
-                        "Leave the date blank to track today's live run instead."
-                    )
+                    # BUGFIX ("for short journey train by using railkit see
+                    # this error" - train 17215, a same-day short journey,
+                    # explicit date picked = today, scheduled to depart
+                    # MACHILIPATNAM at 19:50 but checked at 10:49): this
+                    # branch used to fire the "past run" message below
+                    # unconditionally whenever the request was explicit and
+                    # no current station existed - but original_date_was_
+                    # explicit is also true for an explicit date that just
+                    # happens to equal TODAY (see original_request_implied_
+                    # todays_run's own comment: blank and an explicit
+                    # today's-date carry the exact same intent). For that
+                    # case the honest reason there's no current station is
+                    # almost always simply "hasn't departed yet today" -
+                    # nothing to do with RailKit's real inability to look up
+                    # a SPECIFIC PAST run by date, which is what this
+                    # message was actually written for. Telling someone
+                    # checking a same-day train HOURS before its own
+                    # scheduled departure that "RailKit doesn't reliably
+                    # support looking up a specific past run" is wrong
+                    # information, not just an unhelpfully generic one.
+                    #
+                    # Real arithmetic on the same static schedule already
+                    # parsed for is_long_journey above (static_route, from
+                    # train_info_data) - the origin's own scheduled
+                    # departure - tells the two real cases apart: "now"
+                    # before that time means genuinely not started yet
+                    # (honest, specific message with the real departure
+                    # time); "now" at/after it, still with no current
+                    # station, falls through to the original honest-but-
+                    # generic message below (covers today's run having
+                    # already finished, or a genuine RailKit gap).
+                    first_departure_minutes = None
+                    if original_request_implied_todays_run and static_route:
+                        first_departure_minutes = gps_tracking._time_str_to_minutes(
+                            static_route[0].scheduled_departure or static_route[0].scheduled_arrival
+                        )
+                    now_minutes = datetime.now().hour * 60 + datetime.now().minute
+                    if first_departure_minutes is not None and now_minutes < first_departure_minutes:
+                        dep_hh, dep_mm = divmod(first_departure_minutes, 60)
+                        payload["date_reliability_warning"] = (
+                            f"This train hasn't started its run yet today — scheduled to depart "
+                            f"{static_route[0].name} at {dep_hh:02d}:{dep_mm:02d}. There's no live "
+                            "position to show until then; what's below is today's schedule."
+                        )
+                    else:
+                        payload["date_reliability_warning"] = (
+                            "RailKit doesn't reliably support looking up a specific past run by date "
+                            "— what's shown below may be a different run than the one you asked for. "
+                            "Leave the date blank to track today's live run instead."
+                        )
                 elif (
                     original_request_implied_todays_run
                     and has_current_station
