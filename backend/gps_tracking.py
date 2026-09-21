@@ -872,6 +872,61 @@ def _day_offset(day_val) -> int:
         return 0
 
 
+# FEATURE: "railkit users are complaining me that it is tracking in wrong
+# path" — reported for LONG-journey trains specifically, never for a short
+# same-day one, matching this module's whole documented history of long-
+# journey-only bugs (the date-drift saga above, the reverted RailRadar
+# auto-detect fix for the real ~33h daily train 12295, etc). RailKit is not
+# banned outright for a long journey ("not strictly prohibited" per the
+# original request) — see is_long_journey's callers in app.py's /ws/track
+# loop, which use this only to PREFER RailRadar's own per-station
+# coordinate over RailKit's when both are available, falling straight
+# through to RailKit's own coordinate whenever RailRadar has nothing for
+# that station.
+LONG_JOURNEY_MINUTES = 24 * 60  # 24 hours
+
+
+def estimate_journey_duration_minutes(timeline_json: list) -> Optional[int]:
+    """Best-effort total journey duration in minutes — first stop's
+    departure to last stop's arrival — real arithmetic on this train's own
+    day + arrival/departure fields (day-offset*1440 + minutes-since-
+    midnight, the same ordering _day_offset/_time_str_to_minutes already
+    use elsewhere in this module for a multi-day run), never a guess.
+
+    Takes the plain-dict `timeline_json` shape (gps_tracking.timeline_to_json's
+    output) since that's what app.py's /ws/track loop already has on hand
+    each poll. Prefers each endpoint's most REAL recorded time - actual,
+    then expected, then scheduled - the same preference order _parse_timing
+    already uses, so a train running late doesn't look artificially shorter
+    just because its scheduled times were used instead.
+
+    Returns None (never 0, never a guessed duration) whenever the list has
+    fewer than 2 stops, either endpoint's day/time can't be parsed, or the
+    computed duration would be negative (a data inconsistency, not a real
+    duration) - callers must treat None as "unknown, assume short/normal
+    journey behaviour," exactly like every other honest-absence value in
+    this module."""
+    if not timeline_json or len(timeline_json) < 2:
+        return None
+
+    def _stop_minutes(stop: dict, event_keys) -> Optional[int]:
+        day = _day_offset(stop.get("day"))
+        for key in event_keys:
+            event = stop.get(key) or {}
+            for field in ("actual", "expected", "scheduled"):
+                minutes = _time_str_to_minutes(event.get(field))
+                if minutes is not None:
+                    return day * 1440 + minutes
+        return None
+
+    start = _stop_minutes(timeline_json[0], ("departure", "arrival"))
+    end = _stop_minutes(timeline_json[-1], ("arrival", "departure"))
+    if start is None or end is None:
+        return None
+    duration = end - start
+    return duration if duration >= 0 else None
+
+
 def current_position_distance_km(timeline_json: list) -> Optional[float]:
     """
     Real distance-from-origin (RailKit's own distance_km) of the train's

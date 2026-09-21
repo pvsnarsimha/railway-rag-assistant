@@ -6105,6 +6105,27 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
 
                 timeline_json = gps_tracking.timeline_to_json(timeline_stops)
 
+                # FEATURE: "railkit users are complaining me that it is
+                # tracking in wrong path" — reported for LONG-journey trains
+                # specifically (see gps_tracking.LONG_JOURNEY_MINUTES's own
+                # comment for why that's not a surprise given this module's
+                # whole documented history of long-journey-only bugs above).
+                # Real arithmetic on THIS poll's own timeline_json (day +
+                # scheduled/expected/actual times) via
+                # gps_tracking.estimate_journey_duration_minutes — None
+                # (treated as "assume short/normal") whenever either
+                # endpoint's real timing can't be read, never a guessed
+                # duration. Used just below to PREFER RailRadar's own per-
+                # station coordinate over RailKit's for a long journey —
+                # never a hard ban on RailKit ("not strictly prohibited" per
+                # the original request): RailKit is still used exactly as
+                # before whenever RailRadar has nothing for that station.
+                journey_duration_minutes = gps_tracking.estimate_journey_duration_minutes(timeline_json)
+                is_long_journey = (
+                    journey_duration_minutes is not None
+                    and journey_duration_minutes > gps_tracking.LONG_JOURNEY_MINUTES
+                )
+
                 # FEATURE: date reliability warnings. RailKit's `date` query
                 # param does not appear to reliably select a SPECIFIC run of
                 # a daily train - see the long REVERTED comment above this
@@ -6346,7 +6367,27 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # EITHER a code or a name to look RailRadar's own route up
                 # by - get_station_coordinate tries the code first, then
                 # falls back to matching by name.
-                if position.lat is None and (position.current_station_code or position.current_station_name):
+                #
+                # FEATURE: also fires when RailKit DID resolve a coordinate
+                # but this is a long journey (is_long_journey, computed just
+                # above from this poll's own real timeline — see its
+                # comment) — "railkit users are complaining ... wrong path"
+                # for long-duration trains specifically. RailRadar's own
+                # per-station route[].lat/lng is a genuinely independent
+                # third coordinate source (get_station_coordinate's own
+                # docstring), so preferring it here for a long journey is
+                # real data, not a guess — and it's a PREFERENCE, not a
+                # ban: rr_lat/rr_lng coming back empty (get_station_coordinate
+                # is itself best-effort) falls straight through and leaves
+                # RailKit's own already-resolved position.lat/lng exactly as
+                # they were, so a long-journey train with no RailRadar
+                # coverage for its current station is still tracked via
+                # RailKit, unchanged — "not strictly prohibited".
+                had_railkit_coordinate = position.lat is not None
+                if (
+                    (not had_railkit_coordinate or is_long_journey)
+                    and (position.current_station_code or position.current_station_name)
+                ):
                     try:
                         rr_lat, rr_lng = await asyncio.to_thread(
                             railradar_fallback.get_station_coordinate,
@@ -6356,7 +6397,11 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                         rr_lat, rr_lng = None, None
                     if rr_lat is not None and rr_lng is not None:
                         position.lat, position.lng = rr_lat, rr_lng
-                        position.position_source = "railradar_route"
+                        position.position_source = (
+                            "railradar_route_long_journey_preferred"
+                            if (is_long_journey and had_railkit_coordinate)
+                            else "railradar_route"
+                        )
 
                 # FEATURE: near-instant "current station" update on a real
                 # arrival - see force_refresh_next_poll declared above. If
@@ -7131,6 +7176,8 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "position_source_raw": position.position_source,
                     "segment_progress": segment_info.get("segment_progress"),
                     "date_corrected_via_railradar": date_corrected_via_railradar,
+                    "journey_duration_minutes": journey_duration_minutes,
+                    "is_long_journey": is_long_journey,
                     "final_lat": payload.get("lat"),
                     "final_lng": payload.get("lng"),
                     "final_position_source": payload.get("position_source"),
