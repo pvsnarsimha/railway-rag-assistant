@@ -1,0 +1,1143 @@
+From 64dc11bc10f3aa6c1ce322cab82dae5eee2ef1d3 Mon Sep 17 00:00:00 2001
+From: pvsnarasimha <pvsnarasimha2003@gmail.com>
+Date: Sun, 20 Sep 2026 17:23:05 +0000
+Subject: [PATCH] Redesign From/To fields, fix duplicate search results, add
+ RailYatri-style date picker
+
+- StationField.js: bordered card layout with icon, focus glow, and a
+  clear button instead of bare unstyled text (From/To fields were
+  overflowing/cramped on the search form).
+- TrainSearchScreen.js: add a swap button between From/To, and gate the
+  results FlatList strictly on formCollapsed so search results can never
+  render both under the still-open form and under the collapsed
+  orange-header view at once.
+- New DayPickerModal.js: RailYatri "Change Start Day" style radio-button
+  dialog (Tomorrow/Today/Yesterday/2-4 days ago), computed off the real
+  current date.
+- LiveTrackingScreen.js: replace the plain DD-MM-YYYY text field with a
+  pressable field that opens DayPickerModal.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MGKaCWBEc2rtTTsPnQDkYV
+---
+ mobile-app/src/components/DayPickerModal.js  | 165 ++++
+ mobile-app/src/components/StationField.js    |  76 +-
+ mobile-app/src/screens/LiveTrackingScreen.js | 745 ++++++++++---------
+ mobile-app/src/screens/TrainSearchScreen.js  |  39 +-
+ 4 files changed, 642 insertions(+), 383 deletions(-)
+ create mode 100644 mobile-app/src/components/DayPickerModal.js
+
+diff --git a/mobile-app/src/components/DayPickerModal.js b/mobile-app/src/components/DayPickerModal.js
+new file mode 100644
+index 0000000..69f25f2
+--- /dev/null
++++ b/mobile-app/src/components/DayPickerModal.js
+@@ -0,0 +1,165 @@
++import React from "react";
++import { Modal, View, Text, TouchableOpacity, StyleSheet } from "react-native";
++import { Ionicons } from "@expo/vector-icons";
++import { colors, spacing, radius } from "../theme/colors";
++import { toDdMmYyyy, fromDdMmYyyy, addDays, startOfToday, isSameDay, weekdayShort, monthShort } from "../utils/dateFormat";
++
++/**
++ * RailYatri-style "Change Start Day" dialog — a centered card with a plain
++ * radio-button list (Tomorrow / Today / Yesterday / 2-4 days ago), each row
++ * showing the *actual* calendar date computed off `new Date()` right now,
++ * so "Today"/"Tomorrow" always line up with the real current date rather
++ * than a stale hardcoded label. Selecting a row and tapping GO is the only
++ * way out other than the backdrop/X (mirrors the reference screenshot).
++ *
++ * `selected` is a "dd-mm-yyyy" string or falsy (falsy == "Today", matching
++ * how the rest of this app treats a blank date field as "defaults to
++ * today"). `onSelect` is called with a "dd-mm-yyyy" string — never null —
++ * so the caller always has an explicit, unambiguous date to send to the
++ * API, even when the user picked "Today".
++ */
++const DAY_OPTIONS = [
++  { key: "tomorrow", label: "Tomorrow", offset: 1 },
++  { key: "today", label: "Today", offset: 0 },
++  { key: "yesterday", label: "Yesterday", offset: -1 },
++  { key: "2ago", label: "2 days ago", offset: -2 },
++  { key: "3ago", label: "3 days ago", offset: -3 },
++  { key: "4ago", label: "4 days ago", offset: -4 },
++];
++
++export default function DayPickerModal({ visible, selected, onSelect, onClose, title = "Change Start Day" }) {
++  const today = startOfToday();
++  const selectedDate = fromDdMmYyyy(selected) || today;
++
++  const options = DAY_OPTIONS.map((opt) => {
++    const date = addDays(today, opt.offset);
++    return { ...opt, date, ddmmyyyy: toDdMmYyyy(date) };
++  });
++
++  const initialActiveKey = options.find((o) => isSameDay(o.date, selectedDate))?.key || "today";
++  const [activeKey, setActiveKey] = React.useState(initialActiveKey);
++
++  // Re-sync the highlighted row whenever the dialog is (re)opened, so it
++  // always reflects whatever date is currently applied rather than
++  // whatever was last clicked before it was closed without confirming.
++  React.useEffect(() => {
++    if (visible) setActiveKey(initialActiveKey);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [visible, selected]);
++
++  function confirm() {
++    const chosen = options.find((o) => o.key === activeKey) || options[1];
++    onSelect(chosen.ddmmyyyy);
++    onClose();
++  }
++
++  return (
++    <Modal visible={!!visible} animationType="fade" transparent onRequestClose={onClose}>
++      <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={onClose}>
++        <TouchableOpacity activeOpacity={1} style={styles.card} onPress={() => {}}>
++          <View style={styles.header}>
++            <Text style={styles.title}>{title}</Text>
++            <TouchableOpacity onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
++              <Ionicons name="close" size={20} color={colors.textMuted} />
++            </TouchableOpacity>
++          </View>
++
++          <View style={styles.list}>
++            {options.map((opt) => {
++              const active = opt.key === activeKey;
++              return (
++                <TouchableOpacity
++                  key={opt.key}
++                  style={styles.row}
++                  onPress={() => setActiveKey(opt.key)}
++                  activeOpacity={0.6}
++                >
++                  <View style={[styles.radioOuter, active && styles.radioOuterActive]}>
++                    {active ? <View style={styles.radioInner} /> : null}
++                  </View>
++                  <Text style={[styles.rowLabel, active && styles.rowLabelActive]}>{opt.label}</Text>
++                  <Text style={[styles.rowDate, active && styles.rowDateActive]}>
++                    {weekdayShort(opt.date)}, {opt.date.getDate()} {monthShort(opt.date)} {opt.date.getFullYear()}
++                  </Text>
++                </TouchableOpacity>
++              );
++            })}
++          </View>
++
++          <TouchableOpacity style={styles.goBtn} onPress={confirm} activeOpacity={0.85}>
++            <Text style={styles.goBtnText}>GO</Text>
++          </TouchableOpacity>
++        </TouchableOpacity>
++      </TouchableOpacity>
++    </Modal>
++  );
++}
++
++const styles = StyleSheet.create({
++  backdrop: {
++    flex: 1,
++    backgroundColor: "rgba(20,24,33,0.5)",
++    alignItems: "center",
++    justifyContent: "center",
++    padding: spacing.lg,
++  },
++  card: {
++    width: "100%",
++    maxWidth: 380,
++    backgroundColor: colors.card,
++    borderRadius: radius.lg,
++    padding: spacing.lg,
++    shadowColor: "#000",
++    shadowOpacity: 0.2,
++    shadowRadius: 16,
++    shadowOffset: { width: 0, height: 8 },
++    elevation: 6,
++  },
++  header: {
++    flexDirection: "row",
++    alignItems: "center",
++    justifyContent: "space-between",
++    marginBottom: spacing.sm,
++    paddingBottom: spacing.md,
++    borderBottomWidth: 1,
++    borderBottomColor: colors.border,
++  },
++  title: { fontSize: 17, fontWeight: "700", color: colors.text },
++  list: { marginBottom: spacing.md },
++  row: {
++    flexDirection: "row",
++    alignItems: "center",
++    paddingVertical: spacing.md,
++    borderBottomWidth: 1,
++    borderBottomColor: colors.border,
++    gap: spacing.md,
++  },
++  radioOuter: {
++    width: 20,
++    height: 20,
++    borderRadius: 10,
++    borderWidth: 2,
++    borderColor: colors.border,
++    alignItems: "center",
++    justifyContent: "center",
++  },
++  radioOuterActive: { borderColor: colors.primary },
++  radioInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.primary },
++  rowLabel: { fontSize: 15, fontWeight: "700", color: colors.text, flex: 1 },
++  rowLabelActive: { color: colors.primary },
++  rowDate: { fontSize: 12.5, color: colors.textMuted, fontWeight: "600" },
++  rowDateActive: { color: colors.primary },
++  goBtn: {
++    backgroundColor: colors.primary,
++    borderRadius: radius.md,
++    paddingVertical: spacing.md,
++    alignItems: "center",
++    justifyContent: "center",
++    shadowColor: colors.primary,
++    shadowOpacity: 0.3,
++    shadowRadius: 6,
++    shadowOffset: { width: 0, height: 3 },
++    elevation: 2,
++  },
++  goBtnText: { color: colors.textInverse, fontWeight: "700", fontSize: 15, letterSpacing: 0.5 },
++});
+diff --git a/mobile-app/src/components/StationField.js b/mobile-app/src/components/StationField.js
+index 7c4424b..8250227 100644
+--- a/mobile-app/src/components/StationField.js
++++ b/mobile-app/src/components/StationField.js
+@@ -1,5 +1,6 @@
+ import React, { useEffect, useRef, useState } from "react";
+ import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, StyleSheet } from "react-native";
++import { Ionicons } from "@expo/vector-icons";
+ import { colors, spacing, radius } from "../theme/colors";
+ import { searchStations } from "../api/railwayApi";
+ 
+@@ -28,6 +29,7 @@ export default function StationField({
+   onSelectStation,
+   apiBaseUrl,
+   style,
++  icon = "location-outline",
+ }) {
+   const [focused, setFocused] = useState(false);
+   const [matches, setMatches] = useState([]);
+@@ -86,20 +88,35 @@ export default function StationField({
+   return (
+     <View style={[styles.wrap, style]}>
+       <Text style={styles.label}>{label}</Text>
+-      <TextInput
+-        style={styles.codeInput}
+-        value={value}
+-        onChangeText={onChangeText}
+-        onFocus={handleFocus}
+-        onBlur={handleBlur}
+-        placeholder={placeholder}
+-        placeholderTextColor={colors.textMuted}
+-        autoCapitalize="characters"
+-        autoCorrect={false}
+-      />
+-      {resolvedName ? (
+-        <Text numberOfLines={1} style={styles.nameLine}>{resolvedName}</Text>
+-      ) : null}
++      <View style={[styles.box, focused && styles.boxFocused]}>
++        <Ionicons name={icon} size={16} color={focused ? colors.orange : colors.textMuted} style={styles.boxIcon} />
++        <View style={styles.boxTextCol}>
++          <TextInput
++            style={styles.codeInput}
++            value={value}
++            onChangeText={onChangeText}
++            onFocus={handleFocus}
++            onBlur={handleBlur}
++            placeholder={placeholder}
++            placeholderTextColor={colors.textMuted}
++            autoCapitalize="characters"
++            autoCorrect={false}
++            numberOfLines={1}
++          />
++          {resolvedName ? (
++            <Text numberOfLines={1} style={styles.nameLine}>{resolvedName}</Text>
++          ) : null}
++        </View>
++        {value ? (
++          <TouchableOpacity
++            onPress={() => { onChangeText(""); }}
++            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
++            style={styles.clearBtn}
++          >
++            <Ionicons name="close-circle" size={16} color={colors.textMuted} />
++          </TouchableOpacity>
++        ) : null}
++      </View>
+ 
+       {showDropdown ? (
+         <View style={styles.dropdown}>
+@@ -134,13 +151,36 @@ const styles = StyleSheet.create({
+   // its row is exactly the kind of thing that gets clipped or loses its
+   // z-index ordering inside a ScrollView/FlatList on Android — inline is
+   // the version that's guaranteed to actually show up everywhere.
+-  wrap: {},
+-  label: { fontSize: 11, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 2 },
++  wrap: { minWidth: 0 },
++  label: { fontSize: 11, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 },
++  box: {
++    flexDirection: "row",
++    alignItems: "center",
++    borderWidth: 1.5,
++    borderColor: colors.border,
++    borderRadius: radius.md,
++    backgroundColor: colors.bg,
++    paddingHorizontal: spacing.sm + 2,
++    paddingVertical: spacing.sm,
++    minHeight: 52,
++  },
++  boxFocused: {
++    borderColor: colors.orange,
++    backgroundColor: colors.card,
++    shadowColor: colors.orange,
++    shadowOpacity: 0.12,
++    shadowRadius: 6,
++    shadowOffset: { width: 0, height: 2 },
++    elevation: 1,
++  },
++  boxIcon: { marginRight: 6 },
++  boxTextCol: { flex: 1, minWidth: 0 },
++  clearBtn: { marginLeft: 4, padding: 2 },
+   codeInput: {
+-    fontSize: 20,
++    fontSize: 16,
+     fontWeight: "700",
+     color: colors.text,
+-    paddingVertical: 2,
++    padding: 0,
+   },
+   nameLine: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
+   dropdown: {
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.js b/mobile-app/src/screens/LiveTrackingScreen.js
+index 75d5ed2..bceff15 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.js
+@@ -1,359 +1,386 @@
+-import React, { useState } from "react";
+-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator } from "react-native";
+-import { Ionicons } from "@expo/vector-icons";
+-import { colors, spacing, radius } from "../theme/colors";
+-import SectionCard from "../components/SectionCard";
+-import LabeledInput from "../components/LabeledInput";
+-import PrimaryButton from "../components/PrimaryButton";
+-import MicButton from "../components/MicButton";
+-import QueryToolbar from "../components/QueryToolbar";
+-import TrackedTrainCard from "../components/TrackedTrainCard";
+-import { useSettings } from "../context/SettingsContext";
+-import { sendChatMessage } from "../api/railwayApi";
+-import { describeApiError } from "../api/client";
+-
+-let trackIdCounter = 0;
+-function nextTrackId() {
+-  trackIdCounter += 1;
+-  return `track_${Date.now()}_${trackIdCounter}`;
+-}
+-
+-export default function LiveTrackingScreen() {
+-  const { wsBaseUrl, apiBaseUrl, language } = useSettings();
+-
+-  // --- Multi-train tracking: each entry in `tracked` gets its own
+-  // <TrackedTrainCard>, which owns its own WebSocket connection, animated
+-  // marker, and station-crossing notifications independently — so you can
+-  // track train 12709 today AND 20833 on a custom date at the same time,
+-  // not just one train at a time. ---
+-  const [tracked, setTracked] = useState([]);
+-  const [trainNumber, setTrainNumber] = useState("");
+-  const [trackDate, setTrackDate] = useState(""); // DD-MM-YYYY, optional - blank = today
+-  const [source, setSource] = useState("");
+-  const [dest, setDest] = useState("");
+-
+-  // FEATURE: Track two trains side by side. Each TrackedTrainCard already
+-  // owns its own websocket, so this doesn't open any extra connections —
+-  // it just relays each card's latest live payload up here (keyed by the
+-  // same tracked-list id) so a compact two-column comparison strip can be
+-  // rendered above the full cards, useful for a connection or deciding
+-  // between two options before boarding.
+-  const [payloadsById, setPayloadsById] = useState({});
+-  const [compareIds, setCompareIds] = useState([]); // up to 2 tracked-list ids
+-  function toggleCompare(id) {
+-    setCompareIds((prev) => {
+-      if (prev.includes(id)) return prev.filter((x) => x !== id);
+-      if (prev.length >= 2) return [prev[1], id];
+-      return [...prev, id];
+-    });
+-  }
+-
+-  function addTrackedTrain() {
+-    const num = trainNumber.trim();
+-    if (!num) return;
+-    setTracked((prev) => [
+-      ...prev,
+-      {
+-        id: nextTrackId(),
+-        trainNumber: num,
+-        date: trackDate.trim() || null,
+-        source: source.trim().toUpperCase() || null,
+-        dest: dest.trim().toUpperCase() || null,
+-      },
+-    ]);
+-    setTrainNumber("");
+-    setTrackDate("");
+-    setSource("");
+-    setDest("");
+-  }
+-
+-  function removeTrackedTrain(id) {
+-    setTracked((prev) => prev.filter((t) => t.id !== id));
+-    setPayloadsById((prev) => {
+-      const next = { ...prev };
+-      delete next[id];
+-      return next;
+-    });
+-    setCompareIds((prev) => prev.filter((x) => x !== id));
+-  }
+-
+-  // --- Passenger Q&A: web search + semantic RAG, scoped to whichever
+-  // train number is typed here (independent of the tracked list above —
+-  // you can ask about a train before deciding to track it). ---
+-  const [qaTrainNumber, setQaTrainNumber] = useState("");
+-  const [question, setQuestion] = useState("");
+-  const [qa, setQa] = useState(null); // { answer, sources, error }
+-  const [asking, setAsking] = useState(false);
+-  const [webSearchOn, setWebSearchOn] = useState(true);
+-  const [deepThinkOn, setDeepThinkOn] = useState(false);
+-
+-  async function askQuestion(text) {
+-    const trimmed = (text ?? question).trim();
+-    if (!trimmed || !qaTrainNumber.trim()) return;
+-    setAsking(true);
+-    setQa(null);
+-    try {
+-      const data = await sendChatMessage(apiBaseUrl, {
+-        message: trimmed,
+-        trainNumber: qaTrainNumber.trim(),
+-        language,
+-        webSearch: webSearchOn,
+-        deepThink: deepThinkOn,
+-      });
+-      setQa({ answer: data.answer, sources: data.web_sources || [], deepThinkUsed: data.deep_think_used });
+-    } catch (e) {
+-      setQa({ error: describeApiError(e) });
+-    } finally {
+-      setAsking(false);
+-      setQuestion("");
+-    }
+-  }
+-
+-  return (
+-    <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
+-      <SectionCard
+-        title="Track a train"
+-        subtitle="Add one or more trains — each streams its own position + delay + crowd update every ~5s (tap the refresh icon on a card for an instant update), on today's date or a date you pick."
+-      >
+-        <LabeledInput
+-          label="Train number"
+-          placeholder="e.g. 12709"
+-          value={trainNumber}
+-          onChangeText={setTrainNumber}
+-          keyboardType="number-pad"
+-        />
+-        <LabeledInput
+-          label="Date (optional — defaults to today)"
+-          placeholder="DD-MM-YYYY, e.g. 20-08-2026"
+-          value={trackDate}
+-          onChangeText={setTrackDate}
+-        />
+-        <View style={styles.row}>
+-          <LabeledInput
+-            label="Source (optional)"
+-            placeholder="e.g. SC"
+-            value={source}
+-            onChangeText={setSource}
+-            style={styles.half}
+-          />
+-          <LabeledInput
+-            label="Dest (optional)"
+-            placeholder="e.g. BZA"
+-            value={dest}
+-            onChangeText={setDest}
+-            style={styles.half}
+-          />
+-        </View>
+-        <PrimaryButton title="+ Track this train" onPress={addTrackedTrain} disabled={!trainNumber.trim()} />
+-      </SectionCard>
+-
+-      <SectionCard
+-        title="Ask about a train"
+-        subtitle="Answered from railway knowledge + a live web search — type or tap the mic."
+-      >
+-        <LabeledInput
+-          label="Train number"
+-          placeholder="e.g. 12709"
+-          value={qaTrainNumber}
+-          onChangeText={setQaTrainNumber}
+-          keyboardType="number-pad"
+-        />
+-        <QueryToolbar
+-          webSearch={webSearchOn}
+-          onToggleWebSearch={setWebSearchOn}
+-          deepThink={deepThinkOn}
+-          onToggleDeepThink={setDeepThinkOn}
+-        />
+-        <View style={styles.qaInputRow}>
+-          <TextInput
+-            style={styles.qaInput}
+-            placeholder={
+-              qaTrainNumber.trim() ? "e.g. why might it be delayed today?" : "Enter a train number above first"
+-            }
+-            placeholderTextColor={colors.textMuted}
+-            value={question}
+-            onChangeText={setQuestion}
+-            editable={!!qaTrainNumber.trim()}
+-            multiline
+-            onSubmitEditing={() => askQuestion()}
+-          />
+-          <MicButton onResult={(text) => askQuestion(text)} style={styles.qaMic} />
+-          <TouchableOpacity
+-            style={[styles.qaSendBtn, (!question.trim() || !qaTrainNumber.trim()) && styles.qaSendBtnDisabled]}
+-            onPress={() => askQuestion()}
+-            disabled={asking || !question.trim() || !qaTrainNumber.trim()}
+-          >
+-            <Ionicons name="send" size={16} color={colors.textInverse} />
+-          </TouchableOpacity>
+-        </View>
+-
+-        {asking && (
+-          <View style={styles.qaThinkingRow}>
+-            <ActivityIndicator size="small" color={colors.primary} />
+-            <Text style={styles.qaThinkingText}>
+-              {deepThinkOn ? "Thinking it through carefully\u2026" : "Checking live data, knowledge base, and the web\u2026"}
+-            </Text>
+-          </View>
+-        )}
+-
+-        {qa?.error && <Text style={styles.errorText}>{qa.error}</Text>}
+-
+-        {qa?.answer && (
+-          <View style={styles.qaAnswerBox}>
+-            <Text style={styles.qaAnswerText}>{qa.answer}</Text>
+-            {!!qa.sources?.length && (
+-              <View style={styles.basisList}>
+-                {qa.sources.map((s, i) => (
+-                  <Text key={i} style={styles.basisItem}>
+-                    {"\u2022 "}{s.title}
+-                  </Text>
+-                ))}
+-              </View>
+-            )}
+-          </View>
+-        )}
+-      </SectionCard>
+-
+-      {/* FEATURE: Track two trains side by side — pick any two currently-
+-          tracked trains for a compact comparison strip, useful for a
+-          connection or deciding between two options before boarding. */}
+-      {tracked.length >= 2 && (
+-        <SectionCard title="Compare trains" subtitle="Pick two tracked trains to compare side by side.">
+-          <View style={styles.compareChipRow}>
+-            {tracked.map((t) => (
+-              <TouchableOpacity
+-                key={t.id}
+-                style={[styles.compareChip, compareIds.includes(t.id) && styles.compareChipActive]}
+-                onPress={() => toggleCompare(t.id)}
+-              >
+-                <Text style={[styles.compareChipText, compareIds.includes(t.id) && styles.compareChipTextActive]}>
+-                  {t.trainNumber}{t.date ? ` (${t.date})` : ""}
+-                </Text>
+-              </TouchableOpacity>
+-            ))}
+-          </View>
+-          {compareIds.length === 2 && (
+-            <View style={styles.compareCols}>
+-              {compareIds.map((id) => {
+-                const t = tracked.find((x) => x.id === id);
+-                const p = payloadsById[id];
+-                return (
+-                  <View key={id} style={styles.compareCol}>
+-                    <Text style={styles.compareColTitle}>Train {t?.trainNumber}</Text>
+-                    {!p ? (
+-                      <Text style={styles.compareRowValue}>Waiting for live data…</Text>
+-                    ) : (
+-                      <>
+-                        <CompareRow label="Current" value={p.current_station || "—"} />
+-                        <CompareRow label="Next" value={p.next_station || "—"} />
+-                        <CompareRow label="Next ETA" value={p.next_station_live_eta || p.next_station_expected_arrival || "—"} />
+-                        <CompareRow
+-                          label="Delay"
+-                          value={p.delay_minutes != null ? `${p.delay_minutes > 0 ? "+" : ""}${p.delay_minutes}m` : "—"}
+-                          danger={p.delay_minutes > 0}
+-                        />
+-                        <CompareRow
+-                          label="Speed"
+-                          value={(p.recency_weighted_speed_kmph ?? p.instant_speed_kmph) != null ? `${p.recency_weighted_speed_kmph ?? p.instant_speed_kmph} km/h` : "—"}
+-                        />
+-                      </>
+-                    )}
+-                  </View>
+-                );
+-              })}
+-            </View>
+-          )}
+-          {compareIds.length < 2 && (
+-            <Text style={styles.compareHint}>Select two trains above to compare.</Text>
+-          )}
+-        </SectionCard>
+-      )}
+-
+-      {tracked.map((t) => (
+-        <TrackedTrainCard
+-          key={t.id}
+-          trainNumber={t.trainNumber}
+-          date={t.date}
+-          source={t.source}
+-          dest={t.dest}
+-          wsBaseUrl={wsBaseUrl}
+-          apiBaseUrl={apiBaseUrl}
+-          onRemove={() => removeTrackedTrain(t.id)}
+-          onPayloadUpdate={(data) => setPayloadsById((prev) => ({ ...prev, [t.id]: data }))}
+-        />
+-      ))}
+-    </ScrollView>
+-  );
+-}
+-
+-function CompareRow({ label, value, danger }) {
+-  return (
+-    <View style={styles.compareRow}>
+-      <Text style={styles.compareRowLabel}>{label}</Text>
+-      <Text style={[styles.compareRowValue, danger && { color: colors.danger }]} numberOfLines={1}>{value}</Text>
+-    </View>
+-  );
+-}
+-
+-const styles = StyleSheet.create({
+-  flex: { flex: 1, backgroundColor: colors.bg },
+-  content: { padding: spacing.lg },
+-  row: { flexDirection: "row", gap: spacing.md },
+-  half: { flex: 1 },
+-  errorText: { fontSize: 12, color: colors.danger, marginTop: spacing.sm },
+-  basisList: { marginTop: spacing.sm },
+-  basisItem: { fontSize: 12, color: colors.textMuted, marginBottom: 2 },
+-  qaInputRow: { flexDirection: "row", alignItems: "flex-end", gap: spacing.sm },
+-  qaInput: {
+-    flex: 1,
+-    borderWidth: 1,
+-    borderColor: colors.border,
+-    borderRadius: radius.lg,
+-    paddingHorizontal: spacing.md,
+-    paddingVertical: spacing.sm,
+-    maxHeight: 90,
+-    fontSize: 14,
+-    color: colors.text,
+-    backgroundColor: colors.bg,
+-  },
+-  qaMic: { marginBottom: 2 },
+-  qaSendBtn: {
+-    backgroundColor: colors.primary,
+-    width: 36,
+-    height: 36,
+-    borderRadius: 18,
+-    alignItems: "center",
+-    justifyContent: "center",
+-  },
+-  qaSendBtnDisabled: { opacity: 0.4 },
+-  qaThinkingRow: { flexDirection: "row", alignItems: "center", gap: spacing.xs, marginTop: spacing.sm },
+-  qaThinkingText: { fontSize: 12, color: colors.textMuted },
+-  qaAnswerBox: {
+-    marginTop: spacing.md,
+-    padding: spacing.md,
+-    backgroundColor: colors.chip,
+-    borderRadius: radius.md,
+-  },
+-  qaAnswerText: { fontSize: 14, color: colors.text, lineHeight: 20 },
+-
+-  // FEATURE: Track two trains side by side.
+-  compareChipRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
+-  compareChip: {
+-    paddingHorizontal: spacing.md,
+-    paddingVertical: 6,
+-    borderRadius: radius.pill,
+-    borderWidth: 1,
+-    borderColor: colors.border,
+-    backgroundColor: colors.card || colors.bg,
+-  },
+-  compareChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+-  compareChipText: { fontSize: 12.5, fontWeight: "600", color: colors.primary },
+-  compareChipTextActive: { color: colors.textInverse },
+-  compareHint: { fontSize: 12, color: colors.textMuted, marginTop: spacing.sm },
+-  compareCols: { flexDirection: "row", gap: spacing.md, marginTop: spacing.md },
+-  compareCol: { flex: 1, padding: spacing.sm, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
+-  compareColTitle: { fontSize: 13, fontWeight: "700", color: colors.primary, marginBottom: spacing.xs },
+-  compareRow: { marginBottom: 6 },
+-  compareRowLabel: { fontSize: 10.5, color: colors.textMuted },
+-  compareRowValue: { fontSize: 12.5, fontWeight: "600", color: colors.text },
+-});
++import React, { useState } from "react";
++import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator } from "react-native";
++import { Ionicons } from "@expo/vector-icons";
++import { colors, spacing, radius } from "../theme/colors";
++import SectionCard from "../components/SectionCard";
++import LabeledInput from "../components/LabeledInput";
++import PrimaryButton from "../components/PrimaryButton";
++import MicButton from "../components/MicButton";
++import QueryToolbar from "../components/QueryToolbar";
++import TrackedTrainCard from "../components/TrackedTrainCard";
++import DayPickerModal from "../components/DayPickerModal";
++import { useSettings } from "../context/SettingsContext";
++import { sendChatMessage } from "../api/railwayApi";
++import { describeApiError } from "../api/client";
++import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
++
++let trackIdCounter = 0;
++function nextTrackId() {
++  trackIdCounter += 1;
++  return `track_${Date.now()}_${trackIdCounter}`;
++}
++
++export default function LiveTrackingScreen() {
++  const { wsBaseUrl, apiBaseUrl, language } = useSettings();
++
++  // --- Multi-train tracking: each entry in `tracked` gets its own
++  // <TrackedTrainCard>, which owns its own WebSocket connection, animated
++  // marker, and station-crossing notifications independently — so you can
++  // track train 12709 today AND 20833 on a custom date at the same time,
++  // not just one train at a time. ---
++  const [tracked, setTracked] = useState([]);
++  const [trainNumber, setTrainNumber] = useState("");
++  const [trackDate, setTrackDate] = useState(""); // DD-MM-YYYY, optional - blank = today
++  const [dayPickerVisible, setDayPickerVisible] = useState(false);
++  const [source, setSource] = useState("");
++  const [dest, setDest] = useState("");
++
++  // FEATURE: Track two trains side by side. Each TrackedTrainCard already
++  // owns its own websocket, so this doesn't open any extra connections —
++  // it just relays each card's latest live payload up here (keyed by the
++  // same tracked-list id) so a compact two-column comparison strip can be
++  // rendered above the full cards, useful for a connection or deciding
++  // between two options before boarding.
++  const [payloadsById, setPayloadsById] = useState({});
++  const [compareIds, setCompareIds] = useState([]); // up to 2 tracked-list ids
++  function toggleCompare(id) {
++    setCompareIds((prev) => {
++      if (prev.includes(id)) return prev.filter((x) => x !== id);
++      if (prev.length >= 2) return [prev[1], id];
++      return [...prev, id];
++    });
++  }
++
++  function addTrackedTrain() {
++    const num = trainNumber.trim();
++    if (!num) return;
++    setTracked((prev) => [
++      ...prev,
++      {
++        id: nextTrackId(),
++        trainNumber: num,
++        date: trackDate.trim() || null,
++        source: source.trim().toUpperCase() || null,
++        dest: dest.trim().toUpperCase() || null,
++      },
++    ]);
++    setTrainNumber("");
++    setTrackDate("");
++    setSource("");
++    setDest("");
++  }
++
++  function removeTrackedTrain(id) {
++    setTracked((prev) => prev.filter((t) => t.id !== id));
++    setPayloadsById((prev) => {
++      const next = { ...prev };
++      delete next[id];
++      return next;
++    });
++    setCompareIds((prev) => prev.filter((x) => x !== id));
++  }
++
++  // --- Passenger Q&A: web search + semantic RAG, scoped to whichever
++  // train number is typed here (independent of the tracked list above —
++  // you can ask about a train before deciding to track it). ---
++  const [qaTrainNumber, setQaTrainNumber] = useState("");
++  const [question, setQuestion] = useState("");
++  const [qa, setQa] = useState(null); // { answer, sources, error }
++  const [asking, setAsking] = useState(false);
++  const [webSearchOn, setWebSearchOn] = useState(true);
++  const [deepThinkOn, setDeepThinkOn] = useState(false);
++
++  async function askQuestion(text) {
++    const trimmed = (text ?? question).trim();
++    if (!trimmed || !qaTrainNumber.trim()) return;
++    setAsking(true);
++    setQa(null);
++    try {
++      const data = await sendChatMessage(apiBaseUrl, {
++        message: trimmed,
++        trainNumber: qaTrainNumber.trim(),
++        language,
++        webSearch: webSearchOn,
++        deepThink: deepThinkOn,
++      });
++      setQa({ answer: data.answer, sources: data.web_sources || [], deepThinkUsed: data.deep_think_used });
++    } catch (e) {
++      setQa({ error: describeApiError(e) });
++    } finally {
++      setAsking(false);
++      setQuestion("");
++    }
++  }
++
++  return (
++    <>
++    <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
++      <SectionCard
++        title="Track a train"
++        subtitle="Add one or more trains — each streams its own position + delay + crowd update every ~5s (tap the refresh icon on a card for an instant update), on today's date or a date you pick."
++      >
++        <LabeledInput
++          label="Train number"
++          placeholder="e.g. 12709"
++          value={trainNumber}
++          onChangeText={setTrainNumber}
++          keyboardType="number-pad"
++        />
++        <Text style={styles.fieldLabel}>Date (optional — defaults to today)</Text>
++        <TouchableOpacity style={styles.dateField} onPress={() => setDayPickerVisible(true)} activeOpacity={0.7}>
++          <Ionicons name="calendar-outline" size={16} color={colors.primary} />
++          <Text style={styles.dateFieldText}>
++            {trackDate.trim() ? formatLongLabel(fromDdMmYyyy(trackDate)) || trackDate : "Today"}
++          </Text>
++          <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
++        </TouchableOpacity>
++        <View style={styles.row}>
++          <LabeledInput
++            label="Source (optional)"
++            placeholder="e.g. SC"
++            value={source}
++            onChangeText={setSource}
++            style={styles.half}
++          />
++          <LabeledInput
++            label="Dest (optional)"
++            placeholder="e.g. BZA"
++            value={dest}
++            onChangeText={setDest}
++            style={styles.half}
++          />
++        </View>
++        <PrimaryButton title="+ Track this train" onPress={addTrackedTrain} disabled={!trainNumber.trim()} />
++      </SectionCard>
++
++      <SectionCard
++        title="Ask about a train"
++        subtitle="Answered from railway knowledge + a live web search — type or tap the mic."
++      >
++        <LabeledInput
++          label="Train number"
++          placeholder="e.g. 12709"
++          value={qaTrainNumber}
++          onChangeText={setQaTrainNumber}
++          keyboardType="number-pad"
++        />
++        <QueryToolbar
++          webSearch={webSearchOn}
++          onToggleWebSearch={setWebSearchOn}
++          deepThink={deepThinkOn}
++          onToggleDeepThink={setDeepThinkOn}
++        />
++        <View style={styles.qaInputRow}>
++          <TextInput
++            style={styles.qaInput}
++            placeholder={
++              qaTrainNumber.trim() ? "e.g. why might it be delayed today?" : "Enter a train number above first"
++            }
++            placeholderTextColor={colors.textMuted}
++            value={question}
++            onChangeText={setQuestion}
++            editable={!!qaTrainNumber.trim()}
++            multiline
++            onSubmitEditing={() => askQuestion()}
++          />
++          <MicButton onResult={(text) => askQuestion(text)} style={styles.qaMic} />
++          <TouchableOpacity
++            style={[styles.qaSendBtn, (!question.trim() || !qaTrainNumber.trim()) && styles.qaSendBtnDisabled]}
++            onPress={() => askQuestion()}
++            disabled={asking || !question.trim() || !qaTrainNumber.trim()}
++          >
++            <Ionicons name="send" size={16} color={colors.textInverse} />
++          </TouchableOpacity>
++        </View>
++
++        {asking && (
++          <View style={styles.qaThinkingRow}>
++            <ActivityIndicator size="small" color={colors.primary} />
++            <Text style={styles.qaThinkingText}>
++              {deepThinkOn ? "Thinking it through carefully\u2026" : "Checking live data, knowledge base, and the web\u2026"}
++            </Text>
++          </View>
++        )}
++
++        {qa?.error && <Text style={styles.errorText}>{qa.error}</Text>}
++
++        {qa?.answer && (
++          <View style={styles.qaAnswerBox}>
++            <Text style={styles.qaAnswerText}>{qa.answer}</Text>
++            {!!qa.sources?.length && (
++              <View style={styles.basisList}>
++                {qa.sources.map((s, i) => (
++                  <Text key={i} style={styles.basisItem}>
++                    {"\u2022 "}{s.title}
++                  </Text>
++                ))}
++              </View>
++            )}
++          </View>
++        )}
++      </SectionCard>
++
++      {/* FEATURE: Track two trains side by side — pick any two currently-
++          tracked trains for a compact comparison strip, useful for a
++          connection or deciding between two options before boarding. */}
++      {tracked.length >= 2 && (
++        <SectionCard title="Compare trains" subtitle="Pick two tracked trains to compare side by side.">
++          <View style={styles.compareChipRow}>
++            {tracked.map((t) => (
++              <TouchableOpacity
++                key={t.id}
++                style={[styles.compareChip, compareIds.includes(t.id) && styles.compareChipActive]}
++                onPress={() => toggleCompare(t.id)}
++              >
++                <Text style={[styles.compareChipText, compareIds.includes(t.id) && styles.compareChipTextActive]}>
++                  {t.trainNumber}{t.date ? ` (${t.date})` : ""}
++                </Text>
++              </TouchableOpacity>
++            ))}
++          </View>
++          {compareIds.length === 2 && (
++            <View style={styles.compareCols}>
++              {compareIds.map((id) => {
++                const t = tracked.find((x) => x.id === id);
++                const p = payloadsById[id];
++                return (
++                  <View key={id} style={styles.compareCol}>
++                    <Text style={styles.compareColTitle}>Train {t?.trainNumber}</Text>
++                    {!p ? (
++                      <Text style={styles.compareRowValue}>Waiting for live data…</Text>
++                    ) : (
++                      <>
++                        <CompareRow label="Current" value={p.current_station || "—"} />
++                        <CompareRow label="Next" value={p.next_station || "—"} />
++                        <CompareRow label="Next ETA" value={p.next_station_live_eta || p.next_station_expected_arrival || "—"} />
++                        <CompareRow
++                          label="Delay"
++                          value={p.delay_minutes != null ? `${p.delay_minutes > 0 ? "+" : ""}${p.delay_minutes}m` : "—"}
++                          danger={p.delay_minutes > 0}
++                        />
++                        <CompareRow
++                          label="Speed"
++                          value={(p.recency_weighted_speed_kmph ?? p.instant_speed_kmph) != null ? `${p.recency_weighted_speed_kmph ?? p.instant_speed_kmph} km/h` : "—"}
++                        />
++                      </>
++                    )}
++                  </View>
++                );
++              })}
++            </View>
++          )}
++          {compareIds.length < 2 && (
++            <Text style={styles.compareHint}>Select two trains above to compare.</Text>
++          )}
++        </SectionCard>
++      )}
++
++      {tracked.map((t) => (
++        <TrackedTrainCard
++          key={t.id}
++          trainNumber={t.trainNumber}
++          date={t.date}
++          source={t.source}
++          dest={t.dest}
++          wsBaseUrl={wsBaseUrl}
++          apiBaseUrl={apiBaseUrl}
++          onRemove={() => removeTrackedTrain(t.id)}
++          onPayloadUpdate={(data) => setPayloadsById((prev) => ({ ...prev, [t.id]: data }))}
++        />
++      ))}
++    </ScrollView>
++    <DayPickerModal
++      visible={dayPickerVisible}
++      selected={trackDate}
++      onSelect={setTrackDate}
++      onClose={() => setDayPickerVisible(false)}
++    />
++    </>
++  );
++}
++
++function CompareRow({ label, value, danger }) {
++  return (
++    <View style={styles.compareRow}>
++      <Text style={styles.compareRowLabel}>{label}</Text>
++      <Text style={[styles.compareRowValue, danger && { color: colors.danger }]} numberOfLines={1}>{value}</Text>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  flex: { flex: 1, backgroundColor: colors.bg },
++  content: { padding: spacing.lg },
++  row: { flexDirection: "row", gap: spacing.md },
++  half: { flex: 1 },
++  fieldLabel: { fontSize: 12, fontWeight: "600", color: colors.textMuted, marginBottom: spacing.xs },
++  dateField: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: spacing.sm,
++    borderWidth: 1,
++    borderColor: colors.border,
++    borderRadius: radius.sm,
++    paddingHorizontal: spacing.md,
++    paddingVertical: spacing.sm + 2,
++    backgroundColor: colors.bg,
++    marginBottom: spacing.md,
++  },
++  dateFieldText: { flex: 1, fontSize: 15, color: colors.text, fontWeight: "600" },
++  errorText: { fontSize: 12, color: colors.danger, marginTop: spacing.sm },
++  basisList: { marginTop: spacing.sm },
++  basisItem: { fontSize: 12, color: colors.textMuted, marginBottom: 2 },
++  qaInputRow: { flexDirection: "row", alignItems: "flex-end", gap: spacing.sm },
++  qaInput: {
++    flex: 1,
++    borderWidth: 1,
++    borderColor: colors.border,
++    borderRadius: radius.lg,
++    paddingHorizontal: spacing.md,
++    paddingVertical: spacing.sm,
++    maxHeight: 90,
++    fontSize: 14,
++    color: colors.text,
++    backgroundColor: colors.bg,
++  },
++  qaMic: { marginBottom: 2 },
++  qaSendBtn: {
++    backgroundColor: colors.primary,
++    width: 36,
++    height: 36,
++    borderRadius: 18,
++    alignItems: "center",
++    justifyContent: "center",
++  },
++  qaSendBtnDisabled: { opacity: 0.4 },
++  qaThinkingRow: { flexDirection: "row", alignItems: "center", gap: spacing.xs, marginTop: spacing.sm },
++  qaThinkingText: { fontSize: 12, color: colors.textMuted },
++  qaAnswerBox: {
++    marginTop: spacing.md,
++    padding: spacing.md,
++    backgroundColor: colors.chip,
++    borderRadius: radius.md,
++  },
++  qaAnswerText: { fontSize: 14, color: colors.text, lineHeight: 20 },
++
++  // FEATURE: Track two trains side by side.
++  compareChipRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
++  compareChip: {
++    paddingHorizontal: spacing.md,
++    paddingVertical: 6,
++    borderRadius: radius.pill,
++    borderWidth: 1,
++    borderColor: colors.border,
++    backgroundColor: colors.card || colors.bg,
++  },
++  compareChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
++  compareChipText: { fontSize: 12.5, fontWeight: "600", color: colors.primary },
++  compareChipTextActive: { color: colors.textInverse },
++  compareHint: { fontSize: 12, color: colors.textMuted, marginTop: spacing.sm },
++  compareCols: { flexDirection: "row", gap: spacing.md, marginTop: spacing.md },
++  compareCol: { flex: 1, padding: spacing.sm, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
++  compareColTitle: { fontSize: 13, fontWeight: "700", color: colors.primary, marginBottom: spacing.xs },
++  compareRow: { marginBottom: 6 },
++  compareRowLabel: { fontSize: 10.5, color: colors.textMuted },
++  compareRowValue: { fontSize: 12.5, fontWeight: "600", color: colors.text },
++});
+diff --git a/mobile-app/src/screens/TrainSearchScreen.js b/mobile-app/src/screens/TrainSearchScreen.js
+index 1054a5e..a91ef90 100644
+--- a/mobile-app/src/screens/TrainSearchScreen.js
++++ b/mobile-app/src/screens/TrainSearchScreen.js
+@@ -276,7 +276,11 @@ export default function TrainSearchScreen() {
+ 
+       <FlatList
+         style={styles.flex}
+-        data={filteredTrains}
++        // Gated on formCollapsed (not just "do we have trains") so a
++        // result set that's already in state can never render underneath
++        // the still-open search form — the two must only ever be visible
++        // one at a time, matching the toolbar/orange-header switch below.
++        data={formCollapsed ? filteredTrains : []}
+         keyExtractor={(item, idx) => `${item.train_number}_${idx}`}
+         contentContainerStyle={styles.listContent}
+         // NOTE: the search form used to sit in its own fixed View above a
+@@ -295,16 +299,27 @@ export default function TrainSearchScreen() {
+                 title="Search trains"
+                 subtitle="Real-time filter by source, destination, date, class and quota — dropdowns and live suggestions, just like IRCTC."
+               >
+-                <View style={styles.row}>
++                <View style={styles.stationRow}>
+                   <StationField
+-                    label="From" placeholder="e.g. NDLS or Delhi"
++                    label="From" placeholder="e.g. NDLS or Delhi" icon="radio-button-on-outline"
+                     value={source} resolvedName={sourceName}
+                     onChangeText={(t) => { setSource(t); setSourceName(null); }}
+                     onSelectStation={(m) => { setSource(m.code); setSourceName(m.name); }}
+                     apiBaseUrl={apiBaseUrl} style={styles.half}
+                   />
++                  <TouchableOpacity
++                    style={styles.swapBtn}
++                    activeOpacity={0.7}
++                    onPress={() => {
++                      const s = source, sn = sourceName, d = dest, dn = destName;
++                      setSource(d); setSourceName(dn);
++                      setDest(s); setDestName(sn);
++                    }}
++                  >
++                    <Ionicons name="swap-horizontal" size={16} color={colors.orange} />
++                  </TouchableOpacity>
+                   <StationField
+-                    label="To" placeholder="e.g. BCT or Mumbai"
++                    label="To" placeholder="e.g. BCT or Mumbai" icon="flag-outline"
+                     value={dest} resolvedName={destName}
+                     onChangeText={(t) => { setDest(t); setDestName(null); }}
+                     onSelectStation={(m) => { setDest(m.code); setDestName(m.name); }}
+@@ -482,10 +497,10 @@ export default function TrainSearchScreen() {
+           );
+         }}
+         ListEmptyComponent={
+-          trains ? <Text style={styles.emptyText}>No trains to show.</Text> : null
++          formCollapsed && trains ? <Text style={styles.emptyText}>No trains to show.</Text> : null
+         }
+         ListFooterComponent={
+-          meta && meta.totalPages > 1 ? (
++          formCollapsed && meta && meta.totalPages > 1 ? (
+             <View style={styles.pagination}>
+               <PrimaryButton
+                 title="← Prev"
+@@ -552,6 +567,18 @@ const styles = StyleSheet.create({
+   content: { padding: spacing.lg, paddingBottom: 0 },
+   row: { flexDirection: "row", gap: spacing.md },
+   half: { flex: 1 },
++  stationRow: { flexDirection: "row", alignItems: "flex-end", gap: spacing.sm },
++  swapBtn: {
++    width: 32,
++    height: 32,
++    borderRadius: 16,
++    alignItems: "center",
++    justifyContent: "center",
++    backgroundColor: colors.card,
++    borderWidth: 1.5,
++    borderColor: colors.orange,
++    marginBottom: 10,
++  },
+   listContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.lg },
+   error: { color: colors.danger, fontSize: 12, marginTop: spacing.sm },
+   note: { color: colors.textMuted, fontSize: 12, marginTop: spacing.sm },
+-- 
+2.43.0
+

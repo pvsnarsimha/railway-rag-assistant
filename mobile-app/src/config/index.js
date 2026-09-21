@@ -44,9 +44,6 @@ export const STORAGE_KEYS = {
   // Crowd-Sourced Train Position Reports: anonymous per-device id, see
   // src/utils/reporterId.js.
   REPORTER_ID: "@railway_rag/reporter_id",
-  // IRCTC-style "Recent Searches" row on TrainSearchScreen.js — just the
-  // last few real searches this device ran, nothing synced or shared.
-  RECENT_TRAIN_SEARCHES: "@railway_rag/recent_train_searches",
 };
 
 /**
