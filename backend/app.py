@@ -6110,17 +6110,30 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # specifically (see gps_tracking.LONG_JOURNEY_MINUTES's own
                 # comment for why that's not a surprise given this module's
                 # whole documented history of long-journey-only bugs above).
-                # Real arithmetic on THIS poll's own timeline_json (day +
-                # scheduled/expected/actual times) via
-                # gps_tracking.estimate_journey_duration_minutes — None
-                # (treated as "assume short/normal") whenever either
-                # endpoint's real timing can't be read, never a guessed
-                # duration. Used just below to PREFER RailRadar's own per-
-                # station coordinate over RailKit's for a long journey —
-                # never a hard ban on RailKit ("not strictly prohibited" per
-                # the original request): RailKit is still used exactly as
-                # before whenever RailRadar has nothing for that station.
-                journey_duration_minutes = gps_tracking.estimate_journey_duration_minutes(timeline_json)
+                #
+                # BUGFIX ("for second or mutiple times it is railkit error
+                # message and data ... when I entered current date n no of
+                # times only it should use railradar"): this used to read
+                # timeline_json (RailKit's LIVE per-poll data) - correct on
+                # the first connect, but a later reconnect on the exact same
+                # train/date could flip back to RailKit-only because
+                # RailKit's live state itself (not the schedule) came back
+                # different enough between polls to make the live-timeline
+                # calc fail that time. gps_tracking.
+                # estimate_journey_duration_minutes_from_route reads the
+                # same real day+time fields off the STATIC schedule
+                # (train_info_data, already fetched this poll, cached 86400s
+                # server-side) instead - a train's published schedule can't
+                # flip poll to poll, so this gives the same real answer on
+                # the first connect and the hundredth reconnect alike. Falls
+                # back to the live-timeline version only on the rare poll
+                # where train_info_data itself couldn't be fetched at all -
+                # never a guessed duration either way.
+                journey_duration_minutes = (
+                    gps_tracking.estimate_journey_duration_minutes_from_route(gps_tracking.parse_route(train_info_data))
+                    if train_info_data
+                    else gps_tracking.estimate_journey_duration_minutes(timeline_json)
+                )
                 is_long_journey = (
                     journey_duration_minutes is not None
                     and journey_duration_minutes > gps_tracking.LONG_JOURNEY_MINUTES

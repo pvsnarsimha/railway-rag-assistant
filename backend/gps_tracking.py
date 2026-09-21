@@ -129,6 +129,10 @@ class RouteStation:
     distance_km: Optional[str] = None
     has_coordinates: bool = False
     coordinates_from: str = "none"  # "provider" | "fallback_table" | "none"
+    # RailKit's per-stop 'day N of the journey' field (1-based), same as
+    # TimelineStop.day - see estimate_journey_duration_minutes_from_route,
+    # which is the whole reason this is captured at all.
+    day: Optional[str] = None
 
 
 def get_route_with_coordinates(train_number: str):
@@ -188,6 +192,7 @@ def parse_route(data: dict):
             scheduled_arrival=arrival, scheduled_departure=departure,
             distance_km=distance, has_coordinates=lat is not None,
             coordinates_from=coordinates_from,
+            day=stop.get("day") if isinstance(stop, dict) else None,
         ))
     return route
 
@@ -921,6 +926,53 @@ def estimate_journey_duration_minutes(timeline_json: list) -> Optional[int]:
 
     start = _stop_minutes(timeline_json[0], ("departure", "arrival"))
     end = _stop_minutes(timeline_json[-1], ("arrival", "departure"))
+    if start is None or end is None:
+        return None
+    duration = end - start
+    return duration if duration >= 0 else None
+
+
+def estimate_journey_duration_minutes_from_route(route: list) -> Optional[int]:
+    """Same idea as estimate_journey_duration_minutes (first stop's
+    departure to last stop's arrival, day-offset aware, real arithmetic
+    only, None whenever it can't be read) but computed off the STATIC
+    schedule - parse_route()'s RouteStation list, from getTrainInfo, which
+    railway_api.get_train_info caches for 86400s server-side - instead of
+    the LIVE per-poll timeline.
+
+    BUGFIX ("for second or mutiple times it is railkit error message and
+    data ... make sure when I entered current date n no of times only it
+    should use railradar"): is_long_journey in app.py's /ws/track loop used
+    to be computed from timeline_json, which is rebuilt from RailKit's live
+    trackTrain response on every single poll - the fresh connection right
+    after a Reconnect got a correct RailRadar-preferred read, but a later
+    poll on the SAME train/SAME date flipped back to RailKit-only, because
+    RailKit's own live data (not the schedule, the live tracking state
+    itself - this module's whole documented history of exactly this kind of
+    flakiness) came back different enough between polls that
+    estimate_journey_duration_minutes couldn't resolve a duration from it
+    that time, silently defaulting is_long_journey back to False.
+    A train's own published schedule does not change poll to poll -
+    calling this instead, off train_info_data (already fetched every poll
+    anyway, but cache-cheap and NOT subject to trackTrain's live-state
+    flakiness), gives the exact same real answer whether this is the first
+    connect or the hundredth reconnect. app.py falls back to the live-
+    timeline version only on the rare poll where train_info_data itself
+    couldn't be fetched at all.
+    """
+    if not route or len(route) < 2:
+        return None
+
+    def _stop_minutes(stop, times):
+        day = _day_offset(stop.day)
+        for t in times:
+            minutes = _time_str_to_minutes(t)
+            if minutes is not None:
+                return day * 1440 + minutes
+        return None
+
+    start = _stop_minutes(route[0], (route[0].scheduled_departure, route[0].scheduled_arrival))
+    end = _stop_minutes(route[-1], (route[-1].scheduled_arrival, route[-1].scheduled_departure))
     if start is None or end is None:
         return None
     duration = end - start
