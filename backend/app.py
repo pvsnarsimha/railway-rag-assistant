@@ -31,7 +31,7 @@ import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -71,7 +71,7 @@ import delay_accuracy_store
 import public_share
 import alt_transport
 from deep_extract import top_level_keys
-from api_cache import cache_stats
+from api_cache import cache_stats, entry_fetched_at
 from help_content import build_help_answer
 import rag_engine
 from rag_engine import get_engine
@@ -1083,7 +1083,7 @@ def _predict_delay_per_reporting_station(
     date_ddmmyyyy, travel_class, eta_speed_kmph=None, train_info_data=None,
     weather_component_minutes: float = 0.0, rr_stops: Optional[list] = None,
     speed_cv: Optional[float] = None, provider_disagreement_minutes: Optional[float] = None,
-    train_number: Optional[str] = None, live_current_distance_km: Optional[float] = None,
+    train_number: Optional[str] = None,
 ) -> None:
     """
     FEATURE: per-station predicted delay for every upcoming REPORTING
@@ -1151,26 +1151,6 @@ def _predict_delay_per_reporting_station(
         regardless of how it was running before it — whenever enough real
         past-run data exists for that station; otherwise this is silently
         a no-op (never a guess standing in for missing history).
-      - `live_current_distance_km`: the SAME real, most-precise "how far
-        along the route has the train actually gone" figure the poll loop
-        already computes as `current_position_distance_km` — RailRadar's
-        segment-progress interpolation when available (moves every single
-        poll), falling back to the ping-to-ping distance-delta reading,
-        ahead of this function's own coarser default of the "current"
-        timeline stop's own static distance_km. Real case that motivated
-        this: train genuinely 251.4 km in (interpolated, live) while its
-        current timeline entry (a no-halt intermediate point) still only
-        carried its own static 246.6 km marker — a real, if honest, 4.8 km
-        of TRUE remaining distance was being silently added back onto
-        every upcoming station's distance_ahead_km, turning a genuine "4.1
-        km / ~3 min to Khammam" into an inflated "~8.9 km / ~24m late"
-        prediction, even though the live-status callout right above it
-        (built from the same interpolated figure) already showed the
-        correct, smaller number. Whenever supplied, this replaces the
-        function's own current_entry-based anchor below outright so every
-        distance_ahead_km, predicted_eta and predicted_delay_minutes in
-        this loop line up with what the passenger's live position callout
-        already shows, instead of silently disagreeing with it.
     """
     current_delay_minutes = current_delay_minutes if current_delay_minutes is not None else 0
     trend = trend_per_stop if trend_per_stop is not None else 0.0
@@ -1202,26 +1182,18 @@ def _predict_delay_per_reporting_station(
             d = _route_distance_for_station(train_info_data, stop.get("code"))
         return d
 
-    # Real current-position distance — the anchor every future station's
-    # real remaining distance is measured from. Prefer the live, poll-to-
-    # poll-moving figure the caller already computed (RailRadar segment-
-    # progress interpolation, or a distance-delta reading) when supplied;
-    # it's strictly more precise than this function's own fallback below,
-    # which only knows the "current" timeline stop's own static distance_km
-    # — see the live_current_distance_km note in the docstring above for
-    # the real case (Mallemadugu vs. a genuinely-further-along live
-    # position) that made this matter.
-    current_distance_km = live_current_distance_km
-    if current_distance_km is None:
-        # Fallback: RailKit's own distance_km on the "current" stop, or the
-        # last "passed" reporting station if the train is running between
-        # two stops, with the same static-route fallback as elsewhere.
-        current_entry = next((s for s in timeline_json if s.get("status") == "current"), None)
-        if current_entry is None:
-            passed = [s for s in timeline_json if s.get("kind") != "intermediate" and s.get("status") == "passed"]
-            current_entry = passed[-1] if passed else None
-        if current_entry is not None:
-            current_distance_km = _stop_distance_km(current_entry)
+    # Real current-position distance (RailKit's own distance_km on the
+    # "current" stop, or the last "passed" reporting station if the train
+    # is running between two stops), with the same static-route fallback —
+    # the anchor every future station's real remaining distance is measured
+    # from.
+    current_distance_km = None
+    current_entry = next((s for s in timeline_json if s.get("status") == "current"), None)
+    if current_entry is None:
+        passed = [s for s in timeline_json if s.get("kind") != "intermediate" and s.get("status") == "passed"]
+        current_entry = passed[-1] if passed else None
+    if current_entry is not None:
+        current_distance_km = _stop_distance_km(current_entry)
 
     stops_ahead = 0          # counts every upcoming station (halt or not) — used for confidence widening
     reporting_stops_ahead = 0  # counts only real reporting halts — used for the trend extrapolation
@@ -5611,11 +5583,23 @@ _last_ws_poll_debug: dict = {}
 async def ws_track_train(websocket: WebSocket, train_number: str):
     """
     Streams live position updates for a train every _TRACK_POLL_INTERVAL_SECONDS
-    without the client having to re-poll `/api/chat`. Each fetch goes through
-    the SAME cached railway_api calls (get_live_train_status / get_train_info)
-    used by the regular chat flow — the cache TTLs there (120s / 24h) mean this
-    doesn't hammer the provider even with several tabs open, it just serves
-    the already-cached response between real refreshes.
+    (5s) without the client having to re-poll `/api/chat`. Each fetch goes
+    through the SAME cached railway_api calls (get_live_train_status /
+    get_train_info) used by the regular chat flow — the cache TTLs there
+    (45s / 24h) mean this doesn't hammer the provider even with several tabs
+    open, it just serves the already-cached response between real refreshes.
+
+    That 5s figure is the connection's heartbeat/send cadence, NOT how often
+    the underlying live position/status data itself actually changes — it
+    normally refreshes on the provider caches' own TTL (<=45-60s), and this
+    loop additionally GUARANTEES a genuine, uncached re-fetch at least every
+    REAL_DATA_MAX_STALENESS_SECONDS (60s) even if nothing else forced one
+    sooner (see last_real_fetch_epoch below). The payload's
+    `status_updated_at` reports the real fetch time (from the cache's own
+    fetched_at, via api_cache.entry_fetched_at) rather than the moment this
+    poll happened to run, so a client's "As of X ago" reflects genuine data
+    age instead of resetting every 5s regardless of whether anything new
+    was actually fetched.
 
     Optional query params (all optional — the feed still works with none of
     them, it just has less to work with):
@@ -5737,6 +5721,22 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     # a real, uncached RailKit fetch right when the station change is
     # actually expected, instead of waiting out the rest of the cache TTL.
     force_refresh_next_poll = False
+    # BUGFIX/FEATURE: guaranteed real-data refresh cadence. The 5s poll
+    # loop below sends a message every 5s regardless, but the live
+    # position/status itself only genuinely changes when get_live_train_status
+    # (45s TTL) or the RailRadar GPS lookup (60s TTL) actually re-fetches -
+    # everything in between was a cache hit re-serving the same data. Report
+    # (below) explicitly asked that the underlying location data itself,
+    # not just the on-screen timestamp, keep genuinely refreshing at least
+    # once every 60s. The two providers' own TTLs already imply that in
+    # practice, but only as a side effect of being polled every 5s - there
+    # was no actual guarantee. `last_real_fetch_epoch` tracks (in wall-clock
+    # seconds) when THIS connection last got a real, non-cached read; once
+    # 60s have passed with no real refresh for any other reason (route
+    # deviation, imminent-arrival force_refresh_next_poll, or the cache
+    # simply expiring on its own), this poll loop now forces one itself.
+    last_real_fetch_epoch = None
+    REAL_DATA_MAX_STALENESS_SECONDS = 60
     # FEATURE: per-station predicted-delay "lock-in" — see
     # _lock_grounded_station_predictions. Lives for the lifetime of THIS
     # connection only, same reasoning as the trackers above: a fresh
@@ -5804,8 +5804,19 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # for just this one call when the PREVIOUS poll's real
                 # RailRadar segment progress showed the train essentially
                 # at the next station - see the arrival-detection block
-                # further down, which sets force_refresh_next_poll.
-                this_poll_force_refresh = force_refresh_next_poll
+                # further down, which sets force_refresh_next_poll - OR
+                # when this connection's real data has gone
+                # REAL_DATA_MAX_STALENESS_SECONDS without a genuine
+                # refresh (see last_real_fetch_epoch's comment above the
+                # while loop): the 45s/60s provider cache TTLs already tend
+                # to keep this under a minute as a side effect, but this
+                # makes the <=60s real-refresh cadence an explicit
+                # guarantee instead of a TTL coincidence.
+                stale_past_60s = (
+                    last_real_fetch_epoch is not None
+                    and (time.time() - last_real_fetch_epoch) >= REAL_DATA_MAX_STALENESS_SECONDS
+                )
+                this_poll_force_refresh = force_refresh_next_poll or stale_past_60s
                 force_refresh_next_poll = False
                 live_data, train_info_result = await asyncio.gather(
                     asyncio.to_thread(railway_api.get_live_train_status, train_number, date_ddmmyyyy, _force_refresh=this_poll_force_refresh),
@@ -5815,6 +5826,16 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 if isinstance(live_data, BaseException):
                     raise live_data
                 train_info_data = None if isinstance(train_info_result, BaseException) else train_info_result
+                # The real wall-clock moment get_live_train_status's cache
+                # entry for THIS (train_number, date_ddmmyyyy) was actually
+                # last populated - whether that happened on this exact poll
+                # (a forced or naturally-expired refresh) or several polls
+                # ago (a cache hit just now). This, not datetime.now(), is
+                # what status_updated_at below reports - so "As of X ago" on
+                # the client reflects genuine data age, not poll cadence.
+                real_fetch_epoch = entry_fetched_at("live_status", (train_number, date_ddmmyyyy), {})
+                if real_fetch_epoch is not None:
+                    last_real_fetch_epoch = real_fetch_epoch
                 position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
                 timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
 
@@ -6133,98 +6154,6 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
 
                 timeline_json = gps_tracking.timeline_to_json(timeline_stops)
 
-                # FEATURE: "railkit users are complaining me that it is
-                # tracking in wrong path" — reported for LONG-journey trains
-                # specifically (see gps_tracking.LONG_JOURNEY_MINUTES's own
-                # comment for why that's not a surprise given this module's
-                # whole documented history of long-journey-only bugs above).
-                #
-                # BUGFIX ("for second or mutiple times it is railkit error
-                # message and data ... when I entered current date n no of
-                # times only it should use railradar"): this used to read
-                # timeline_json (RailKit's LIVE per-poll data) - correct on
-                # the first connect, but a later reconnect on the exact same
-                # train/date could flip back to RailKit-only because
-                # RailKit's live state itself (not the schedule) came back
-                # different enough between polls to make the live-timeline
-                # calc fail that time. gps_tracking.
-                # estimate_journey_duration_minutes_from_route reads the
-                # same real day+time fields off the STATIC schedule
-                # (train_info_data, already fetched this poll, cached 86400s
-                # server-side) instead - a train's published schedule can't
-                # flip poll to poll, so this gives the same real answer on
-                # the first connect and the hundredth reconnect alike. Falls
-                # back to the live-timeline version only on the rare poll
-                # where train_info_data itself couldn't be fetched at all -
-                # never a guessed duration either way.
-                static_route = gps_tracking.parse_route(train_info_data) if train_info_data else []
-                journey_duration_minutes = (
-                    gps_tracking.estimate_journey_duration_minutes_from_route(static_route)
-                    if static_route
-                    else gps_tracking.estimate_journey_duration_minutes(timeline_json)
-                )
-                is_long_journey = (
-                    journey_duration_minutes is not None
-                    and journey_duration_minutes > gps_tracking.LONG_JOURNEY_MINUTES
-                )
-
-                # FEATURE: "for long journey when I am giving current day it
-                # is use railkit ... if journey is less than or equal 24 hrs
-                # only use railkit or else defaultly use railradar" - the
-                # coordinate-only preference above still leaves RailKit in
-                # charge of WHICH station counts as "current" for a long
-                # journey, so if that pointer itself is the wrong/stale one
-                # (this module's whole documented history of long-journey-
-                # only bugs above - RailKit "kept SECUNDERABAD JN 'current'
-                # for 9+ hours after actually finishing", the date-drift
-                # saga, etc), replacing just that station's coordinate never
-                # fixes it. This goes further: for a confirmed long journey,
-                # RailRadar's OWN full timeline (current station AND its
-                # coordinate together, one real consistent reading) becomes
-                # the default source, RailKit only the fallback.
-                #
-                # Skipped entirely when date_corrected_via_railradar already
-                # swapped timeline_stops/position over to RailRadar above (no
-                # point re-fetching the same thing twice). Otherwise fetches
-                # RailRadar's timeline for the SAME date_ddmmyyyy already
-                # resolved by the self-correcting anchor pass just above (an
-                # explicit, already-verified-where-possible date - never
-                # RailRadar's blank-date auto-detect, which is exactly the
-                # ambiguous-overlapping-run guess round 18 had to revert -
-                # see date_corrected_via_railradar's own comment). This is
-                # the exact same date_ddmmyyyy already trusted for RailRadar's
-                # per-station actual/delay enrichment a little further below
-                # (rr_stops) - not a new trust decision, the same one reused.
-                #
-                # Only ever a PREFERENCE, never a ban: if RailRadar has no
-                # real "current"/"passed" stop for this run either (empty
-                # response, no key configured, or a run that genuinely hasn't
-                # started/already finished on RailRadar's side too),
-                # position_from_stops honestly returns no current station
-                # and this whole block leaves RailKit's own already-resolved
-                # timeline_stops/position completely untouched - a long-
-                # journey train with no RailRadar coverage still tracks via
-                # RailKit, unchanged.
-                railradar_preferred_long_journey = False
-                if is_long_journey and not date_corrected_via_railradar:
-                    try:
-                        rr_long_journey_stops = await asyncio.to_thread(
-                            railradar_fallback.fetch_railradar_timeline, train_number, date_ddmmyyyy,
-                        )
-                    except Exception:
-                        rr_long_journey_stops = []
-                    if rr_long_journey_stops:
-                        rr_long_journey_position = gps_tracking.position_from_stops(
-                            train_number, rr_long_journey_stops,
-                            train_name=position.train_name, status_note=position.status_note,
-                        )
-                        if rr_long_journey_position.current_station_code or rr_long_journey_position.current_station_name:
-                            gps_tracking.finalize_timeline_stops(rr_long_journey_stops)
-                            timeline_stops = rr_long_journey_stops
-                            position = rr_long_journey_position
-                            timeline_json = gps_tracking.timeline_to_json(timeline_stops)
-                            railradar_preferred_long_journey = True
-
                 # FEATURE: date reliability warnings. RailKit's `date` query
                 # param does not appear to reliably select a SPECIFIC run of
                 # a daily train - see the long REVERTED comment above this
@@ -6273,56 +6202,11 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # redefined here.
                 has_current_station = any(s.get("status") == "current" for s in timeline_json)
                 if original_date_was_explicit and not has_current_station:
-                    # BUGFIX ("for short journey train by using railkit see
-                    # this error" - train 17215, a same-day short journey,
-                    # explicit date picked = today, scheduled to depart
-                    # MACHILIPATNAM at 19:50 but checked at 10:49): this
-                    # branch used to fire the "past run" message below
-                    # unconditionally whenever the request was explicit and
-                    # no current station existed - but original_date_was_
-                    # explicit is also true for an explicit date that just
-                    # happens to equal TODAY (see original_request_implied_
-                    # todays_run's own comment: blank and an explicit
-                    # today's-date carry the exact same intent). For that
-                    # case the honest reason there's no current station is
-                    # almost always simply "hasn't departed yet today" -
-                    # nothing to do with RailKit's real inability to look up
-                    # a SPECIFIC PAST run by date, which is what this
-                    # message was actually written for. Telling someone
-                    # checking a same-day train HOURS before its own
-                    # scheduled departure that "RailKit doesn't reliably
-                    # support looking up a specific past run" is wrong
-                    # information, not just an unhelpfully generic one.
-                    #
-                    # Real arithmetic on the same static schedule already
-                    # parsed for is_long_journey above (static_route, from
-                    # train_info_data) - the origin's own scheduled
-                    # departure - tells the two real cases apart: "now"
-                    # before that time means genuinely not started yet
-                    # (honest, specific message with the real departure
-                    # time); "now" at/after it, still with no current
-                    # station, falls through to the original honest-but-
-                    # generic message below (covers today's run having
-                    # already finished, or a genuine RailKit gap).
-                    first_departure_minutes = None
-                    if original_request_implied_todays_run and static_route:
-                        first_departure_minutes = gps_tracking._time_str_to_minutes(
-                            static_route[0].scheduled_departure or static_route[0].scheduled_arrival
-                        )
-                    now_minutes = datetime.now().hour * 60 + datetime.now().minute
-                    if first_departure_minutes is not None and now_minutes < first_departure_minutes:
-                        dep_hh, dep_mm = divmod(first_departure_minutes, 60)
-                        payload["date_reliability_warning"] = (
-                            f"This train hasn't started its run yet today — scheduled to depart "
-                            f"{static_route[0].name} at {dep_hh:02d}:{dep_mm:02d}. There's no live "
-                            "position to show until then; what's below is today's schedule."
-                        )
-                    else:
-                        payload["date_reliability_warning"] = (
-                            "RailKit doesn't reliably support looking up a specific past run by date "
-                            "— what's shown below may be a different run than the one you asked for. "
-                            "Leave the date blank to track today's live run instead."
-                        )
+                    payload["date_reliability_warning"] = (
+                        "RailKit doesn't reliably support looking up a specific past run by date "
+                        "— what's shown below may be a different run than the one you asked for. "
+                        "Leave the date blank to track today's live run instead."
+                    )
                 elif (
                     original_request_implied_todays_run
                     and has_current_station
@@ -6511,27 +6395,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # EITHER a code or a name to look RailRadar's own route up
                 # by - get_station_coordinate tries the code first, then
                 # falls back to matching by name.
-                #
-                # FEATURE: also fires when RailKit DID resolve a coordinate
-                # but this is a long journey (is_long_journey, computed just
-                # above from this poll's own real timeline — see its
-                # comment) — "railkit users are complaining ... wrong path"
-                # for long-duration trains specifically. RailRadar's own
-                # per-station route[].lat/lng is a genuinely independent
-                # third coordinate source (get_station_coordinate's own
-                # docstring), so preferring it here for a long journey is
-                # real data, not a guess — and it's a PREFERENCE, not a
-                # ban: rr_lat/rr_lng coming back empty (get_station_coordinate
-                # is itself best-effort) falls straight through and leaves
-                # RailKit's own already-resolved position.lat/lng exactly as
-                # they were, so a long-journey train with no RailRadar
-                # coverage for its current station is still tracked via
-                # RailKit, unchanged — "not strictly prohibited".
-                had_railkit_coordinate = position.lat is not None
-                if (
-                    (not had_railkit_coordinate or is_long_journey)
-                    and (position.current_station_code or position.current_station_name)
-                ):
+                if position.lat is None and (position.current_station_code or position.current_station_name):
                     try:
                         rr_lat, rr_lng = await asyncio.to_thread(
                             railradar_fallback.get_station_coordinate,
@@ -6541,11 +6405,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                         rr_lat, rr_lng = None, None
                     if rr_lat is not None and rr_lng is not None:
                         position.lat, position.lng = rr_lat, rr_lng
-                        position.position_source = (
-                            "railradar_route_long_journey_preferred"
-                            if (is_long_journey and had_railkit_coordinate)
-                            else "railradar_route"
-                        )
+                        position.position_source = "railradar_route"
 
                 # FEATURE: near-instant "current station" update on a real
                 # arrival - see force_refresh_next_poll declared above. If
@@ -6591,18 +6451,10 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # actually came from — "railkit" normally, but the explicit-
                 # date correction pass further up can have already swapped
                 # both in for a RailRadar-date-verified run instead (see
-                # date_corrected_via_railradar there), or the long-journey
-                # default-to-RailRadar preference just above that (see
-                # railradar_preferred_long_journey there) can have swapped
-                # them in for the same reason on an ordinary current-date
-                # request. Set here, before the segment_info override below
-                # gets a chance to relabel it again for the live-GPS-
-                # confirmed case specifically.
-                current_station_source = (
-                    "railradar_date_corrected" if date_corrected_via_railradar
-                    else "railradar_long_journey_preferred" if railradar_preferred_long_journey
-                    else "railkit"
-                )
+                # date_corrected_via_railradar there). Set here, before the
+                # segment_info override below gets a chance to relabel it
+                # again for the live-GPS-confirmed case specifically.
+                current_station_source = "railradar_date_corrected" if date_corrected_via_railradar else "railkit"
                 # BUGFIX (reported twice: app's live position lagged well
                 # behind RailRadar's OWN live page for the exact same
                 # train, e.g. RailRadar showing the train at Ghanapur while
@@ -6881,15 +6733,6 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     weather_component_minutes=weather_component_minutes, rr_stops=rr_stops,
                     speed_cv=measured_speed_cv, provider_disagreement_minutes=provider_disagreement_minutes,
                     train_number=train_number,
-                    # BUGFIX: use the SAME live, interpolated current-
-                    # position distance the callout above and
-                    # next_station_live_eta below are built from, instead of
-                    # letting this function fall back to the "current"
-                    # timeline stop's own coarser static distance_km — see
-                    # the live_current_distance_km docstring note for the
-                    # real case (train genuinely 251.4 km in, current stop
-                    # only marked 246.6 km) this closes.
-                    live_current_distance_km=current_position_distance_km,
                 )
                 _mirror_origin_destination_timing(timeline_json)
                 _lock_grounded_station_predictions(timeline_json, locked_station_predictions)
@@ -7088,7 +6931,50 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # this id via the existing POST /api/feedback, so a report
                 # is real, traceable feedback data, not a no-op button.
                 status_response_id = uuid.uuid4().hex
-                status_updated_at = datetime.now().isoformat()
+                # BUGFIX ("live tracking screen's timestamp/counter ticks
+                # every ~5s but the actual position data behind it doesn't
+                # really change that often"): this used to be
+                # datetime.now().isoformat() here, i.e. re-stamped "now" on
+                # EVERY poll regardless of whether get_live_train_status
+                # actually made a fresh provider call this poll or just
+                # re-served its cached value (up to 45s old, before the
+                # <=60s guarantee added above) - so the UI's "As of X ago"
+                # kept resetting to "just now" even on a poll that served
+                # stale data, looking live while quietly not being live.
+                # last_real_fetch_epoch (set right after the real fetch,
+                # from the cache's own fetched_at) is the genuine last time
+                # this train's data was actually pulled from the provider -
+                # falling back to "now" only on the very first poll of a
+                # connection, before any real fetch has completed yet.
+                #
+                # BUGFIX #2 (found verifying #1 above): datetime.now() /
+                # datetime.fromtimestamp() without a tz produces a NAIVE
+                # timestamp with no UTC/offset marker in its isoformat()
+                # string (e.g. "2026-09-21T15:34:15.945236"). The frontend
+                # parses it with plain JS `new Date(iso)`, which — for a
+                # string with no timezone designator — treats it as the
+                # BROWSER's own local time, not the server's. Whenever the
+                # server's OS clock/timezone and the viewer's device
+                # timezone disagree (the normal case: a Render/cloud server
+                # is UTC, a phone in India is UTC+5:30), that mismatch gets
+                # silently reinterpreted as a several-HOUR offset — either
+                # showing a wildly stale "N hours ago", or (the more common
+                # direction, and what the report actually showed: "As of
+                # less than a min ago" no matter what) a timestamp that
+                # LOOKS like it's in the future relative to the browser's
+                # clock, which formatAsOfAgo's `Math.max(0, ...)` clamps
+                # straight to "just now" — masking real staleness instead
+                # of just failing to show it. tz=timezone.utc makes this an
+                # unambiguous, self-describing UTC instant (isoformat()
+                # then ends in "+00:00", which `new Date()` parses
+                # correctly as real UTC on any device, any timezone) -
+                # exactly what api_cache's fetched_at/time.time() already
+                # is under the hood, so this is just labeling it honestly.
+                status_updated_at = (
+                    datetime.fromtimestamp(last_real_fetch_epoch, tz=timezone.utc).isoformat()
+                    if last_real_fetch_epoch is not None
+                    else datetime.now(timezone.utc).isoformat()
+                )
                 try:
                     feedback_rlhf.record_response(
                         status_response_id,
@@ -7337,10 +7223,6 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "position_source_raw": position.position_source,
                     "segment_progress": segment_info.get("segment_progress"),
                     "date_corrected_via_railradar": date_corrected_via_railradar,
-                    "journey_duration_minutes": journey_duration_minutes,
-                    "is_long_journey": is_long_journey,
-                    "railradar_preferred_long_journey": railradar_preferred_long_journey,
-                    "current_station_source": current_station_source,
                     "final_lat": payload.get("lat"),
                     "final_lng": payload.get("lng"),
                     "final_position_source": payload.get("position_source"),
@@ -7366,52 +7248,6 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     pass
             except railway_api.RailwayAPIError as e:
                 payload["error"] = str(e)
-                try:
-                    analytics.record_event(intent="live_tracking", train_number=train_number, live_error=True)
-                except Exception:
-                    pass
-            except Exception as e:
-                # BUGFIX ("at the middle it is disconnecting or it showing
-                # connecting ... until user click on stop it should not
-                # disconnect"): this whole poll body - RailKit/RailRadar
-                # fetches and every downstream feature computed from them
-                # (delay prediction, speed, weather, crowd, the long-
-                # journey RailRadar preference, etc) - used to be guarded
-                # ONLY against railway_api.RailwayAPIError. Any OTHER
-                # exception (a genuine bug in any one of the many features
-                # in here, present or future - this poll body has grown to
-                # roughly 1500 lines) propagated straight out of the whole
-                # `while True:` loop, out of ws_track_train itself, past
-                # the `except WebSocketDisconnect` below (the wrong
-                # exception type to catch it), which closes the actual
-                # server-side connection. The frontend's own auto-reconnect
-                # (see LiveTrackingScreen.web.js's openSocket) then quietly
-                # reconnects a few seconds later - reading exactly like "at
-                # the middle it is disconnecting", when what really
-                # happened was a server-side crash on one bad poll,
-                # invisibly papered over by a fresh connection rather than
-                # a deliberate disconnect.
-                #
-                # Same honest-degradation rule this file already applies to
-                # every individual feature's own best-effort failure (the
-                # many small `try: ... except Exception: pass` blocks
-                # throughout this function) - just applied once more at the
-                # level of the WHOLE poll: whatever payload fields were
-                # already filled in before the crash point (crowd
-                # prediction above, for instance) still get sent, `error`
-                # honestly says a tracking error happened, and the loop
-                # retries next poll instead of ending the connection.
-                # Never masks a REAL disconnect either way - WebSocketDisconnect
-                # is raised outside this try block entirely (at
-                # receive_text()/send_json() below), so it still ends the
-                # loop normally exactly as before.
-                #
-                # Logged with the same traceback.print_exc() pattern already
-                # used for /api/chat's own top-level catch-all above - so
-                # whatever the actual bug was still shows up in the server
-                # logs to fix, instead of vanishing silently into a retry.
-                traceback.print_exc()
-                payload["error"] = f"Temporary tracking error, retrying: {e}"
                 try:
                     analytics.record_event(intent="live_tracking", train_number=train_number, live_error=True)
                 except Exception:
