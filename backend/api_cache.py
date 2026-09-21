@@ -60,39 +60,10 @@ def cached(ttl_seconds: int, prefix: str):
                         return entry["value"]
             value = fn(*args, **kwargs)  # let exceptions propagate uncached
             with _lock:
-                # `fetched_at` is the real wall-clock moment this value was
-                # actually pulled from the provider - set ONLY here, in the
-                # branch that just made a genuine call, never touched on a
-                # cache-hit read. This is what entry_fetched_at() below
-                # reports, so a caller can tell a live-tracking client the
-                # TRUE age of what it's showing instead of always claiming
-                # "just now" merely because a poll happened to run.
-                _cache[key] = {"value": value, "expires_at": now + ttl_seconds, "fetched_at": now}
+                _cache[key] = {"value": value, "expires_at": now + ttl_seconds}
             return value
         return wrapper
     return decorator
-
-
-def entry_fetched_at(prefix: str, args=(), kwargs=None) -> float | None:
-    """Introspects the cache for the given (prefix, args, kwargs) key and
-    returns the real epoch-seconds timestamp of the last genuine fetch that
-    populated it (never invented, never bumped by a cache-hit read) - or
-    None if nothing is cached for that key yet. Does NOT trigger a fetch
-    itself and never raises.
-
-    Added for the live-tracking WebSocket loop (backend/app.py's
-    ws_track_train): before this, it stamped every single 5s poll's
-    "status_updated_at" with datetime.now(), so the UI's "As of X ago"
-    label reset every poll even on a cache HIT where the underlying
-    provider data hadn't actually changed in up to ttl_seconds - looking
-    live while quietly showing stale data. This lets the caller report the
-    real fetch time instead.
-    """
-    kwargs = {k: v for k, v in (kwargs or {}).items() if k != "_force_refresh"}
-    key = _make_key(prefix, args, kwargs)
-    with _lock:
-        entry = _cache.get(key)
-        return entry.get("fetched_at") if entry else None
 
 
 def cache_stats() -> dict:

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, Image, Linking, TextInput, Share, Switch } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, Image, Linking, TextInput, Share, Switch, AppState } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, AnimatedRegion } from "react-native-maps";
 import * as Notifications from "expo-notifications";
@@ -138,24 +138,14 @@ const STATUS_COLOR = {
   upcoming: colors.danger,
 };
 
-// "As of N secs/mins ago" — best-effort against the device clock vs the
+// "As of N mins ago" — best-effort against the device clock vs the
 // server's status_updated_at timestamp (see backend app.py /ws/track).
-// BUGFIX: status_updated_at used to be re-stamped "now" on every ~5s poll
-// regardless of whether the position data had actually changed, so this
-// always read "less than a min ago" even when the underlying live status
-// was up to 45s stale. The backend now reports the true last real-fetch
-// time and guarantees a genuine refresh at least every 60s (see
-// REAL_DATA_MAX_STALENESS_SECONDS in ws_track_train) — shown here down to
-// the second (not just whole minutes) so that real cadence is actually
-// visible, matching the web app's own version of this helper.
 function formatAsOfAgo(iso) {
   if (!iso) return "just now";
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "just now";
-  const diffSec = Math.max(0, Math.round((Date.now() - then) / 1000));
-  if (diffSec < 5) return "just now";
-  if (diffSec < 60) return `${diffSec} secs ago`;
-  const diffMin = Math.round(diffSec / 60);
+  const diffMin = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (diffMin < 1) return "less than a min ago";
   return `${diffMin} min${diffMin === 1 ? "" : "s"} ago`;
 }
 
@@ -176,6 +166,19 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
   const [lastUpdated, setLastUpdated] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const wsRef = useRef(null);
+  // BUGFIX: on a real phone, backgrounding the app or letting the screen
+  // lock commonly suspends the socket's underlying network stack WITHOUT
+  // ever firing `onclose` (same real-world failure mode the web build's
+  // LiveTrackingScreen.web.js already works around — see its own
+  // STALE_MS/visibilitychange comment). The socket just sits there "open"
+  // readyState-wise, silently not receiving the fresh position the backend
+  // is genuinely still pushing every ~5s, so the existing onclose-based
+  // reconnect below never even triggers and the card freezes on whatever
+  // the last real message was until the app is foregrounded and this
+  // effect happens to re-run for an unrelated reason. Tracks when the last
+  // message actually arrived so the watchdog/AppState effect further down
+  // can tell a suspended connection from a genuinely quiet one.
+  const lastMessageAtRef = useRef(0);
 
   const animatedCoordRef = useRef(null);
   const [animatedReady, setAnimatedReady] = useState(false);
@@ -703,16 +706,23 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
     });
 
     function establish() {
+    // Stamped now, not just on the first real message — otherwise the
+    // watchdog below could see a "last message" timestamp left over from a
+    // previous connection (several STALE_MS old) and immediately kill this
+    // brand-new socket before it even gets a chance to open.
+    lastMessageAtRef.current = Date.now();
     const socket = new WebSocket(url);
     wsRef.current = socket;
 
     socket.onopen = () => {
       setConnection("open");
       reconnectDelay = 3000;
+      lastMessageAtRef.current = Date.now();
     };
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        lastMessageAtRef.current = Date.now();
         setPayload(data);
         setLastUpdated(new Date());
         setRefreshing(false);
@@ -821,6 +831,17 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
     };
     socket.onerror = () => setConnection("error");
     socket.onclose = () => {
+      // BUGFIX: the AppState resume handler below can replace wsRef.current
+      // with a brand-new socket WITHOUT waiting for this one's close event
+      // to land first (closing a suspended socket doesn't fire onclose
+      // promptly, if at all — see the comment on lastMessageAtRef above).
+      // When that's already happened, this stale socket's own eventual
+      // onclose must be a no-op — otherwise it schedules a second, redundant
+      // reconnect a few seconds later that would orphan the fresh socket
+      // the resume handler just opened (never closed, but no longer
+      // reachable via wsRef.current), leaking one open backend connection
+      // per background/foreground cycle.
+      if (wsRef.current !== socket) return;
       setConnection((c) => (c === "error" ? c : "closed"));
       if (manuallyClosed) return;
       if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -835,9 +856,48 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
 
     establish();
 
+    // Two independent, real signals that the socket has silently gone
+    // stale — neither is a guess about why, just "is it actually still
+    // delivering" — mirroring LiveTrackingScreen.web.js's own watchdog/
+    // visibilitychange effect so the native app auto-updates on the same
+    // real-world basis the web build already does:
+    //   1. A watchdog timer: if nominally open but no message has arrived
+    //      in several multiples of the backend's real ~5s push cadence,
+    //      the connection is dead in practice. Force-closing it hands off
+    //      to the existing onclose auto-reconnect above, so there's still
+    //      only one reconnect code path.
+    //   2. The app coming back to the foreground (phone unlocked, app
+    //      switched back to) — the single most common real moment a
+    //      suspended mobile socket needs replacing — checked immediately
+    //      instead of waiting out the watchdog's own poll interval.
+    const STALE_MS = 25000; // ~5x the backend's real 5s push cadence
+    const watchdog = setInterval(() => {
+      if (manuallyClosed || !wsRef.current) return;
+      if (wsRef.current.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - lastMessageAtRef.current > STALE_MS) {
+        wsRef.current.close(); // -> onclose above auto-reconnects
+      }
+    }, 8000);
+
+    function onAppStateChange(nextState) {
+      if (nextState !== "active" || manuallyClosed) return;
+      const stale = Date.now() - lastMessageAtRef.current > STALE_MS;
+      const dead = !wsRef.current
+        || wsRef.current.readyState === WebSocket.CLOSED
+        || wsRef.current.readyState === WebSocket.CLOSING;
+      if (!stale && !dead) return;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      wsRef.current?.close();
+      reconnectDelay = 3000;
+      establish();
+    }
+    const appStateSub = AppState.addEventListener("change", onAppStateChange);
+
     return () => {
       manuallyClosed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearInterval(watchdog);
+      appStateSub.remove();
       disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -893,17 +953,8 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
         </View>
         {connection === "open" && (
           <Text style={styles.updatedText}>
-            {/* BUGFIX: this used to show lastUpdated.toLocaleTimeString(),
-                the CLIENT's own receipt time for the last WebSocket
-                message \u2014 which ticks every ~5s regardless of whether the
-                underlying position data actually changed, since most
-                messages just re-serve the same still-cached data. Now
-                shows the real data freshness (payload.status_updated_at,
-                the backend's true last-real-fetch time, guaranteed <=60s
-                stale) via the same formatAsOfAgo used by the status
-                popup below, so this line and that popup never disagree. */}
-            {refreshing ? "Refreshing\u2026" : "Connected \u00b7 checks every 5s"}
-            {payload?.status_updated_at ? ` \u00b7 position as of ${formatAsOfAgo(payload.status_updated_at)}` : ""}
+            {refreshing ? "Refreshing\u2026" : "Auto-updates every 5s"}
+            {lastUpdated ? ` \u00b7 last update ${lastUpdated.toLocaleTimeString()}` : ""}
           </Text>
         )}
 
