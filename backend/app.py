@@ -1083,7 +1083,7 @@ def _predict_delay_per_reporting_station(
     date_ddmmyyyy, travel_class, eta_speed_kmph=None, train_info_data=None,
     weather_component_minutes: float = 0.0, rr_stops: Optional[list] = None,
     speed_cv: Optional[float] = None, provider_disagreement_minutes: Optional[float] = None,
-    train_number: Optional[str] = None,
+    train_number: Optional[str] = None, live_current_distance_km: Optional[float] = None,
 ) -> None:
     """
     FEATURE: per-station predicted delay for every upcoming REPORTING
@@ -1151,6 +1151,26 @@ def _predict_delay_per_reporting_station(
         regardless of how it was running before it — whenever enough real
         past-run data exists for that station; otherwise this is silently
         a no-op (never a guess standing in for missing history).
+      - `live_current_distance_km`: the SAME real, most-precise "how far
+        along the route has the train actually gone" figure the poll loop
+        already computes as `current_position_distance_km` — RailRadar's
+        segment-progress interpolation when available (moves every single
+        poll), falling back to the ping-to-ping distance-delta reading,
+        ahead of this function's own coarser default of the "current"
+        timeline stop's own static distance_km. Real case that motivated
+        this: train genuinely 251.4 km in (interpolated, live) while its
+        current timeline entry (a no-halt intermediate point) still only
+        carried its own static 246.6 km marker — a real, if honest, 4.8 km
+        of TRUE remaining distance was being silently added back onto
+        every upcoming station's distance_ahead_km, turning a genuine "4.1
+        km / ~3 min to Khammam" into an inflated "~8.9 km / ~24m late"
+        prediction, even though the live-status callout right above it
+        (built from the same interpolated figure) already showed the
+        correct, smaller number. Whenever supplied, this replaces the
+        function's own current_entry-based anchor below outright so every
+        distance_ahead_km, predicted_eta and predicted_delay_minutes in
+        this loop line up with what the passenger's live position callout
+        already shows, instead of silently disagreeing with it.
     """
     current_delay_minutes = current_delay_minutes if current_delay_minutes is not None else 0
     trend = trend_per_stop if trend_per_stop is not None else 0.0
@@ -1182,18 +1202,26 @@ def _predict_delay_per_reporting_station(
             d = _route_distance_for_station(train_info_data, stop.get("code"))
         return d
 
-    # Real current-position distance (RailKit's own distance_km on the
-    # "current" stop, or the last "passed" reporting station if the train
-    # is running between two stops), with the same static-route fallback —
-    # the anchor every future station's real remaining distance is measured
-    # from.
-    current_distance_km = None
-    current_entry = next((s for s in timeline_json if s.get("status") == "current"), None)
-    if current_entry is None:
-        passed = [s for s in timeline_json if s.get("kind") != "intermediate" and s.get("status") == "passed"]
-        current_entry = passed[-1] if passed else None
-    if current_entry is not None:
-        current_distance_km = _stop_distance_km(current_entry)
+    # Real current-position distance — the anchor every future station's
+    # real remaining distance is measured from. Prefer the live, poll-to-
+    # poll-moving figure the caller already computed (RailRadar segment-
+    # progress interpolation, or a distance-delta reading) when supplied;
+    # it's strictly more precise than this function's own fallback below,
+    # which only knows the "current" timeline stop's own static distance_km
+    # — see the live_current_distance_km note in the docstring above for
+    # the real case (Mallemadugu vs. a genuinely-further-along live
+    # position) that made this matter.
+    current_distance_km = live_current_distance_km
+    if current_distance_km is None:
+        # Fallback: RailKit's own distance_km on the "current" stop, or the
+        # last "passed" reporting station if the train is running between
+        # two stops, with the same static-route fallback as elsewhere.
+        current_entry = next((s for s in timeline_json if s.get("status") == "current"), None)
+        if current_entry is None:
+            passed = [s for s in timeline_json if s.get("kind") != "intermediate" and s.get("status") == "passed"]
+            current_entry = passed[-1] if passed else None
+        if current_entry is not None:
+            current_distance_km = _stop_distance_km(current_entry)
 
     stops_ahead = 0          # counts every upcoming station (halt or not) — used for confidence widening
     reporting_stops_ahead = 0  # counts only real reporting halts — used for the trend extrapolation
@@ -6853,6 +6881,15 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     weather_component_minutes=weather_component_minutes, rr_stops=rr_stops,
                     speed_cv=measured_speed_cv, provider_disagreement_minutes=provider_disagreement_minutes,
                     train_number=train_number,
+                    # BUGFIX: use the SAME live, interpolated current-
+                    # position distance the callout above and
+                    # next_station_live_eta below are built from, instead of
+                    # letting this function fall back to the "current"
+                    # timeline stop's own coarser static distance_km — see
+                    # the live_current_distance_km docstring note for the
+                    # real case (train genuinely 251.4 km in, current stop
+                    # only marked 246.6 km) this closes.
+                    live_current_distance_km=current_position_distance_km,
                 )
                 _mirror_origin_destination_timing(timeline_json)
                 _lock_grounded_station_predictions(timeline_json, locked_station_predictions)
