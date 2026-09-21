@@ -6126,6 +6126,63 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     and journey_duration_minutes > gps_tracking.LONG_JOURNEY_MINUTES
                 )
 
+                # FEATURE: "for long journey when I am giving current day it
+                # is use railkit ... if journey is less than or equal 24 hrs
+                # only use railkit or else defaultly use railradar" - the
+                # coordinate-only preference above still leaves RailKit in
+                # charge of WHICH station counts as "current" for a long
+                # journey, so if that pointer itself is the wrong/stale one
+                # (this module's whole documented history of long-journey-
+                # only bugs above - RailKit "kept SECUNDERABAD JN 'current'
+                # for 9+ hours after actually finishing", the date-drift
+                # saga, etc), replacing just that station's coordinate never
+                # fixes it. This goes further: for a confirmed long journey,
+                # RailRadar's OWN full timeline (current station AND its
+                # coordinate together, one real consistent reading) becomes
+                # the default source, RailKit only the fallback.
+                #
+                # Skipped entirely when date_corrected_via_railradar already
+                # swapped timeline_stops/position over to RailRadar above (no
+                # point re-fetching the same thing twice). Otherwise fetches
+                # RailRadar's timeline for the SAME date_ddmmyyyy already
+                # resolved by the self-correcting anchor pass just above (an
+                # explicit, already-verified-where-possible date - never
+                # RailRadar's blank-date auto-detect, which is exactly the
+                # ambiguous-overlapping-run guess round 18 had to revert -
+                # see date_corrected_via_railradar's own comment). This is
+                # the exact same date_ddmmyyyy already trusted for RailRadar's
+                # per-station actual/delay enrichment a little further below
+                # (rr_stops) - not a new trust decision, the same one reused.
+                #
+                # Only ever a PREFERENCE, never a ban: if RailRadar has no
+                # real "current"/"passed" stop for this run either (empty
+                # response, no key configured, or a run that genuinely hasn't
+                # started/already finished on RailRadar's side too),
+                # position_from_stops honestly returns no current station
+                # and this whole block leaves RailKit's own already-resolved
+                # timeline_stops/position completely untouched - a long-
+                # journey train with no RailRadar coverage still tracks via
+                # RailKit, unchanged.
+                railradar_preferred_long_journey = False
+                if is_long_journey and not date_corrected_via_railradar:
+                    try:
+                        rr_long_journey_stops = await asyncio.to_thread(
+                            railradar_fallback.fetch_railradar_timeline, train_number, date_ddmmyyyy,
+                        )
+                    except Exception:
+                        rr_long_journey_stops = []
+                    if rr_long_journey_stops:
+                        rr_long_journey_position = gps_tracking.position_from_stops(
+                            train_number, rr_long_journey_stops,
+                            train_name=position.train_name, status_note=position.status_note,
+                        )
+                        if rr_long_journey_position.current_station_code or rr_long_journey_position.current_station_name:
+                            gps_tracking.finalize_timeline_stops(rr_long_journey_stops)
+                            timeline_stops = rr_long_journey_stops
+                            position = rr_long_journey_position
+                            timeline_json = gps_tracking.timeline_to_json(timeline_stops)
+                            railradar_preferred_long_journey = True
+
                 # FEATURE: date reliability warnings. RailKit's `date` query
                 # param does not appear to reliably select a SPECIFIC run of
                 # a daily train - see the long REVERTED comment above this
@@ -6447,10 +6504,18 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # actually came from — "railkit" normally, but the explicit-
                 # date correction pass further up can have already swapped
                 # both in for a RailRadar-date-verified run instead (see
-                # date_corrected_via_railradar there). Set here, before the
-                # segment_info override below gets a chance to relabel it
-                # again for the live-GPS-confirmed case specifically.
-                current_station_source = "railradar_date_corrected" if date_corrected_via_railradar else "railkit"
+                # date_corrected_via_railradar there), or the long-journey
+                # default-to-RailRadar preference just above that (see
+                # railradar_preferred_long_journey there) can have swapped
+                # them in for the same reason on an ordinary current-date
+                # request. Set here, before the segment_info override below
+                # gets a chance to relabel it again for the live-GPS-
+                # confirmed case specifically.
+                current_station_source = (
+                    "railradar_date_corrected" if date_corrected_via_railradar
+                    else "railradar_long_journey_preferred" if railradar_preferred_long_journey
+                    else "railkit"
+                )
                 # BUGFIX (reported twice: app's live position lagged well
                 # behind RailRadar's OWN live page for the exact same
                 # train, e.g. RailRadar showing the train at Ghanapur while
@@ -7178,6 +7243,8 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "date_corrected_via_railradar": date_corrected_via_railradar,
                     "journey_duration_minutes": journey_duration_minutes,
                     "is_long_journey": is_long_journey,
+                    "railradar_preferred_long_journey": railradar_preferred_long_journey,
+                    "current_station_source": current_station_source,
                     "final_lat": payload.get("lat"),
                     "final_lng": payload.get("lng"),
                     "final_position_source": payload.get("position_source"),
