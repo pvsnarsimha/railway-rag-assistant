@@ -51,7 +51,7 @@ _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delay_accur
 # formatting as uvicorn's own request logs, and so they can be silenced
 # later (LOG_SQL_QUERIES=0) without touching this file again.
 #
-# Two independent layers, both opt-out via env var, both print()-simple:
+# Two independent layers, both opt-in via env var, both print()-simple:
 #   1. A human-readable one-line summary per call (WRITE/READ/DELETE, the
 #      train+date+station it was for, and the outcome) - this is what you
 #      actually want to eyeball in the log stream to confirm "yes, a real
@@ -60,6 +60,18 @@ _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delay_accur
 #      set_trace_callback - the raw ground truth, one level more detailed
 #      than (1), useful if something looks wrong and you need to see the
 #      exact statement rather than trust this file's own summary of it.
+#
+# BUGFIX (noticed while reading a user-supplied Render log for an unrelated
+# report): this used to default ON - a single poll of a long-journey train
+# (parse_full_timeline walking every one of its ~80+ real stops) logs one
+# READ and usually one WRITE line PER STATION, so a single live-tracking
+# session was producing hundreds of these lines a minute, permanently,
+# burying whatever anyone was actually trying to find in the log stream
+# right when they needed it most (exactly what happened here). The toggle
+# itself was always correct - only the default was backwards for a feature
+# meant to be turned on when actively debugging this one store, not left
+# on by default forever. Same env var, same opt-out mechanic, just OFF
+# unless explicitly requested with LOG_SQL_QUERIES=1.
 _logger = logging.getLogger("delay_accuracy_store")
 if not _logger.handlers:
     _handler = logging.StreamHandler()
@@ -68,7 +80,7 @@ if not _logger.handlers:
     _logger.setLevel(logging.INFO)
     _logger.propagate = False
 
-_LOG_QUERIES = (os.environ.get("LOG_SQL_QUERIES", "1").strip() != "0")
+_LOG_QUERIES = (os.environ.get("LOG_SQL_QUERIES", "0").strip() != "0")
 
 
 def _sql_trace(statement: str) -> None:
