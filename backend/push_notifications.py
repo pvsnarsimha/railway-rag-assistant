@@ -127,6 +127,59 @@ def status() -> dict:
     }
 
 
+def _notification_icon_url() -> Optional[str]:
+    """Absolute URL for the small icon shown on a background push's banner.
+    One backend serves both frontend/ (at "/") and the mobile-app web
+    export (at "/mobile-app") from the same host, so one shared icon URL
+    works for a push delivered to either origin. Only built once
+    PUBLIC_APP_URL points at a real HTTPS deploy — same guard already used
+    for the webpush click-through link below, since a bare "/" or
+    localhost URL isn't fetchable by whatever service is rendering the
+    notification banner."""
+    public_url = os.environ.get("PUBLIC_APP_URL", "").strip()
+    if public_url.startswith("https://"):
+        return f"{public_url.rstrip('/')}/assets/icons/train-marker.png"
+    return None
+
+
+def _webpush_config(title: str, body: str, tag: str):
+    """
+    FEATURE: SMS-style push presentation. A bare WebpushNotification(title,
+    body) — what every send_* below used before this — renders as a thin,
+    auto-dismissing browser popup, nothing like how a text message alerts
+    you. This is the closest a standard web push can get to that:
+      - require_interaction: the banner stays up until tapped/dismissed,
+        instead of vanishing after a few seconds like a default push.
+      - vibrate: a real buzz pattern, same as an SMS arriving.
+      - tag + renotify: a second alert for the SAME watch (e.g. the
+        predicted delay moved) re-buzzes/re-alerts instead of silently
+        overwriting an already-dismissed notification with new text.
+      - icon/badge: the app's own icon instead of a bare generic bubble.
+    `silent` is deliberately left unset (defaults to False) — the phone's
+    own default notification sound still plays. There's no web API to
+    swap in a custom ringtone file the way a native Android/iOS app can;
+    this is the loudest/most attention-grabbing a browser push gets.
+    """
+    from firebase_admin import messaging
+
+    icon_url = _notification_icon_url()
+    webpush_notification = messaging.WebpushNotification(
+        title=title,
+        body=body,
+        icon=icon_url,
+        badge=icon_url,
+        tag=tag,
+        renotify=True,
+        require_interaction=True,
+        vibrate=[200, 100, 200, 100, 200],
+    )
+    webpush_kwargs = {"notification": webpush_notification}
+    public_url = os.environ.get("PUBLIC_APP_URL", "").strip()
+    if public_url.startswith("https://"):
+        webpush_kwargs["fcm_options"] = messaging.WebpushFCMOptions(link=public_url)
+    return messaging.WebpushConfig(**webpush_kwargs)
+
+
 def send_delay_alert(
     token: str, train_number: str, label: Optional[str], predicted_delay_minutes: int,
     predicted_for_station: Optional[str] = None,
@@ -176,22 +229,15 @@ def send_delay_alert(
 
     from firebase_admin import messaging
 
-    # Webpush's click-through link must be an absolute HTTPS URL — a bare "/"
-    # or an http:// localhost URL are both rejected by FCM outright (this was
-    # previously hardcoded to "/" and silently failed every single send).
-    # Only attach it once the app is actually deployed behind HTTPS; the
-    # service worker's own notificationclick handler still opens the app
-    # either way, so this is cosmetic (which URL to jump to), not required.
-    public_url = os.environ.get("PUBLIC_APP_URL", "").strip()
-    webpush_kwargs = {"notification": messaging.WebpushNotification(title=title, body=body)}
-    if public_url.startswith("https://"):
-        webpush_kwargs["fcm_options"] = messaging.WebpushFCMOptions(link=public_url)
-
+    # tag is per-train (not per-watch/station) on purpose: a second delay
+    # push for the SAME train while an earlier one is still unread should
+    # re-alert in place with the latest number, not pile up as a separate
+    # notification the user has to individually clear.
     message = messaging.Message(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=messaging.WebpushConfig(**webpush_kwargs),
+        webpush=_webpush_config(title, body, tag=f"delay_alert-{train_number}"),
     )
     try:
         messaging.send(message)
@@ -241,16 +287,11 @@ def send_fare_alert(
 
     from firebase_admin import messaging
 
-    public_url = os.environ.get("PUBLIC_APP_URL", "").strip()
-    webpush_kwargs = {"notification": messaging.WebpushNotification(title=title, body=body)}
-    if public_url.startswith("https://"):
-        webpush_kwargs["fcm_options"] = messaging.WebpushFCMOptions(link=public_url)
-
     fcm_message = messaging.Message(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=messaging.WebpushConfig(**webpush_kwargs),
+        webpush=_webpush_config(title, body, tag=f"fare_alert-{train_number}-{travel_class}"),
     )
     try:
         messaging.send(fcm_message)
@@ -293,16 +334,11 @@ def send_alarm_alert(
 
     from firebase_admin import messaging
 
-    public_url = os.environ.get("PUBLIC_APP_URL", "").strip()
-    webpush_kwargs = {"notification": messaging.WebpushNotification(title=title, body=body)}
-    if public_url.startswith("https://"):
-        webpush_kwargs["fcm_options"] = messaging.WebpushFCMOptions(link=public_url)
-
     fcm_message = messaging.Message(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=messaging.WebpushConfig(**webpush_kwargs),
+        webpush=_webpush_config(title, body, tag=f"smart_alarm-{train_number}-{station}"),
     )
     try:
         messaging.send(fcm_message)
@@ -342,16 +378,11 @@ def send_station_status_alert(
 
     from firebase_admin import messaging
 
-    public_url = os.environ.get("PUBLIC_APP_URL", "").strip()
-    webpush_kwargs = {"notification": messaging.WebpushNotification(title=title, body=body)}
-    if public_url.startswith("https://"):
-        webpush_kwargs["fcm_options"] = messaging.WebpushFCMOptions(link=public_url)
-
     fcm_message = messaging.Message(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=messaging.WebpushConfig(**webpush_kwargs),
+        webpush=_webpush_config(title, body, tag=f"station_reached-{train_number}-{station or ''}"),
     )
     try:
         messaging.send(fcm_message)

@@ -49,10 +49,24 @@ messaging.onBackgroundMessage((payload) => {
   console.log("[push-sw] onBackgroundMessage fired:", payload);
   const title = payload.notification?.title || "Train delay alert";
   const body = payload.notification?.body || "";
+  // SMS-style presentation, matching mobile-app/public/firebase-messaging-sw.js:
+  // vibrate + requireInteraction make it buzz and stay up like a real text
+  // instead of a default push that vanishes after a couple seconds; tag +
+  // renotify mean a second alert for the same watch re-buzzes with the
+  // latest text instead of silently overwriting an already-dismissed one.
+  // `silent` is left at its default (false) — the phone's own default
+  // notification sound still plays; a web page can't pick a custom
+  // ringtone file the way a native app can bind one to a channel.
   self.registration.showNotification(title, {
     body,
     icon: "/assets/icons/train-marker.png",
+    badge: "/assets/icons/train-marker.png",
     data: payload.data || {},
+    vibrate: [200, 100, 200, 100, 200],
+    requireInteraction: true,
+    renotify: true,
+    silent: false,
+    tag: payload.data?.type || "railway-alert",
   }).then(() => {
     console.log("[push-sw] showNotification() succeeded.");
   }).catch((err) => {

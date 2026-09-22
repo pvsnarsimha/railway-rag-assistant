@@ -78,6 +78,10 @@ const WEB_FIREBASE_CONFIG = {
 const WEB_VAPID_KEY = "BMu0pxEE23rJpmRM9zYTFN9VxHx5Qeo36SFA51_n70NjdSmA9aFe6814lT_aL80FJKqwh2U2miiCPwjJi4zNxys";
 const WEB_SW_PATH = "/mobile-app/firebase-messaging-sw.js";
 const WEB_PUSH_TOKEN_KEY = "pushDeviceToken";
+// Same stable path public/firebase-messaging-sw.js uses for the
+// background case — public/ is copied verbatim into the Expo web export
+// root, so this survives unchanged at /mobile-app/notification-icon.png.
+const NOTIFICATION_ICON = "/mobile-app/notification-icon.png";
 
 // --- Web audio, no files/hosting needed -----------------------------
 // A real background push (delivered while the tab isn't focused/open)
@@ -114,12 +118,19 @@ function playWebTone(notes) {
   return () => { stopped = true; clearTimeout(closeTimer); try { ctx.close(); } catch (e) { /* ignore */ } };
 }
 
-// Short "ting-ting" — Delay Alert chime, plays once.
+// SMS-style ring — Delay Alert chime. A background push already gets the
+// phone's own default notification sound for free (see the file header);
+// this is only for the foreground case, where some browsers suppress
+// that — so it's deliberately louder/longer than the old single "ting"
+// (two quick two-note rings, closer to a text message's alert tone) to
+// feel like an actual notification going off rather than a soft chime.
 function playDelayAlertChime() {
-  playWebTone([
+  const ring = [
     { freq: 1046.5, at: 0, dur: 0.16 },
-    { freq: 1318.5, at: 0.2, dur: 0.2 },
-  ]);
+    { freq: 1318.5, at: 0.2, dur: 0.22 },
+  ];
+  playWebTone(ring);
+  setTimeout(() => playWebTone(ring), 480);
 }
 
 // Louder, repeating ring — Smart Alarm. Loops for ~24s (or until the
@@ -171,7 +182,17 @@ async function registerForWebPushNotifications() {
       playDelayAlertChime();
       if (Notification.permission === "granted") {
         try {
-          new Notification(title, { body, vibrate: [120, 60, 120] });
+          // vibrate + requireInteraction match the background service
+          // worker's presentation (see public/firebase-messaging-sw.js) so a
+          // push looks/feels the same whether the tab is focused or not.
+          new Notification(title, {
+            body,
+            icon: NOTIFICATION_ICON,
+            vibrate: [200, 100, 200, 100, 200],
+            requireInteraction: true,
+            tag: payload.data?.type || "railway-alert",
+            renotify: true,
+          });
         } catch (e) { /* ignore */ }
       }
     });
