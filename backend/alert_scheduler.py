@@ -169,6 +169,20 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
             logger.warning("Prediction failed for watch id=%s train=%s: %s", w["id"], w["train_number"], e)
             continue
 
+        # DIAGNOSTIC: the pass-level summary alone doesn't say WHY a watch
+        # didn't count as breached — a delay that's None, a status that
+        # skipped it outright, or a real delay that's just under this
+        # watch's own threshold all look identical from the outside
+        # (breached stays 0). This makes that visible per-watch instead of
+        # having to guess between "scheduler isn't finding this watch",
+        # "prediction disagrees with what Live Tracking shows", and "it's
+        # genuinely under threshold".
+        logger.info(
+            "watch id=%s train=%s date=%s label=%s -> status=%s delay=%s threshold=%s station=%s",
+            w["id"], w["train_number"], w.get("date"), w.get("label"),
+            status, delay, w["threshold_minutes"], predicted_station,
+        )
+
         # LABEL-AWARE OUTCOMES (see app.py's _predict_for_watch_station):
         # a watch whose label doesn't match a real station on this train's
         # route gets no notification at all (not a delay, just an invalid
