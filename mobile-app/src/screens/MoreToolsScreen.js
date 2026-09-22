@@ -31,8 +31,6 @@ const TOOLS = [
   { key: "pantry", label: "🍽️ Pantry" },
   { key: "amenities", label: "🛋️ Amenities" },
   { key: "mytrains", label: "🧭 My Trains" },
-  { key: "delayimpact", label: "⏱️ Delay Impact" },
-  { key: "coach", label: "🚃 Coach Layout" },
   { key: "seat", label: "💺 Seat Picker" },
   { key: "compare", label: "⚖️ Route Compare" },
   { key: "refund", label: "💸 Refund" },
@@ -51,17 +49,29 @@ const TOOLS = [
   { key: "bookingwindow", label: "🎟️ Smart Booking" },
   { key: "stationnav", label: "🧭 Station Navigator" },
 ];
-// REFORM: trimmed from the original 27 tools down to 23. Removed —
+// REFORM: trimmed from the original 27 tools down to 21. Removed —
 // "Parcel Tracking" (a different service line entirely, freight not
 // passenger travel — RailYatri itself doesn't put this in its main
 // passenger app either), "Fare Heatmap" (a full multi-day fare calendar
 // is a power-user/deal-hunter feature; an ordinary passenger picks one
 // date), "Route Time-Lapse" (a novelty route animation, not something a
-// passenger needs to decide anything), and "Travel Profile" (a
+// passenger needs to decide anything), "Travel Profile" (a
 // preferences-bookkeeping screen, not itself an answer to a trip
-// question). Their backend endpoints and render branches below are left
+// question), "Delay Impact" and "Coach Layout" (both per a later request —
+// duplicate/less-used surface once the per-station Delay Alert badges and
+// the Live Tracking screen's own train-position view cover the same
+// ground). Their backend endpoints and render branches below are left
 // untouched — only the menu entry is gone — so nothing breaks and any of
 // these can come back with a one-line revert if wanted later.
+//
+// NOTE: Live Tracking's own "Coach layout" shortcut button (see
+// LiveTrackingScreen.web.js's bottom bar) still passes
+// route.params.initialTab: "coach" — that file wasn't available to edit
+// here, so that button itself still shows. Since "coach" is no longer in
+// TOOLS, the validity check below now falls back to the default
+// "Platform" tab instead of erroring, so tapping it just lands somewhere
+// slightly different rather than crashing. Remove/repoint that button in
+// LiveTrackingScreen.web.js too if you want it fully gone.
 // NOTE: "Live Crowd Map for Train Coaches" and "Water/Restroom Availability
 // Live Check" were removed — neither RailKit (RapidAPI) nor RailRadar
 // exposes any real per-coach occupancy or water/restroom sensor feed.
@@ -930,7 +940,18 @@ function AlertsTool({ apiBaseUrl }) {
     const updated = [...list, { trainNumber, date: dateText.trim() || null, label: label.trim() || null, threshold: parseInt(threshold, 10) || 15 }];
     await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(updated));
     setTrainNumber(""); setDateText(""); setLabel(""); setThreshold("15");
-    await syncWatchesIfEnabled(pushToken, updated);
+    // AUTO-ENABLE (per request: Delay Alerts should reach the device
+    // without a separate manual "Enable Background Push" tap first).
+    // Adding a watch is real intent to be notified, so register for
+    // background push right here if it isn't on yet. enableBackgroundPush()
+    // never throws — it reports its own reason on the pushStatus banner if
+    // permission is denied or unavailable — so this can't block adding the
+    // watch itself; re-reading PUSH_TOKEN_KEY afterwards (rather than the
+    // pushToken state var, which wouldn't reflect this same call's update
+    // yet) guarantees the freshly registered token is what gets synced.
+    let token = pushToken;
+    if (!token) { await enableBackgroundPush(); token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); }
+    await syncWatchesIfEnabled(token, updated);
     load();
   }
   async function remove(idx) {
@@ -2084,7 +2105,7 @@ function StationNavigatorTool({ apiBaseUrl }) {
  * ------------------------------------------------------------------- */
 const TOOL_COMPONENTS = {
   platform: PlatformTool, pantry: PantryTool, amenities: AmenitiesTool, mytrains: MyTrainsTool,
-  delayimpact: DelayImpactTool, coach: CoachLayoutTool, seat: SeatPickerTool, compare: RouteCompareTool,
+  seat: SeatPickerTool, compare: RouteCompareTool,
   refund: RefundTool, heatmap: FareHeatmapTool, alerts: AlertsTool, crowd: StationCrowdTool,
   parcel: ParcelTool, offline: OfflineTool, gantt: GanttTool, profile: ProfileTool, nearme: NearMeTool,
   journeyplanner: JourneyPlannerTool, delayhistory: DelayHistoryTool, pnrtrack: PnrTrackTool,

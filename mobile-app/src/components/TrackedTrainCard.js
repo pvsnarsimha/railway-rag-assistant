@@ -262,7 +262,19 @@ export default function TrackedTrainCard({ trainNumber, date, source, dest, wsBa
   // genuine remote push — the same "belt and suspenders" pattern the web
   // app just added, reusing the SAME Expo push token this app already
   // uses for delay-threshold Watch-This-Route alerts (MoreToolsScreen.js).
-  const [alarmBackgroundOn, setAlarmBackgroundOn] = useState(false);
+  //
+  // AUTO-ENABLE (per request: Smart Alarm should register for background
+  // delivery on its own, not need a separate switch flipped first):
+  // defaults to true now instead of false. armAlarm() below already only
+  // ever calls syncBackgroundAlarmToServer() from inside its own
+  // `if (alarmBackgroundOn)` branch — i.e. only at the moment the user
+  // actually arms an alarm for a specific station — so this default just
+  // removes the extra manual toggle-tap before that; it doesn't add any
+  // new automatic network activity or change what "Set Alarm" itself does.
+  // getOrCreatePushToken() inside that path still degrades safely (sets
+  // alarmBackgroundNote with the reason) if push permission is denied or
+  // unavailable on this build, exactly as before.
+  const [alarmBackgroundOn, setAlarmBackgroundOn] = useState(true);
   const [alarmBackgroundBusy, setAlarmBackgroundBusy] = useState(false);
   const [alarmBackgroundNote, setAlarmBackgroundNote] = useState(null);
 
