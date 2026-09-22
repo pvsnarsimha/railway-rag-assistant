@@ -9,6 +9,13 @@
  * receive a delay-threshold-breach alert the way the web app already can
  * (see frontend/app.js's enablePushNotifications).
  *
+ * UPDATE: registerForPushNotifications() now handles Platform.OS ===
+ * "web" for real too (see registerForWebPushNotifications below), using
+ * the SAME already-configured Firebase project frontend/app.js uses,
+ * instead of refusing outright. That refusal was the actual bug behind
+ * per-station Delay Alerts/Smart Alarms silently never firing when this
+ * app's web build (served at /mobile-app) was used in a browser.
+ *
  * This wires the SAME server-side pipeline (push_store.py +
  * alert_scheduler.py + push_notifications.py) the web app already uses,
  * via Expo's push notification service instead of raw FCM device tokens:
@@ -41,6 +48,160 @@ import Constants from "expo-constants";
 // synchronously rather than just reject a promise.
 export const IS_EXPO_GO = Constants.appOwnership === "expo" || Constants.executionEnvironment === "storeClient";
 
+// BUG FIX: registerForPushNotifications() used to immediately return
+// { token: null, reason: "Use the web app's own ... button instead." }
+// for Platform.OS === "web" — meaning every per-station Delay Alert /
+// Smart Alarm set from the Expo web build (served at /mobile-app) was
+// saved locally (AsyncStorage) but NEVER synced to the backend's
+// alert_scheduler.py watchlist, so nothing could ever fire once the tab
+// wasn't open and active. This wires the SAME real, already-configured
+// Firebase project the legacy frontend/app.js uses (see
+// frontend/firebase-messaging-sw.js + frontend/app.js's
+// enablePushNotifications/getOrCreateWebPushToken) so the web build of
+// THIS app can register for real background push too, instead of
+// punting to a different, unrelated part of the site.
+//
+// Requires: the "firebase" npm package (added to package.json), and
+// mobile-app/public/firebase-messaging-sw.js (Expo copies mobile-app's
+// public/ folder into the web export root, so it ends up served at
+// /mobile-app/firebase-messaging-sw.js — the scope a service worker
+// needs to control pages under /mobile-app/*).
+const WEB_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBTSGSVdsnZ0bqOwbdxrt2genJQtadRx5M",
+  authDomain: "railway-142a6.firebaseapp.com",
+  projectId: "railway-142a6",
+  storageBucket: "railway-142a6.firebasestorage.app",
+  messagingSenderId: "72786651974",
+  appId: "1:72786651974:web:67e9a8337aba65c86e9347",
+  measurementId: "G-PQB5J6ET1M",
+};
+const WEB_VAPID_KEY = "BMu0pxEE23rJpmRM9zYTFN9VxHx5Qeo36SFA51_n70NjdSmA9aFe6814lT_aL80FJKqwh2U2miiCPwjJi4zNxys";
+const WEB_SW_PATH = "/mobile-app/firebase-messaging-sw.js";
+const WEB_PUSH_TOKEN_KEY = "pushDeviceToken";
+
+// --- Web audio, no files/hosting needed -----------------------------
+// A real background push (delivered while the tab isn't focused/open)
+// already gets the phone's own default notification sound for free —
+// that's the OS/browser showing it, same as any other app's push. This
+// is for the two cases that DON'T get that for free: (1) a push that
+// arrives while you're actively looking at the tab — some browsers
+// suppress their own sound for a focused tab — gets a short two-note
+// "ting-ting" so it's still noticeable; (2) the Smart Alarm, which (see
+// scheduleWebAlarm below) rings using this same engine since it isn't a
+// real push at all on web, just an on-device timer.
+function playWebTone(notes) {
+  if (typeof window === "undefined") return () => {};
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return () => {};
+  let ctx;
+  try { ctx = new AudioCtx(); } catch (e) { return () => {}; }
+  let stopped = false;
+  const now = ctx.currentTime;
+  notes.forEach(({ freq, at, dur }) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(freq, now + at);
+    gain.gain.setValueAtTime(0.0001, now + at);
+    gain.gain.exponentialRampToValueAtTime(0.35, now + at + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + at + dur);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now + at);
+    osc.stop(now + at + dur);
+  });
+  const totalMs = Math.max(...notes.map((n) => (n.at + n.dur) * 1000)) + 60;
+  const closeTimer = setTimeout(() => { if (!stopped) { try { ctx.close(); } catch (e) { /* ignore */ } } }, totalMs);
+  return () => { stopped = true; clearTimeout(closeTimer); try { ctx.close(); } catch (e) { /* ignore */ } };
+}
+
+// Short "ting-ting" — Delay Alert chime, plays once.
+function playDelayAlertChime() {
+  playWebTone([
+    { freq: 1046.5, at: 0, dur: 0.16 },
+    { freq: 1318.5, at: 0.2, dur: 0.2 },
+  ]);
+}
+
+// Louder, repeating ring — Smart Alarm. Loops for ~24s (or until the
+// returned stop() is called), closer to an actual alarm than one beep.
+function playSmartAlarmTone() {
+  const ring = [
+    { freq: 880, at: 0, dur: 0.32 },
+    { freq: 659.3, at: 0.4, dur: 0.32 },
+  ];
+  let cancelled = false;
+  const stopFns = [];
+  const tick = (cycle) => {
+    if (cancelled || cycle >= 10) return;
+    stopFns.push(playWebTone(ring));
+    setTimeout(() => tick(cycle + 1), 850);
+  };
+  tick(0);
+  return () => { cancelled = true; stopFns.forEach((stop) => stop()); };
+}
+
+// Import the "firebase" package lazily (dynamic import) rather than at
+// module top-level: this file is also loaded on native (iOS/Android),
+// where firebase/app + firebase/messaging are never used and shouldn't
+// be forced into the native bundle.
+async function registerForWebPushNotifications() {
+  if (typeof window === "undefined" || !("Notification" in window) || !("serviceWorker" in navigator)) {
+    return { token: null, reason: "This browser doesn't support push notifications." };
+  }
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      return { token: null, reason: "Notification permission was not granted." };
+    }
+
+    const { initializeApp, getApps, getApp } = await import("firebase/app");
+    const { getMessaging, getToken, deleteToken, onMessage } = await import("firebase/messaging");
+
+    const app = getApps().length ? getApp() : initializeApp(WEB_FIREBASE_CONFIG);
+    const messaging = getMessaging(app);
+
+    // Foreground delivery: a push arriving while this exact tab is
+    // focused is routed here instead of the service worker's
+    // onBackgroundMessage (that only fires when the tab is backgrounded
+    // or closed) — without this, a push that arrives while you're
+    // looking at the app would succeed silently with no visible banner.
+    onMessage(messaging, (payload) => {
+      const title = payload.notification?.title || "Train delay alert";
+      const body = payload.notification?.body || "";
+      playDelayAlertChime();
+      if (Notification.permission === "granted") {
+        try {
+          new Notification(title, { body, vibrate: [120, 60, 120] });
+        } catch (e) { /* ignore */ }
+      }
+    });
+
+    const registration = await navigator.serviceWorker.register(WEB_SW_PATH);
+    // register() resolves once registration is accepted, not once the
+    // worker is active — calling getToken() immediately after can race
+    // the worker's install/activate steps. navigator.serviceWorker.ready
+    // waits for an active worker at this scope, closing that race.
+    await navigator.serviceWorker.ready;
+
+    try {
+      // A stale cached token can point at a Push subscription that no
+      // longer exists — delete it first so getToken() mints a fresh one.
+      await deleteToken(messaging);
+    } catch (e) {
+      // Nothing cached to delete — fine.
+    }
+
+    const token = await getToken(messaging, { vapidKey: WEB_VAPID_KEY, serviceWorkerRegistration: registration });
+    if (!token) {
+      return { token: null, reason: "Couldn't get a push token from this browser." };
+    }
+    try { window.localStorage.setItem(WEB_PUSH_TOKEN_KEY, token); } catch (e) { /* ignore */ }
+    return { token, platform: "web" };
+  } catch (e) {
+    return { token: null, reason: e && e.message ? e.message : String(e) };
+  }
+}
+
 // Foreground display behavior — without this, Notifications delivered
 // while the app is open and focused are silently swallowed (no banner,
 // no sound) even though delivery itself succeeded. Call once at app
@@ -70,7 +231,7 @@ export function configureForegroundNotificationHandler() {
  */
 export async function registerForPushNotifications() {
   if (Platform.OS === "web") {
-    return { token: null, reason: "Use the web app's own \"Enable push notifications\" button on this platform instead." };
+    return registerForWebPushNotifications();
   }
   if (IS_EXPO_GO && Platform.OS === "android") {
     return {
@@ -131,7 +292,45 @@ export async function registerForPushNotifications() {
  * elsewhere) — callers should fall back to an in-app timer/banner in
  * that case, same pattern as the crossing-alert banner.
  */
+// BUG FIX (same root cause as registerForWebPushNotifications above):
+// expo-notifications doesn't support a delayed/scheduled trigger on
+// Platform.OS === "web" the way it does on native — calling
+// scheduleNotificationAsync there just throws, which the try/catch below
+// swallowed into a silent `null`, so the Smart Alarm badge quietly did
+// nothing on web. There's no real background delivery to fall back to
+// here without also syncing this to the backend watchlist (a bigger
+// change, and the Delay Alert path above already covers real background
+// delivery) — so on web this now does the best available thing: a plain
+// setTimeout-based local alarm, which fires as long as this browser tab
+// stays open, and is at least an honest, working "foreground" alarm
+// instead of a silent no-op.
+const _webAlarmTimers = new Map(); // id -> { timer, stopRinging }
+let _webAlarmSeq = 0;
+
+function scheduleWebAlarm(title, body, fireInSeconds) {
+  if (typeof window === "undefined") return null;
+  const id = `web-alarm-${++_webAlarmSeq}`;
+  const timer = setTimeout(() => {
+    const entry = _webAlarmTimers.get(id);
+    // Ring first (this is the part that actually sounds like an alarm —
+    // a single silent Notification doesn't), then also try a system
+    // notification/banner so it's visible if you glance at the phone.
+    const stopRinging = playSmartAlarmTone();
+    if (entry) entry.stopRinging = stopRinging;
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      try { new Notification(title, { body, vibrate: [300, 150, 300, 150, 300] }); } catch (e) { /* ignore */ }
+    } else {
+      // No/blocked notification permission — still surface *something*
+      // visible, the ring above is already audible either way.
+      try { window.alert(`${title}\n\n${body}`); } catch (e) { /* ignore */ }
+    }
+  }, Math.max(1, Math.round(fireInSeconds)) * 1000);
+  _webAlarmTimers.set(id, { timer, stopRinging: null });
+  return id;
+}
+
 export async function scheduleLocalAlarm(title, body, fireInSeconds) {
+  if (Platform.OS === "web") return scheduleWebAlarm(title, body, fireInSeconds);
   if (IS_EXPO_GO && Platform.OS === "android") return null;
   try {
     return await Notifications.scheduleNotificationAsync({
@@ -145,6 +344,17 @@ export async function scheduleLocalAlarm(title, body, fireInSeconds) {
 
 export async function cancelLocalAlarm(identifier) {
   if (!identifier) return;
+  if (typeof identifier === "string" && identifier.startsWith("web-alarm-")) {
+    const entry = _webAlarmTimers.get(identifier);
+    if (entry) {
+      clearTimeout(entry.timer);
+      // If it already fired and is mid-ring, silence it too — otherwise
+      // "Remove alarm for this station" wouldn't actually stop the sound.
+      if (entry.stopRinging) entry.stopRinging();
+      _webAlarmTimers.delete(identifier);
+    }
+    return;
+  }
   try { await Notifications.cancelScheduledNotificationAsync(identifier); } catch (e) { /* already fired/cleared */ }
 }
 
