@@ -684,6 +684,25 @@ export default function LiveTrackingScreen({ navigation }) {
     }
   }, [apiBaseUrl, trainNumber, trackDate, delayThreshold, getOrCreatePushToken]);
 
+  // AUTO-ENABLE (per explicit request: Delay Alerts should register for
+  // background push automatically, with no manual "Watch this train" tap
+  // required first). Fires once per train+date the moment real tracking
+  // data first arrives for it. autoTriedRef — not just delayWatchActive —
+  // is what stops this from re-arming on every ~5s payload update AND
+  // from re-arming right behind the user's back the moment they tap "Stop
+  // watching": once a key's been tried this mount, it's never retried,
+  // whether that attempt turned the watch on or the user turned it back off.
+  const autoTriedRef = useRef(new Set());
+  const hasPayload = !!payload;
+  useEffect(() => {
+    const num = trainNumber.trim();
+    if (!hasPayload || !num) return;
+    const key = `${num}|${trackDate.trim() || ""}`;
+    if (delayWatchActive || autoTriedRef.current.has(key)) return;
+    autoTriedRef.current.add(key);
+    watchThisTrainForDelay();
+  }, [hasPayload, trainNumber, trackDate, delayWatchActive, watchThisTrainForDelay]);
+
   const stopWatchingDelay = useCallback(async () => {
     const num = trainNumber.trim();
     setDelayWatchBusy(true);
@@ -1358,7 +1377,7 @@ export default function LiveTrackingScreen({ navigation }) {
           Both only show once a train is actually being tracked; watching a
           train or arming an alarm before that point doesn't mean anything. */}
       {payload && (
-        <SectionCard title="🔔 Delay Alert" subtitle="Get a push the moment this train is delayed past your threshold — even with the app closed.">
+        <SectionCard title="🔔 Delay Alert" subtitle="Turns on automatically for this train — you'll get a push the moment it's delayed past your threshold, even with the app closed.">
           <View style={styles.row}>
             <LabeledInput
               label="Alert if delay ≥ (min)" value={delayThreshold} onChangeText={setDelayThreshold}
