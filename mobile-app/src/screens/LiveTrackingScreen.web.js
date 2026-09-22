@@ -648,8 +648,8 @@ export default function LiveTrackingScreen({ navigation }) {
   // any other train the user is watching via More Tools (syncPushWatches
   // replaces the server's full set for this token, same as
   // TrackedTrainCard.js's alarm-watch merge for the same reason).
-  const watchThisTrainForDelay = useCallback(async () => {
-    const num = trainNumber.trim();
+  const watchThisTrainForDelay = useCallback(async (opts) => {
+    const num = String((opts && opts.trainNumber) || trainNumber).trim();
     if (!num) { setDelayWatchStatus({ ok: false, message: "Start tracking a train first." }); return; }
     setDelayWatchBusy(true);
     setDelayWatchStatus(null);
@@ -693,15 +693,15 @@ export default function LiveTrackingScreen({ navigation }) {
   // watching": once a key's been tried this mount, it's never retried,
   // whether that attempt turned the watch on or the user turned it back off.
   const autoTriedRef = useRef(new Set());
+  const connectedTrainNumber = payload?.train_number ? String(payload.train_number).trim() : "";
   const hasPayload = !!payload;
   useEffect(() => {
-    const num = trainNumber.trim();
-    if (!hasPayload || !num) return;
-    const key = `${num}|${trackDate.trim() || ""}`;
+    if (!hasPayload || !connectedTrainNumber) return;
+    const key = `${connectedTrainNumber}|${trackDate.trim() || ""}`;
     if (delayWatchActive || autoTriedRef.current.has(key)) return;
     autoTriedRef.current.add(key);
-    watchThisTrainForDelay();
-  }, [hasPayload, trainNumber, trackDate, delayWatchActive, watchThisTrainForDelay]);
+    watchThisTrainForDelay({ trainNumber: connectedTrainNumber });
+  }, [hasPayload, connectedTrainNumber, trackDate, delayWatchActive, watchThisTrainForDelay]);
 
   const stopWatchingDelay = useCallback(async () => {
     const num = trainNumber.trim();
@@ -1387,7 +1387,7 @@ export default function LiveTrackingScreen({ navigation }) {
               <Text style={styles.fieldLabel}> </Text>
               <PrimaryButton
                 title={delayWatchActive ? "Stop watching" : "Watch this train"}
-                onPress={delayWatchActive ? stopWatchingDelay : watchThisTrainForDelay}
+                onPress={delayWatchActive ? stopWatchingDelay : () => watchThisTrainForDelay()}
                 loading={delayWatchBusy}
                 variant={delayWatchActive ? "secondary" : "primary"}
               />
