@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Share, Linking } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
@@ -7,9 +8,46 @@ import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
 import DayPickerModal from "../components/DayPickerModal";
 import { useSettings } from "../context/SettingsContext";
-import { buildTrackingWsUrl, saveTripSummary, buildTrackShareUrl, buildTripShareUrl, sendFeedback } from "../api/railwayApi";
+import {
+  buildTrackingWsUrl, saveTripSummary, buildTrackShareUrl, buildTripShareUrl, sendFeedback,
+  checkDelayAlerts, checkSmartAlarm, registerPushToken, syncPushWatches, syncAlarmWatches, getAlarmWatches,
+} from "../api/railwayApi";
+import { describeApiError } from "../api/client";
+import { registerForPushNotifications, scheduleLocalAlarm, cancelLocalAlarm } from "../services/pushNotifications";
 import { formatDelayDuration } from "../utils/formatDelay";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
+
+// FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
+// instead of living only inside the separate "More Tools" menu (per
+// explicit user request — these are the two alerts someone actively
+// tracking a train actually wants in the moment, and burying them behind
+// an 18-tab "More Tools" scroll meant most people never found them).
+// Both reuse the SAME AsyncStorage keys MoreToolsScreen.js's AlertsTool /
+// SmartAlarmTool already use for the local watchlist + push token, so a
+// watch set from either screen shows up on both, and a token registered
+// from either screen works for both — nothing here is a second, separate
+// watchlist or a second push registration.
+const PUSH_TOKEN_KEY = "moreTools.pushToken";
+const ALERTS_KEY = "moreTools.delayAlerts";
+
+// Custom Smart Alarm lead time, per the exact UX requested: a quick-pick
+// row of common values, or "Custom" for a free-typed value — plain
+// minutes under an hour, "H:MM" (e.g. "1:30" = 1hr 30min) at or past an
+// hour. Returns null on anything unparseable so the caller can show a
+// clear error instead of silently arming a bogus lead time.
+function parseLeadMinutesInput(text) {
+  const t = (text || "").trim();
+  if (!t) return null;
+  const hhmm = /^(\d{1,2}):(\d{2})$/.exec(t);
+  if (hhmm) {
+    const h = parseInt(hhmm[1], 10);
+    const m = parseInt(hhmm[2], 10);
+    if (m >= 60) return null;
+    return h * 60 + m;
+  }
+  const n = parseInt(t, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 
 // FEATURE: Live delay-trend sparkline — same rolling-buffer size as the
 // native screen's DelaySparkline and the web app's ltDelaySparkline.
@@ -551,6 +589,192 @@ export default function LiveTrackingScreen({ navigation }) {
   const [tripSummaryShareStatus, setTripSummaryShareStatus] = useState(null);
 
   const [shareLinkNote, setShareLinkNote] = useState(null);
+
+  // FEATURE: Delay Alert — on-screen, one tap, reusing trainNumber/trackDate
+  // already entered above instead of asking for them a second time.
+  const [delayThreshold, setDelayThreshold] = useState("15");
+  const [delayWatchActive, setDelayWatchActive] = useState(false);
+  const [delayWatchBusy, setDelayWatchBusy] = useState(false);
+  const [delayWatchStatus, setDelayWatchStatus] = useState(null); // { ok, message } | null
+  const [delayWatchResult, setDelayWatchResult] = useState(null);
+
+  // FEATURE: Smart Alarm — same station-arrival wake-up as
+  // MoreToolsScreen.js's SmartAlarmTool / the native TrackedTrainCard.js,
+  // now right on this screen, with the quick-pick + Custom (H:MM for 1hr+)
+  // lead-time UX.
+  const [alarmStation, setAlarmStation] = useState("");
+  const [alarmLeadMinutes, setAlarmLeadMinutes] = useState("20");
+  const [alarmCustomOpen, setAlarmCustomOpen] = useState(false);
+  const [alarmCustomText, setAlarmCustomText] = useState("");
+  const [alarmBusy, setAlarmBusy] = useState(false);
+  const [alarmStatus, setAlarmStatus] = useState(null);
+  const [alarmArmed, setAlarmArmed] = useState(false);
+  const alarmNotificationIdRef = useRef(null);
+
+  // Reflects an already-active watch for THIS train+date back into the UI
+  // (e.g. set earlier from More Tools, or from a previous visit to this
+  // screen) instead of always starting the toggle fresh.
+  useEffect(() => {
+    let cancelled = false;
+    if (!trainNumber.trim()) { setDelayWatchActive(false); setDelayWatchResult(null); return undefined; }
+    (async () => {
+      const raw = await AsyncStorage.getItem(ALERTS_KEY);
+      const existing = raw ? JSON.parse(raw) : [];
+      const mine = existing.find((w) => String(w.trainNumber) === trainNumber.trim() && (w.date || null) === (trackDate.trim() || null));
+      if (cancelled) return;
+      setDelayWatchActive(!!mine);
+      if (mine) setDelayThreshold(String(mine.threshold));
+    })();
+    return () => { cancelled = true; };
+  }, [trainNumber, trackDate]);
+
+  // Gets a usable push token — reuses whatever's already cached from
+  // either this screen or MoreToolsScreen's own "Enable Background Push"
+  // flow, or registers a fresh one on demand. Never throws; returns
+  // { token: null, reason } on any failure so callers can show why.
+  const getOrCreatePushToken = useCallback(async () => {
+    const cached = await AsyncStorage.getItem(PUSH_TOKEN_KEY);
+    if (cached) return { token: cached };
+    const { token, platform, reason } = await registerForPushNotifications();
+    if (!token) return { token: null, reason };
+    try { await registerPushToken(apiBaseUrl, token, platform); } catch (e) { /* best-effort; caller's own sync call still tries */ }
+    await AsyncStorage.setItem(PUSH_TOKEN_KEY, token);
+    return { token, platform };
+  }, [apiBaseUrl]);
+
+  // Reads the FULL local delay-watch list, merges in (adds/updates) just
+  // this train+date entry, writes it back, then syncs the whole merged
+  // set — never a naive single-item sync, which would silently wipe out
+  // any other train the user is watching via More Tools (syncPushWatches
+  // replaces the server's full set for this token, same as
+  // TrackedTrainCard.js's alarm-watch merge for the same reason).
+  const watchThisTrainForDelay = useCallback(async () => {
+    const num = trainNumber.trim();
+    if (!num) { setDelayWatchStatus({ ok: false, message: "Start tracking a train first." }); return; }
+    setDelayWatchBusy(true);
+    setDelayWatchStatus(null);
+    try {
+      const dateVal = trackDate.trim() || null;
+      const threshold = parseInt(delayThreshold, 10) || 15;
+      const raw = await AsyncStorage.getItem(ALERTS_KEY);
+      const existing = raw ? JSON.parse(raw) : [];
+      const merged = existing.filter((w) => !(String(w.trainNumber) === num && (w.date || null) === dateVal));
+      merged.push({ trainNumber: num, date: dateVal, label: null, threshold });
+      await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(merged));
+
+      const checked = await checkDelayAlerts(apiBaseUrl, merged.map((w) => ({
+        train_number: w.trainNumber, date: w.date || null, threshold_minutes: w.threshold, label: w.label,
+      })));
+      const byTrain = {};
+      (checked.watches || []).forEach((w) => { byTrain[w.train_number] = w; });
+      setDelayWatchResult(byTrain[num] || null);
+
+      const { token, reason } = await getOrCreatePushToken();
+      setDelayWatchActive(true);
+      if (!token) {
+        setDelayWatchStatus({ ok: false, message: reason || "Checking on refresh only — background push isn't available on this device/browser." });
+        return;
+      }
+      await syncPushWatches(apiBaseUrl, token, merged);
+      setDelayWatchStatus({ ok: true, message: `Watching — you'll get a push if this train is delayed ≥ ${threshold} min, even with the app closed.` });
+    } catch (e) {
+      setDelayWatchStatus({ ok: false, message: describeApiError(e) });
+    } finally {
+      setDelayWatchBusy(false);
+    }
+  }, [apiBaseUrl, trainNumber, trackDate, delayThreshold, getOrCreatePushToken]);
+
+  const stopWatchingDelay = useCallback(async () => {
+    const num = trainNumber.trim();
+    setDelayWatchBusy(true);
+    try {
+      const dateVal = trackDate.trim() || null;
+      const raw = await AsyncStorage.getItem(ALERTS_KEY);
+      const existing = raw ? JSON.parse(raw) : [];
+      const merged = existing.filter((w) => !(String(w.trainNumber) === num && (w.date || null) === dateVal));
+      await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(merged));
+      const token = await AsyncStorage.getItem(PUSH_TOKEN_KEY);
+      if (token) await syncPushWatches(apiBaseUrl, token, merged);
+    } catch (e) { /* best-effort — the local watch is already removed either way */ }
+    finally {
+      setDelayWatchActive(false);
+      setDelayWatchStatus(null);
+      setDelayWatchResult(null);
+      setDelayWatchBusy(false);
+    }
+  }, [apiBaseUrl, trainNumber, trackDate]);
+
+  const setSmartAlarm = useCallback(async () => {
+    const num = trainNumber.trim();
+    const station = alarmStation.trim().toUpperCase();
+    if (!num || !station) { setAlarmStatus("Enter a destination station code."); return; }
+    const leadMinutes = alarmCustomOpen ? parseLeadMinutesInput(alarmCustomText) : parseInt(alarmLeadMinutes, 10);
+    if (!leadMinutes) { setAlarmStatus("Enter a valid time — minutes, or H:MM for 1hr+ (e.g. 1:30 = 1hr 30min)."); return; }
+    setAlarmBusy(true);
+    setAlarmStatus("Checking live prediction…");
+    try {
+      const data = await checkSmartAlarm(apiBaseUrl, { trainNumber: num, destinationStation: station, date: trackDate.trim() || null, leadMinutes });
+      if (!data.found) { setAlarmStatus(data.note || "Couldn't check this station."); return; }
+      if (data.already_passed) { setAlarmStatus(`Train has already reached ${station}.`); return; }
+      if (data.minutes_remaining == null) { setAlarmStatus("No live ETA available yet — try again shortly."); return; }
+      const fireInSeconds = (data.minutes_remaining - leadMinutes) * 60;
+      const body = `Train ${num} is due at ${station} soon${data.delay_minutes ? ` (running ${formatDelayDuration(data.delay_minutes)} late)` : ""}. Time to head out!`;
+      if (fireInSeconds <= 0) {
+        await scheduleLocalAlarm(`⏰ Smart Alarm — ${station}`, body, 1);
+        setAlarmStatus(`Already within your window — notified now. Train due in ~${data.minutes_remaining} min.`);
+        return;
+      }
+      const id = await scheduleLocalAlarm(`⏰ Smart Alarm — ${station}`, body, fireInSeconds);
+      alarmNotificationIdRef.current = id;
+      setAlarmArmed(true);
+
+      // Background-surviving registration, on by default — same
+      // "read existing, merge, write back the full set" pattern
+      // TrackedTrainCard.js (native) already uses for this exact endpoint,
+      // so arming an alarm here never clobbers a sibling alarm armed
+      // elsewhere on the same device.
+      const { token, reason } = await getOrCreatePushToken();
+      if (token) {
+        try {
+          const existing = (await getAlarmWatches(apiBaseUrl, token)).watches || [];
+          const merged = existing.filter((w) => !(String(w.train_number) === num && w.station === station));
+          merged.push({ train_number: num, station, date: trackDate.trim() || null, lead_minutes: leadMinutes });
+          await syncAlarmWatches(apiBaseUrl, token, merged.map((w) => ({
+            trainNumber: w.trainNumber ?? w.train_number, station: w.station, date: w.date, leadMinutes: w.leadMinutes ?? w.lead_minutes,
+          })));
+          setAlarmStatus(`Armed for ${station}, ~${leadMinutes} min lead — rings even if you close the app, and registered server-side too.`);
+        } catch (e) {
+          setAlarmStatus(`Armed for ${station} on this device — couldn't also register server-side (${describeApiError(e)}).`);
+        }
+      } else {
+        setAlarmStatus(`Armed for ${station}, ~${leadMinutes} min lead — rings even if you close the app.${reason ? ` (Server-side backup unavailable: ${reason})` : ""}`);
+      }
+    } catch (e) {
+      setAlarmStatus(describeApiError(e));
+    } finally {
+      setAlarmBusy(false);
+    }
+  }, [apiBaseUrl, trainNumber, trackDate, alarmStation, alarmLeadMinutes, alarmCustomOpen, alarmCustomText, getOrCreatePushToken]);
+
+  const cancelSmartAlarm = useCallback(async () => {
+    await cancelLocalAlarm(alarmNotificationIdRef.current);
+    alarmNotificationIdRef.current = null;
+    setAlarmArmed(false);
+    setAlarmStatus("Alarm cancelled.");
+    try {
+      const num = trainNumber.trim();
+      const station = alarmStation.trim().toUpperCase();
+      const token = await AsyncStorage.getItem(PUSH_TOKEN_KEY);
+      if (token && station) {
+        const existing = (await getAlarmWatches(apiBaseUrl, token)).watches || [];
+        const merged = existing.filter((w) => !(String(w.train_number) === num && w.station === station));
+        await syncAlarmWatches(apiBaseUrl, token, merged.map((w) => ({
+          trainNumber: w.trainNumber ?? w.train_number, station: w.station, date: w.date, leadMinutes: w.leadMinutes ?? w.lead_minutes,
+        })));
+      }
+    } catch (e) { /* best-effort — the local alarm is already cancelled either way */ }
+  }, [apiBaseUrl, trainNumber, alarmStation]);
+
   const shareTrackingLink = useCallback(() => {
     if (!trainNumber.trim()) return;
     const url = buildTrackShareUrl(apiBaseUrl, trainNumber.trim(), trackDate.trim() || null);
@@ -1128,6 +1352,81 @@ export default function LiveTrackingScreen({ navigation }) {
           </Text>
         )}
       </SectionCard>
+
+      {/* FEATURE: Delay Alert + Smart Alarm, right on Live Tracking (moved
+          off the separate More Tools menu — see the top-of-file comment).
+          Both only show once a train is actually being tracked; watching a
+          train or arming an alarm before that point doesn't mean anything. */}
+      {payload && (
+        <SectionCard title="🔔 Delay Alert" subtitle="Get a push the moment this train is delayed past your threshold — even with the app closed.">
+          <View style={styles.row}>
+            <LabeledInput
+              label="Alert if delay ≥ (min)" value={delayThreshold} onChangeText={setDelayThreshold}
+              keyboardType="number-pad" editable={!delayWatchActive} style={styles.half}
+            />
+            <View style={styles.half}>
+              <Text style={styles.fieldLabel}> </Text>
+              <PrimaryButton
+                title={delayWatchActive ? "Stop watching" : "Watch this train"}
+                onPress={delayWatchActive ? stopWatchingDelay : watchThisTrainForDelay}
+                loading={delayWatchBusy}
+                variant={delayWatchActive ? "secondary" : "primary"}
+              />
+            </View>
+          </View>
+          {delayWatchResult && (
+            <Text style={[styles.resultLine, delayWatchResult.breached && styles.dangerText]}>
+              {delayWatchResult.error
+                ? "check failed"
+                : delayWatchResult.predicted_delay_minutes == null
+                  ? "no prediction yet"
+                  : `${delayWatchResult.breached ? "⚠ " : ""}+${formatDelayDuration(delayWatchResult.predicted_delay_minutes)}${delayWatchResult.breached ? " — threshold breached" : ""}`}
+            </Text>
+          )}
+          {delayWatchStatus && (
+            <Text style={[styles.webNoticeText, !delayWatchStatus.ok && styles.errorText]}>{delayWatchStatus.message}</Text>
+          )}
+        </SectionCard>
+      )}
+
+      {payload && (
+        <SectionCard title="⏰ Smart Alarm" subtitle="Wake-up alert as this train nears a station you pick — rings even if you close the app.">
+          <LabeledInput label="Destination station code" value={alarmStation} onChangeText={setAlarmStation} autoCapitalize="characters" editable={!alarmArmed} />
+          <Text style={styles.fieldLabel}>Alert me before arrival</Text>
+          <View style={styles.chipRow}>
+            {["15", "20", "30", "40", "45"].map((m) => (
+              <TouchableOpacity
+                key={m}
+                disabled={alarmArmed}
+                onPress={() => { setAlarmLeadMinutes(m); setAlarmCustomOpen(false); }}
+                style={[styles.alarmChip, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipActive]}
+              >
+                <Text style={[styles.alarmChipText, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipTextActive]}>{m} min</Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity disabled={alarmArmed} onPress={() => setAlarmCustomOpen(true)} style={[styles.alarmChip, alarmCustomOpen && styles.alarmChipActive]}>
+              <Text style={[styles.alarmChipText, alarmCustomOpen && styles.alarmChipTextActive]}>Custom</Text>
+            </TouchableOpacity>
+          </View>
+          {alarmCustomOpen && (
+            <LabeledInput
+              label="Custom — minutes, or H:MM for 1hr+ (e.g. 1:30 = 1hr 30min)"
+              value={alarmCustomText} onChangeText={setAlarmCustomText}
+              keyboardType="numbers-and-punctuation" editable={!alarmArmed}
+            />
+          )}
+          <PrimaryButton
+            title={alarmArmed ? "Armed" : "Set Alarm"} onPress={setSmartAlarm} loading={alarmBusy}
+            disabled={alarmArmed} style={{ marginTop: spacing.sm }}
+          />
+          {alarmArmed && (
+            <TouchableOpacity onPress={cancelSmartAlarm} style={{ marginTop: spacing.sm }}>
+              <Text style={styles.removeAlarmText}>Remove alarm for this station</Text>
+            </TouchableOpacity>
+          )}
+          {alarmStatus && <Text style={styles.webNoticeText}>{alarmStatus}</Text>}
+        </SectionCard>
+      )}
 
       {/* FEATURE: End-of-Trip Summary Card (shareable) */}
       {tripSummary && (
@@ -2095,4 +2394,17 @@ const styles = StyleSheet.create({
     paddingVertical: 6, paddingHorizontal: 10, backgroundColor: colors.chip,
   },
   bottomBarBtnText: { fontSize: 11, fontWeight: "600", color: colors.primary },
+
+  // Delay Alert / Smart Alarm (moved here from MoreToolsScreen.js)
+  resultLine: { fontSize: 13, color: colors.text, marginTop: spacing.sm, lineHeight: 18 },
+  dangerText: { color: colors.danger, fontWeight: "700" },
+  chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: spacing.xs },
+  alarmChip: {
+    paddingVertical: 8, paddingHorizontal: 14, borderRadius: radius.pill,
+    borderWidth: 1.5, borderColor: colors.border, backgroundColor: "#fff",
+  },
+  alarmChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  alarmChipText: { fontSize: 13, fontWeight: "600", color: colors.text },
+  alarmChipTextActive: { color: "#fff" },
+  removeAlarmText: { fontSize: 12.5, fontWeight: "600", color: colors.danger, textAlign: "center" },
 });
