@@ -761,9 +761,43 @@ def _stop_really_reached(stop: dict) -> bool:
         return True
     for key in ("arrival", "departure"):
         ev = stop.get(key)
-        if isinstance(ev, dict) and ev.get("actual") and ev.get("actual_is_predicted") is False:
+        if (isinstance(ev, dict) and ev.get("actual") and ev.get("actual_is_predicted") is False
+                and not _clock_time_is_in_future_ist(ev.get("actual"))):
             return True
     return False
+
+
+def _clock_time_is_in_future_ist(hhmm: Optional[str], slack_minutes: int = 5) -> bool:
+    """True when an "HH:MM" (Indian Railways times are IST) is still AHEAD
+    of the current IST clock — by more than `slack_minutes` and less than
+    12h, so a time from earlier today / last night reads as past.
+    BUGFIX: a provider "actual" that is really an ETA (seen on 20834:
+    VISAKHAPATNAM "actual" 14:03 at 12:08, train still before Annavaram)
+    must not count as a real arrival — one such row at the destination
+    otherwise marked EVERY station reached, hiding all delay-alert bells
+    and silencing every station alert. A genuinely recorded arrival can
+    never be in the future."""
+    t = gps_tracking._time_str_to_minutes(hhmm) if hhmm else None
+    if t is None:
+        return False
+    now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    now_min = now.hour * 60 + now.minute
+    ahead = (t - now_min) % 1440
+    return slack_minutes < ahead < 720
+
+
+def _last_really_reached_index(timeline_json: list, next_station_code: Optional[str] = None) -> int:
+    """Index (into timeline_json) of the last reporting stop the train has
+    really reached (see _stop_really_reached), or -1. Every stop before it
+    counts as reached too. `next_station_code` is accepted for callers'
+    convenience but deliberately NOT used as a cap: RailKit's own position
+    can be hours stale (the 20833 KHAMMAM case), so it can't veto a real
+    recorded arrival further down the line."""
+    last = -1
+    for i, s in enumerate(timeline_json):
+        if s.get("kind") != "intermediate" and _stop_really_reached(s):
+            last = i
+    return last
 
 
 def _predict_for_watch_station(train_number: str, date: Optional[str], label: Optional[str] = None,
@@ -863,9 +897,12 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
     # Reached-ness is now decided from real evidence, and is monotonic: if
     # a LATER reporting stop is really reached, every earlier one is too.
     reporting = [s for s in timeline_json if s.get("kind") != "intermediate"]
+    _last_tl_idx = _last_really_reached_index(
+        timeline_json, position.next_station_code if position else None,
+    )
     last_reached_idx = -1
     for i, s in enumerate(reporting):
-        if _stop_really_reached(s):
+        if _last_tl_idx >= 0 and timeline_json.index(s) <= _last_tl_idx:
             last_reached_idx = i
 
     if matched is not None:
@@ -873,13 +910,9 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
         if matched_idx is None and matched.get("kind") == "intermediate":
             # Intermediate point: reached if any reporting stop after it is.
             try:
-                pos = timeline_json.index(matched)
-                later_reached = any(
-                    _stop_really_reached(s) for s in timeline_json[pos + 1:] if s.get("kind") != "intermediate"
-                )
+                is_reached = timeline_json.index(matched) <= _last_tl_idx
             except ValueError:
-                later_reached = False
-            is_reached = later_reached or _stop_really_reached(matched)
+                is_reached = False
         else:
             is_reached = matched_idx is not None and matched_idx <= last_reached_idx
         if is_reached:
@@ -2147,6 +2180,7 @@ def _snapshot_prediction_before_arrival(timeline_json: list, final_predictions: 
 
 def _sync_station_delay_history(
     timeline_json: list, final_predictions: dict, train_number: str, date_ddmmyyyy: Optional[str],
+    next_station_code: Optional[str] = None,
 ) -> None:
     """
     FEATURE: durable predicted-vs-actual history (see delay_accuracy_store.py).
@@ -2225,10 +2259,7 @@ def _sync_station_delay_history(
     # any LATER reporting stop has a real recorded time (see
     # _stop_really_reached) - don't keep persisting a fresh "prediction"
     # for it (the WARANGAL rows logged after 20833 had already terminated).
-    last_really_reached_idx = -1
-    for _i, _s in enumerate(timeline_json):
-        if _s.get("kind") != "intermediate" and _stop_really_reached(_s):
-            last_really_reached_idx = _i
+    last_really_reached_idx = _last_really_reached_index(timeline_json, next_station_code)
 
     reporting_rank = 0
     for idx, stop in enumerate(timeline_json):
@@ -2341,7 +2372,8 @@ def _sync_station_delay_history(
         arrival = stop.get("arrival") if isinstance(stop.get("arrival"), dict) else None
         if not arrival:
             continue
-        actual_is_real = arrival.get("actual_is_predicted") is False
+        actual_is_real = (arrival.get("actual_is_predicted") is False
+                          and not _clock_time_is_in_future_ist(arrival.get("actual")))
         actual_delay = arrival.get("delay_minutes")
         predicted_delay = stop.get("final_predicted_delay_minutes")
         if not (actual_is_real and actual_delay is not None and predicted_delay is not None):
@@ -7039,7 +7071,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 _mirror_origin_destination_timing(timeline_json)
                 _lock_grounded_station_predictions(timeline_json, locked_station_predictions)
                 _snapshot_prediction_before_arrival(timeline_json, final_predictions_by_station)
-                _sync_station_delay_history(timeline_json, final_predictions_by_station, train_number, date_ddmmyyyy)
+                _sync_station_delay_history(timeline_json, final_predictions_by_station, train_number, date_ddmmyyyy, next_station_code_display)
                 # BUGFIX: reconcile the headline "ML-predicted delay" card
                 # with the Live Tracking timeline's very next reporting
                 # station whenever THAT station's figure is GROUNDED (real

@@ -1253,8 +1253,23 @@ export default function LiveTrackingScreen({ navigation }) {
   // it — or ANY later stop — has a real recorded arrival/departure, the
   // same rule the backend's _stop_really_reached applies to alerts.
   const reallyReachedCodes = (() => {
+    // A genuinely recorded arrival can never be in the future: a provider
+    // "actual" that is really an ETA (20834: VISAKHAPATNAM "14:03" at 12:08,
+    // train still before Annavaram) must not mark every station reached —
+    // that hid the bell on all stations. Times are IST; compare against the
+    // IST clock regardless of the phone's own timezone.
+    const istNowMin = (() => {
+      const d = new Date(Date.now() + 330 * 60000);
+      return d.getUTCHours() * 60 + d.getUTCMinutes();
+    })();
+    const inFuture = (hhmm) => {
+      const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ""));
+      if (!m) return false;
+      const ahead = (((+m[1]) * 60 + (+m[2]) - istNowMin) % 1440 + 1440) % 1440;
+      return ahead > 5 && ahead < 720;
+    };
     const isReal = (st) => st.status === "current" || st.status === "passed"
-      || ["arrival", "departure"].some((k) => st[k] && st[k].actual && st[k].actual_is_predicted === false);
+      || ["arrival", "departure"].some((k) => st[k] && st[k].actual && st[k].actual_is_predicted === false && !inFuture(st[k].actual));
     let lastIdx = -1;
     timeline.forEach((st, i) => { if (st.kind !== "intermediate" && isReal(st)) lastIdx = i; });
     const set = new Set();
