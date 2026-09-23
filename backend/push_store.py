@@ -182,6 +182,11 @@ def unregister_token(token: str) -> None:
         conn.execute("DELETE FROM device_tokens WHERE token = ?", (token,))
 
 
+# Per-device cap on delay watches — generous enough for many trains and
+# many stations per train; only exists to bound a runaway client.
+MAX_WATCHES_PER_DEVICE = 100
+
+
 def replace_watches(token: str, watches: List[dict]) -> None:
     """
     Replace the FULL watch set for one token in a single transaction — the
@@ -207,10 +212,24 @@ def replace_watches(token: str, watches: List[dict]) -> None:
         }
         conn.execute("DELETE FROM watches WHERE token = ?", (token,))
         now = time.time()
-        for w in watches[:8]:
+        # BUGFIX ("notifications only for a single train"): this used to
+        # keep only the FIRST 8 watches in the list — the oldest ones — so
+        # once a device had armed 8 station bells in total, every bell
+        # armed after that (usually on a different train) was silently
+        # dropped and never notified. Now: one row per (train, date,
+        # station) — the latest settings win — and up to MAX_WATCHES_PER_
+        # DEVICE of the NEWEST are kept, so any number of trains/stations
+        # (same or different) work side by side.
+        deduped = {}
+        for w in watches:
             train_number = str(w.get("train_number", "")).strip()
             if not train_number:
                 continue
+            key = (train_number, w.get("date"), (w.get("label") or "").strip().upper() or None)
+            deduped.pop(key, None)
+            deduped[key] = w
+        for w in list(deduped.values())[-MAX_WATCHES_PER_DEVICE:]:
+            train_number = str(w.get("train_number", "")).strip()
             # Preserve last_notified_delay/last_notified_at across a
             # "replace" for a train that was already being watched, so
             # re-saving the same watchlist (e.g. after editing an

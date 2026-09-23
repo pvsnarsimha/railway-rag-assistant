@@ -59,7 +59,18 @@ messaging.onBackgroundMessage((payload) => {
     data: payload.data || {},
     vibrate: [200, 100, 200],
     requireInteraction: true,
-    tag: payload.data?.type || "railway-alert",
+    // One notification slot per train (+ station for station-specific
+    // alerts) — a shared per-type tag made each train's alert REPLACE the
+    // previous train's alert on the device.
+    tag: (function (d) {
+      d = d || {};
+      var type = d.type || "railway-alert";
+      var train = d.train_number ? "-" + d.train_number : "";
+      var st = (type === "smart_alarm" || type === "station_reached") && (d.station || d.predicted_for_station)
+        ? "-" + (d.station || d.predicted_for_station) : "";
+      return type + train + st;
+    })(payload.data),
+    renotify: true,
   });
 });
 

@@ -186,11 +186,18 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
     watches = push_store.list_all_watches_with_tokens()
     checked, breached, pushed, push_failed = 0, 0, 0, 0
     groups = {}
+    # Many users (or one user on several devices) can watch the SAME train
+    # + station — look each (train, date, station) up once per pass and
+    # share the result, instead of one live-status fetch per watch.
+    prediction_cache = {}
 
     for w in watches:
         checked += 1
         try:
-            status, delay, predicted_station, message, actual_time = _resolve_prediction(predict_fn, w)
+            cache_key = (str(w["train_number"]), w.get("date"), (w.get("label") or "").strip().upper())
+            if cache_key not in prediction_cache:
+                prediction_cache[cache_key] = _resolve_prediction(predict_fn, w)
+            status, delay, predicted_station, message, actual_time = prediction_cache[cache_key]
         except Exception as e:  # noqa: BLE001 - one bad watch shouldn't kill the pass
             logger.warning("Prediction failed for watch id=%s train=%s: %s", w["id"], w["train_number"], e)
             continue
@@ -259,6 +266,8 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
         summary_text = None
         if len(items) > 1:
             summary_text = ", ".join(f"{(st or 'next stop').title()} ~{d} min" for _w, d, st in items[:4])
+            if len(items) > 4:
+                summary_text += f" +{len(items) - 4} more"
         result = push_notifications.send_delay_alert(
             token=head_w["token"], train_number=train_number, label=head_w.get("label"),
             predicted_delay_minutes=head_delay, predicted_for_station=head_station,

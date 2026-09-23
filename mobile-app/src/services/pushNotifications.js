@@ -155,18 +155,26 @@ function playSmartAlarmTone() {
 // module top-level: this file is also loaded on native (iOS/Android),
 // where firebase/app + firebase/messaging are never used and shouldn't
 // be forced into the native bundle.
-async function registerForWebPushNotifications() {
+// Set once per page load — onMessage must be attached on EVERY load (not
+// only the first time push was enabled), otherwise a push that arrives
+// while the app is open is silently dropped after a page refresh.
+let webForegroundHandlerAttached = false;
+
+async function registerForWebPushNotifications({ prompt = true } = {}) {
   if (typeof window === "undefined" || !("Notification" in window) || !("serviceWorker" in navigator)) {
     return { token: null, reason: "This browser doesn't support push notifications." };
   }
   try {
-    const permission = await Notification.requestPermission();
+    if (!prompt && Notification.permission !== "granted") {
+      return { token: null, reason: "Notification permission was not granted." };
+    }
+    const permission = prompt ? await Notification.requestPermission() : Notification.permission;
     if (permission !== "granted") {
       return { token: null, reason: "Notification permission was not granted." };
     }
 
     const { initializeApp, getApps, getApp } = await import("firebase/app");
-    const { getMessaging, getToken, deleteToken, onMessage } = await import("firebase/messaging");
+    const { getMessaging, getToken, onMessage } = await import("firebase/messaging");
 
     const app = getApps().length ? getApp() : initializeApp(WEB_FIREBASE_CONFIG);
     const messaging = getMessaging(app);
@@ -176,6 +184,8 @@ async function registerForWebPushNotifications() {
     // onBackgroundMessage (that only fires when the tab is backgrounded
     // or closed) — without this, a push that arrives while you're
     // looking at the app would succeed silently with no visible banner.
+    if (!webForegroundHandlerAttached) {
+    webForegroundHandlerAttached = true;
     onMessage(messaging, (payload) => {
       const title = payload.notification?.title || "Train delay alert";
       const body = payload.notification?.body || "";
@@ -190,12 +200,15 @@ async function registerForWebPushNotifications() {
             icon: NOTIFICATION_ICON,
             vibrate: [200, 100, 200, 100, 200],
             requireInteraction: true,
-            tag: payload.data?.type || "railway-alert",
+            // Per train (and station for station-specific types), so an
+            // alert for one train never replaces another train's alert.
+            tag: notificationTag(payload.data),
             renotify: true,
           });
         } catch (e) { /* ignore */ }
       }
     });
+    }
 
     const registration = await navigator.serviceWorker.register(WEB_SW_PATH);
     // register() resolves once registration is accepted, not once the
@@ -204,13 +217,13 @@ async function registerForWebPushNotifications() {
     // waits for an active worker at this scope, closing that race.
     await navigator.serviceWorker.ready;
 
-    try {
-      // A stale cached token can point at a Push subscription that no
-      // longer exists — delete it first so getToken() mints a fresh one.
-      await deleteToken(messaging);
-    } catch (e) {
-      // Nothing cached to delete — fine.
-    }
+    // BUGFIX (alerts for earlier trains stopped arriving): this used to
+    // call deleteToken() first on every registration, which INVALIDATED
+    // the token every already-saved watch on the server was stored under
+    // — the next push to it failed as "not registered" and the backend
+    // then deleted all of that device's watches. getToken() already
+    // returns the current valid token (or mints a new one only when the
+    // old subscription is really gone), so no delete is needed.
 
     const token = await getToken(messaging, { vapidKey: WEB_VAPID_KEY, serviceWorkerRegistration: registration });
     if (!token) {
@@ -250,6 +263,25 @@ export function configureForegroundNotificationHandler() {
  * Returns: { token: string, platform: "android"|"ios" } on success, or
  *          { token: null, reason: string } on any failure/unavailability.
  */
+// Tag used for a displayed notification: one slot per train (+ station
+// for station-specific alerts), never one shared slot for every train.
+export function notificationTag(data) {
+  const d = data || {};
+  const type = d.type || "railway-alert";
+  const train = d.train_number ? `-${d.train_number}` : "";
+  const station = (type === "smart_alarm" || type === "station_reached") && (d.station || d.predicted_for_station)
+    ? `-${d.station || d.predicted_for_station}` : "";
+  return `${type}${train}${station}`;
+}
+
+// Silent, no-prompt refresh for a device that already granted permission:
+// re-attaches the foreground handler for this page load and returns the
+// CURRENT token (which the browser may have rotated since it was cached).
+export async function refreshWebPushToken() {
+  if (Platform.OS !== "web") return { token: null, reason: "web only" };
+  return registerForWebPushNotifications({ prompt: false });
+}
+
 export async function registerForPushNotifications() {
   if (Platform.OS === "web") {
     return registerForWebPushNotifications();

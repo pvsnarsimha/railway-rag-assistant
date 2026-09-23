@@ -14,7 +14,7 @@ import {
   checkDelayAlerts, checkSmartAlarm, registerPushToken, syncPushWatches, syncAlarmWatches, getAlarmWatches,
 } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
-import { registerForPushNotifications, scheduleLocalAlarm, cancelLocalAlarm } from "../services/pushNotifications";
+import { registerForPushNotifications, refreshWebPushToken, scheduleLocalAlarm, cancelLocalAlarm } from "../services/pushNotifications";
 import { formatDelayDuration } from "../utils/formatDelay";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 
@@ -144,6 +144,20 @@ function computeJourneyLikelyComplete(timelineArr, lastStop) {
 // Blank "Date" field means today: pin it to today's real dd-mm-yyyy (the
 // same format DayPickerModal emits) so a saved alert keeps pointing at
 // the run the user meant even after midnight.
+// Drops delay watches whose run date is more than 2 days in the past —
+// those journeys are over and their alerts can never fire, so they only
+// used to crowd out newly armed bells.
+function pruneExpiredWatches(list) {
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 2);
+  return (list || []).filter((w) => {
+    const m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(String(w.date || ""));
+    if (!m) return true;
+    return new Date(+m[3], +m[2] - 1, +m[1]) >= cutoff;
+  });
+}
+
 function effectiveTrackDate(trackDateInput) {
   const v = (trackDateInput || "").trim();
   if (v) return v;
@@ -689,6 +703,32 @@ export default function LiveTrackingScreen({ navigation }) {
     return { token, platform };
   }, [apiBaseUrl]);
 
+  // BUGFIX (alerts for other trains stopped arriving): once push was on,
+  // the cached token was reused forever — but browsers rotate push tokens,
+  // and the server deletes every watch tied to a token that stops working.
+  // On each page load (only if notifications are already allowed — no
+  // prompt), fetch the CURRENT token, re-register it and re-sync the whole
+  // local watch list, so every armed bell on every train keeps reaching
+  // the server. This also re-attaches the in-page handler that shows a
+  // push arriving while the app is open.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { token, platform } = await refreshWebPushToken();
+        if (cancelled || !token) return;
+        const cached = await AsyncStorage.getItem(PUSH_TOKEN_KEY);
+        try { await registerPushToken(apiBaseUrl, token, platform || "web"); } catch (e) { /* best-effort */ }
+        await AsyncStorage.setItem(PUSH_TOKEN_KEY, token);
+        const raw = await AsyncStorage.getItem(ALERTS_KEY);
+        const list = pruneExpiredWatches(raw ? JSON.parse(raw) : []);
+        await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(list));
+        if (list.length || (cached && cached !== token)) await syncPushWatches(apiBaseUrl, token, list);
+      } catch (e) { /* best-effort — arming a bell still syncs on its own */ }
+    })();
+    return () => { cancelled = true; };
+  }, [apiBaseUrl]);
+
   // Push-token acquisition on web waits on the service worker becoming
   // active, which can hang indefinitely (blocked/failed SW install). Cap
   // it so a stuck save can never leave the alert sheet on "Saving…".
@@ -716,7 +756,7 @@ export default function LiveTrackingScreen({ navigation }) {
     setDelayWatchStatusState((prev) => (prev && prev.key === key ? null : prev));
     try {
       const raw = await AsyncStorage.getItem(ALERTS_KEY);
-      const existing = raw ? JSON.parse(raw) : [];
+      const existing = pruneExpiredWatches(raw ? JSON.parse(raw) : []);
       const merged = existing.filter((w) => !(
         String(w.trainNumber) === num
         && (w.date || null) === dateVal

@@ -4930,7 +4930,7 @@ class AlertsCheckRequest(BaseModel):
 @app.post("/api/advanced/alerts/check")
 def api_alerts_check(req: AlertsCheckRequest):
     out = []
-    for w in req.watches[:8]:
+    for w in req.watches[:push_store.MAX_WATCHES_PER_DEVICE]:
         row = {"train_number": w.train_number, "label": w.label, "threshold_minutes": w.threshold_minutes}
         try:
             # FEATURE: label-aware — w.label is resolved against the
@@ -5032,7 +5032,7 @@ def api_push_sync_watches(req: SyncWatchesRequest):
     token = req.token.strip()
     push_store.register_token(token)
     push_store.replace_watches(token, [w.dict() for w in req.watches])
-    return {"ok": True, "watch_count": len(req.watches[:8])}
+    return {"ok": True, "watch_count": len(push_store.list_watches_for_token(token))}
 
 
 @app.get("/api/push/debug-watches")
