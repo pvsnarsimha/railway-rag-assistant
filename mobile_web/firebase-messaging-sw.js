@@ -42,23 +42,35 @@ const messaging = firebase.messaging();
 // CAVEAT in the legacy frontend/firebase-messaging-sw.js: Firebase's SDK
 // can auto-display a `notification`-payload push without ever calling
 // this handler — that's normal, not a sign this file isn't working.
+// SMS-style presentation: notification-icon.png lives in mobile-app/public/
+// (a straight copy of assets/icon.png), which Expo's web export copies
+// verbatim to the export root — unlike an asset pulled in via require(),
+// that gives it a stable, guaranteed path once this SW is actually
+// running (mobile_web/notification-icon.png, served at
+// /mobile-app/notification-icon.png), so it's now safe to reference here.
+const NOTIFICATION_ICON = "/mobile-app/notification-icon.png";
+
 messaging.onBackgroundMessage((payload) => {
   const title = payload.notification?.title || "Train delay alert";
   const body = payload.notification?.body || "";
-  // No bundled icon path is guaranteed to survive the Expo web export
-  // unchanged, so this intentionally omits `icon` rather than risk a
-  // 404'd image — the browser falls back to a sane default. `vibrate` +
-  // `requireInteraction` make it behave more like a normal SMS/alert
-  // notification on Android (buzzes, and stays up instead of
-  // auto-dismissing after a couple seconds) — the actual sound itself is
-  // the phone's own default notification sound, which Android/Chrome
-  // plays automatically for a background push; there's no way for a
-  // web page to pick a custom sound the way a native app can.
+  // `vibrate` + `requireInteraction` make it behave more like a normal
+  // SMS/alert notification on Android (buzzes, and stays up instead of
+  // auto-dismissing after a couple seconds). `renotify` (paired with a
+  // stable `tag`) means a SECOND alert for the same watch — e.g. the
+  // predicted delay moved — buzzes/re-alerts again instead of silently
+  // swapping the text on an already-dismissed notification. `silent` is
+  // left at its default (false): the phone's own default notification
+  // sound still plays — there's no web API for a page to pick a custom
+  // ringtone file the way a native app can bind one to a channel.
   self.registration.showNotification(title, {
     body,
+    icon: NOTIFICATION_ICON,
+    badge: NOTIFICATION_ICON,
     data: payload.data || {},
-    vibrate: [200, 100, 200],
+    vibrate: [200, 100, 200, 100, 200],
     requireInteraction: true,
+    renotify: true,
+    silent: false,
     tag: payload.data?.type || "railway-alert",
   });
 });

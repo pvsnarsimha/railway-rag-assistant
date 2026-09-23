@@ -7,7 +7,7 @@ import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
 import DayPickerModal from "../components/DayPickerModal";
-import DelayAlertModal from "../components/Delayalertmodal";
+import DelayAlertModal from "../components/DelayAlertModal";
 import { useSettings } from "../context/SettingsContext";
 import {
   buildTrackingWsUrl, saveTripSummary, buildTrackShareUrl, buildTripShareUrl, sendFeedback,
