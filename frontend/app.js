@@ -4213,6 +4213,8 @@ if (!alreadySeenTour) {
         badge = `<span class="result-tag" title="${escapeHtml(row.message || "")}">station not on route</span>`;
       } else if (row.station_status === "already_reached") {
         badge = `<span class="tools-badge is-yes">already at ${escapeHtml(row.already_reached_at || "—")}</span>`;
+      } else if (row.station_status === "journey_completed") {
+        badge = `<span class="result-tag" title="${escapeHtml(row.message || "")}">journey completed</span>`;
       } else if (row.predicted_delay_minutes == null) {
         badge = `<span class="result-tag">no prediction yet</span>`;
       } else {

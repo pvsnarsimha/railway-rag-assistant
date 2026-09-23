@@ -196,7 +196,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
         # a watch whose label doesn't match a real station on this train's
         # route gets no notification at all (not a delay, just an invalid
         # watch) — same for "unavailable" (no live data to go on yet).
-        if status in ("not_on_route", "unavailable"):
+        if status in ("not_on_route", "unavailable", "journey_completed"):
             continue
         if status == "already_reached":
             breached += 1

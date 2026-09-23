@@ -752,6 +752,20 @@ def _fetch_timeline_with_predictions(train_number: str, date: Optional[str], tra
     return timeline_json, position
 
 
+def _stop_really_reached(stop: dict) -> bool:
+    """True when a stop has genuinely been reached: RailKit marks it
+    current/passed, OR either event carries a real recorded actual
+    (actual_is_predicted=False — RailKit's own or RailRadar's confirmed
+    value, never this app's own predicted stand-in)."""
+    if stop.get("status") in ("current", "passed"):
+        return True
+    for key in ("arrival", "departure"):
+        ev = stop.get(key)
+        if isinstance(ev, dict) and ev.get("actual") and ev.get("actual_is_predicted") is False:
+            return True
+    return False
+
+
 def _predict_for_watch_station(train_number: str, date: Optional[str], label: Optional[str] = None,
                                 travel_class: Optional[str] = None) -> dict:
     """
@@ -839,12 +853,63 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
     )
     _mirror_origin_destination_timing(timeline_json)
 
+    # BUGFIX (train 20833, watch with no label): RailKit's own per-stop
+    # `status` can stay "upcoming" long after a station has really been
+    # reached — RailRadar confirms the real arrival first (the pass above
+    # flags it actual_is_predicted=False) and RailKit sometimes never flips
+    # it at all. Picking "the first stop whose status says upcoming" then
+    # latched onto KHAMMAM and kept pushing a stale "~13 min late" for it
+    # even after the train had actually terminated at SECUNDERABAD (+28).
+    # Reached-ness is now decided from real evidence, and is monotonic: if
+    # a LATER reporting stop is really reached, every earlier one is too.
+    reporting = [s for s in timeline_json if s.get("kind") != "intermediate"]
+    last_reached_idx = -1
+    for i, s in enumerate(reporting):
+        if _stop_really_reached(s):
+            last_reached_idx = i
+
+    if matched is not None:
+        matched_idx = next((i for i, s in enumerate(reporting) if s is matched), None)
+        if matched_idx is None and matched.get("kind") == "intermediate":
+            # Intermediate point: reached if any reporting stop after it is.
+            try:
+                pos = timeline_json.index(matched)
+                later_reached = any(
+                    _stop_really_reached(s) for s in timeline_json[pos + 1:] if s.get("kind") != "intermediate"
+                )
+            except ValueError:
+                later_reached = False
+            is_reached = later_reached or _stop_really_reached(matched)
+        else:
+            is_reached = matched_idx is not None and matched_idx <= last_reached_idx
+        if is_reached:
+            timing = matched.get("arrival") or matched.get("departure") or {}
+            actual_time = timing.get("actual") or timing.get("expected") or timing.get("scheduled")
+            return {
+                "status": "already_reached", "delay_minutes": timing.get("delay_minutes"),
+                "station": matched.get("name"), "actual_time": actual_time,
+                "message": (
+                    f"{matched.get('name')} is already reached"
+                    + (f" (at {actual_time})" if actual_time else "") + "."
+                ),
+            }
+
     target = matched
     if target is None:
-        target = next(
-            (s for s in timeline_json if s.get("status") == "upcoming" and s.get("kind") != "intermediate"),
-            None,
-        )
+        remaining = reporting[last_reached_idx + 1:]
+        if reporting and not remaining:
+            dest = reporting[-1]
+            timing = dest.get("arrival") or {}
+            actual_time = timing.get("actual") or timing.get("expected")
+            return {
+                "status": "journey_completed", "delay_minutes": None,
+                "station": dest.get("name"), "actual_time": actual_time,
+                "message": (
+                    f"Train {train_number} has completed its journey at {dest.get('name')}"
+                    + (f" ({actual_time})" if actual_time else "") + " — nothing left to predict."
+                ),
+            }
+        target = next((s for s in remaining if s.get("status") == "upcoming"), None) or (remaining[0] if remaining else None)
     if target is None or target.get("predicted_delay_minutes") is None:
         return {"status": "unavailable", "delay_minutes": None, "station": target.get("name") if target else None,
                 "message": f"No upcoming reporting station left to predict for train {train_number}."}
@@ -3621,7 +3686,7 @@ def api_delay_predict(req: DelayPredictRequest):
         return {
             "predicted_delay_minutes": result.get("delay_minutes"),
             "confidence": result.get("confidence"),
-            "station_status": result["status"],       # "not_on_route" | "already_reached" | "predicted" | "unavailable"
+            "station_status": result["status"],       # "not_on_route" | "already_reached" | "predicted" | "unavailable" | "journey_completed"
             "station": result.get("station"),
             "already_reached_at": result.get("actual_time"),
             "predicted_eta": result.get("predicted_eta"),
