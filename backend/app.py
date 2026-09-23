@@ -4979,6 +4979,25 @@ def api_push_sync_watches(req: SyncWatchesRequest):
     return {"ok": True, "watch_count": len(req.watches[:8])}
 
 
+@app.get("/api/push/debug-watches")
+def api_push_debug_watches():
+    """Diagnostics: every stored delay watch across all devices, with its
+    repeat cadence and when it last pushed — to see WHY a device is being
+    notified as often as it is. Tokens are truncated, never returned whole."""
+    now = time.time()
+    rows = []
+    for w in push_store.list_all_watches_with_tokens():
+        last = w.get("last_notified_at")
+        rows.append({
+            "id": w.get("id"), "device": "…" + str(w.get("token") or "")[-6:],
+            "train_number": w.get("train_number"), "date": w.get("date"), "label": w.get("label"),
+            "threshold_minutes": w.get("threshold_minutes"), "repeat_minutes": w.get("repeat_minutes"),
+            "last_notified_delay": w.get("last_notified_delay"),
+            "last_push_minutes_ago": round((now - last) / 60, 1) if last else None,
+        })
+    return {"server_build": "grouped-alerts-v2", "watch_count": len(rows), "watches": rows}
+
+
 @app.get("/api/push/status")
 def api_push_status():
     """Diagnostics: whether Firebase is configured + how many devices/watches are registered."""

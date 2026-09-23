@@ -203,10 +203,13 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
         # having to guess between "scheduler isn't finding this watch",
         # "prediction disagrees with what Live Tracking shows", and "it's
         # genuinely under threshold".
+        _last = w.get("last_notified_at")
         logger.info(
-            "watch id=%s train=%s date=%s label=%s -> status=%s delay=%s threshold=%s station=%s",
-            w["id"], w["train_number"], w.get("date"), w.get("label"),
-            status, delay, w["threshold_minutes"], predicted_station,
+            "watch id=%s token=…%s train=%s date=%s label=%s -> status=%s delay=%s threshold=%s repeat=%s "
+            "last_push=%s station=%s",
+            w["id"], str(w.get("token") or "")[-6:], w["train_number"], w.get("date"), w.get("label"),
+            status, delay, w["threshold_minutes"], w.get("repeat_minutes"),
+            (f"{round((time.time() - _last) / 60, 1)}min ago" if _last else "never"), predicted_station,
         )
 
         # LABEL-AWARE OUTCOMES (see app.py's _predict_for_watch_station):
@@ -222,6 +225,8 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
                 continue  # already told this device this station was reached
             result = _push_station_status(w, predicted_station, message or "", actual_time)
             if result["sent"]:
+                logger.info("PUSH sent (already reached, one-time) watch id=%s train=%s station=%s",
+                            w["id"], w["train_number"], predicted_station)
                 pushed += 1
             else:
                 push_failed += 1
