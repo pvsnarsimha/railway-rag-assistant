@@ -1328,8 +1328,37 @@ export default function LiveTrackingScreen({ navigation }) {
       const ahead = (((+m[1]) * 60 + (+m[2]) - istNowMin) % 1440 + 1440) % 1440;
       return ahead > 5 && ahead < 720;
     };
+    // BUGFIX (12797 running normally, yet NO bell on any upcoming station):
+    // a daily train has overlapping runs, and the providers can hand back
+    // the PREVIOUS run's recorded arrivals for stations today's run hasn't
+    // reached yet. One such row far down the route marked every earlier
+    // station reached and hid all the bells. A train can't arrive 90+ min
+    // before its own schedule, so an "actual" on a stop whose schedule for
+    // THIS run is still that far ahead belongs to another run — ignored.
+    const notYetPossible = (st) => {
+      const nowMs = Date.now();
+      const times = [];
+      ["arrival", "departure"].forEach((k) => {
+        const t = st[k];
+        if (!t) return;
+        [t.scheduled, t.expected].forEach((raw) => { const d = parseRailTimestamp(raw); if (d) times.push(d.getTime()); });
+      });
+      if (!times.length) {
+        // Undated provider strings: place the scheduled clock time on this
+        // run's own day (journey start + the stop's day number).
+        const raw = (st.arrival && st.arrival.scheduled) || (st.departure && st.departure.scheduled) || "";
+        const m = /^(\d{1,2}):(\d{2})/.exec(String(raw));
+        if (!m || !journeyStartDate) return false;
+        const d = new Date(journeyStartDate);
+        d.setHours(+m[1], +m[2], 0, 0);
+        d.setDate(d.getDate() + journeyDayNumber(st) - 1);
+        times.push(d.getTime());
+      }
+      return Math.min(...times) - nowMs > 90 * 60000;
+    };
     const isReal = (st) => st.status === "current" || st.status === "passed"
-      || ["arrival", "departure"].some((k) => st[k] && st[k].actual && st[k].actual_is_predicted === false && !inFuture(st[k].actual));
+      || (!notYetPossible(st)
+        && ["arrival", "departure"].some((k) => st[k] && st[k].actual && st[k].actual_is_predicted === false && !inFuture(st[k].actual)));
     let lastIdx = -1;
     timeline.forEach((st, i) => { if (st.kind !== "intermediate" && isReal(st)) lastIdx = i; });
     const set = new Set();

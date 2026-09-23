@@ -762,9 +762,60 @@ def _stop_really_reached(stop: dict) -> bool:
     for key in ("arrival", "departure"):
         ev = stop.get(key)
         if (isinstance(ev, dict) and ev.get("actual") and ev.get("actual_is_predicted") is False
-                and not _clock_time_is_in_future_ist(ev.get("actual"))):
+                and not _clock_time_is_in_future_ist(ev.get("actual"))
+                and not _event_not_yet_possible(ev)):
             return True
     return False
+
+
+_RAIL_TS_RE = re.compile(r"(\d{1,2}):(\d{2})\s+(\d{1,2})-([A-Za-z]{3})")
+_RAIL_MONTHS = {m: i + 1 for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
+
+
+def _now_ist_naive() -> datetime:
+    return (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).replace(tzinfo=None)
+
+
+def _rail_timestamp_ist(value: Optional[str]) -> Optional[datetime]:
+    """RailKit's dated "HH:MM DD-Mon" string -> naive IST datetime, or None
+    when the string carries no date (never a guess)."""
+    m = _RAIL_TS_RE.search(str(value or ""))
+    if not m:
+        return None
+    month = _RAIL_MONTHS.get(m.group(4).capitalize())
+    if not month:
+        return None
+    now = _now_ist_naive()
+    try:
+        dt = datetime(now.year, month, int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    except ValueError:
+        return None
+    if (dt - now).days > 200:
+        dt = dt.replace(year=dt.year - 1)
+    elif (now - dt).days > 200:
+        dt = dt.replace(year=dt.year + 1)
+    return dt
+
+
+def _event_not_yet_possible(event: dict, slack_minutes: int = 90) -> bool:
+    """True when THIS run can't possibly have reached this event yet: its
+    own dated scheduled/expected time (RailKit's, for the run being
+    tracked) is still more than `slack_minutes` in the future.
+    BUGFIX (bell hidden on every upcoming station of 12797 while it was
+    genuinely running): a daily train has overlapping runs, and RailRadar
+    (or RailKit itself) can hand back the PREVIOUS run's recorded arrivals
+    for stations today's run hasn't reached yet — same station codes,
+    plausible clock times. Taken as "real", one such row far down the
+    route marked every earlier station reached, which hid all delay-alert
+    bells and silenced their alerts. A train can't arrive hours before its
+    own schedule, so an "actual" on such an event belongs to another run."""
+    if not isinstance(event, dict):
+        return False
+    times = [t for t in (_rail_timestamp_ist(event.get("scheduled")), _rail_timestamp_ist(event.get("expected"))) if t]
+    if not times:
+        return False
+    return (min(times) - _now_ist_naive()) > timedelta(minutes=slack_minutes)
 
 
 def _clock_time_is_in_future_ist(hhmm: Optional[str], slack_minutes: int = 5) -> bool:
@@ -1895,6 +1946,11 @@ def _predict_delay_per_reporting_station(
             # day-rollover-safe arithmetic as the predicted path below.
             rr_event = getattr(rr_stop, event_key, None) if rr_stop is not None else None
             rr_actual = getattr(rr_event, "actual", None) if rr_event is not None else None
+            # A RailRadar "actual" for an event THIS run can't have reached
+            # yet is the previous run's record — ignore it (see
+            # _event_not_yet_possible) and fall through to the prediction.
+            if rr_actual and _event_not_yet_possible(event):
+                rr_actual = None
             if rr_actual:
                 event["actual"] = rr_actual
                 rr_delay = getattr(rr_event, "delay_minutes", None)
