@@ -4852,8 +4852,18 @@ def api_push_sync_watches(req: SyncWatchesRequest):
     """Called whenever the frontend's local alert watchlist changes, so the
     background scheduler's copy stays in sync. Token must already be
     registered via /api/push/register-token (that call and this one
-    happen together from the frontend, see app.js)."""
-    push_store.replace_watches(req.token.strip(), [w.dict() for w in req.watches])
+    happen together from the frontend, see app.js) — but that first call
+    is a separate request the client makes best-effort and can silently
+    fail (a slow Render cold start, a dropped connection). Re-registering
+    here too is cheap and idempotent (push_store.register_token is an
+    upsert) and self-heals exactly that case: a watch saved under a token
+    that never actually made it into device_tokens, which the scheduler
+    would otherwise try to push to forever with nothing to show for it.
+    See push_store.stats()'s registered_devices vs active_watches for how
+    this shows up when it happens."""
+    token = req.token.strip()
+    push_store.register_token(token)
+    push_store.replace_watches(token, [w.dict() for w in req.watches])
     return {"ok": True, "watch_count": len(req.watches[:8])}
 
 
@@ -4895,8 +4905,11 @@ def api_push_sync_fare_watches(req: SyncFareWatchesRequest):
     """Called whenever the frontend's local fare-watchlist changes (e.g. the
     'Watch This Route' button in Fare Heatmap), so the background
     scheduler's copy stays in sync. Token must already be registered via
-    /api/push/register-token."""
-    push_store.replace_fare_watches(req.token.strip(), [w.dict() for w in req.watches])
+    /api/push/register-token — self-healed here too, same reasoning as
+    api_push_sync_watches above."""
+    token = req.token.strip()
+    push_store.register_token(token)
+    push_store.replace_fare_watches(token, [w.dict() for w in req.watches])
     return {"ok": True, "watch_count": len(req.watches[:8])}
 
 
@@ -4987,8 +5000,11 @@ class SyncAlarmWatchesRequest(BaseModel):
 def api_push_sync_alarms(req: SyncAlarmWatchesRequest):
     """Called whenever the frontend's local Smart Alarm arm/disarm state
     changes, so the background scheduler's copy stays in sync. Token must
-    already be registered via /api/push/register-token."""
-    push_store.replace_alarm_watches(req.token.strip(), [w.dict() for w in req.watches])
+    already be registered via /api/push/register-token — self-healed here
+    too, same reasoning as api_push_sync_watches above."""
+    token = req.token.strip()
+    push_store.register_token(token)
+    push_store.replace_alarm_watches(token, [w.dict() for w in req.watches])
     return {"ok": True, "watch_count": len(req.watches[:8])}
 
 
