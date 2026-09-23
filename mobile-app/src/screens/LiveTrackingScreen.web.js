@@ -7,6 +7,7 @@ import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
 import DayPickerModal from "../components/DayPickerModal";
+import DelayAlertModal from "../components/Delayalertmodal";
 import { useSettings } from "../context/SettingsContext";
 import {
   buildTrackingWsUrl, saveTripSummary, buildTrackShareUrl, buildTripShareUrl, sendFeedback,
@@ -593,10 +594,12 @@ export default function LiveTrackingScreen({ navigation }) {
   // FEATURE: Delay Alert — on-screen, one tap, reusing trainNumber/trackDate
   // already entered above instead of asking for them a second time.
   const [delayThreshold, setDelayThreshold] = useState("15");
+  const [delayRepeatMinutes, setDelayRepeatMinutes] = useState("15");
   const [delayWatchActive, setDelayWatchActive] = useState(false);
   const [delayWatchBusy, setDelayWatchBusy] = useState(false);
   const [delayWatchStatus, setDelayWatchStatus] = useState(null); // { ok, message } | null
   const [delayWatchResult, setDelayWatchResult] = useState(null);
+  const [delayModalVisible, setDelayModalVisible] = useState(false);
 
   // FEATURE: Smart Alarm — same station-arrival wake-up as
   // MoreToolsScreen.js's SmartAlarmTool / the native TrackedTrainCard.js,
@@ -623,7 +626,10 @@ export default function LiveTrackingScreen({ navigation }) {
       const mine = existing.find((w) => String(w.trainNumber) === trainNumber.trim() && (w.date || null) === (trackDate.trim() || null));
       if (cancelled) return;
       setDelayWatchActive(!!mine);
-      if (mine) setDelayThreshold(String(mine.threshold));
+      if (mine) {
+        setDelayThreshold(String(mine.threshold));
+        setDelayRepeatMinutes(String(mine.repeatMinutes || mine.threshold || 15));
+      }
     })();
     return () => { cancelled = true; };
   }, [trainNumber, trackDate]);
@@ -650,16 +656,21 @@ export default function LiveTrackingScreen({ navigation }) {
   // TrackedTrainCard.js's alarm-watch merge for the same reason).
   const watchThisTrainForDelay = useCallback(async (opts) => {
     const num = String((opts && opts.trainNumber) || trainNumber).trim();
-    if (!num) { setDelayWatchStatus({ ok: false, message: "Start tracking a train first." }); return; }
+    if (!num) { setDelayWatchStatus({ ok: false, message: "Enter a train number first." }); return { ok: false }; }
     setDelayWatchBusy(true);
     setDelayWatchStatus(null);
     try {
       const dateVal = trackDate.trim() || null;
-      const threshold = parseInt(delayThreshold, 10) || 15;
+      // Explicit opts (from the Delay Alert sheet — see DelayAlertModal /
+      // the bell icon below) win over whatever's already in state, since
+      // the sheet's own confirm handler passes the just-picked values in
+      // the SAME call rather than relying on a setState landing in time.
+      const threshold = (opts && opts.threshold) || parseInt(delayThreshold, 10) || 15;
+      const repeatMinutes = (opts && opts.repeatMinutes) || parseInt(delayRepeatMinutes, 10) || 15;
       const raw = await AsyncStorage.getItem(ALERTS_KEY);
       const existing = raw ? JSON.parse(raw) : [];
       const merged = existing.filter((w) => !(String(w.trainNumber) === num && (w.date || null) === dateVal));
-      merged.push({ trainNumber: num, date: dateVal, label: null, threshold });
+      merged.push({ trainNumber: num, date: dateVal, label: null, threshold, repeatMinutes });
       await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(merged));
 
       const checked = await checkDelayAlerts(apiBaseUrl, merged.map((w) => ({
@@ -673,35 +684,31 @@ export default function LiveTrackingScreen({ navigation }) {
       setDelayWatchActive(true);
       if (!token) {
         setDelayWatchStatus({ ok: false, message: reason || "Checking on refresh only — background push isn't available on this device/browser." });
-        return;
+        // Still a "success" from the sheet's point of view — the watch is
+        // saved and will check on refresh; there's just no background push
+        // on this device/browser. Closing here (rather than leaving the
+        // sheet stuck open) matches that: the user can reopen it anytime
+        // to see this same message via statusMessage.
+        return { ok: true };
       }
       await syncPushWatches(apiBaseUrl, token, merged);
-      setDelayWatchStatus({ ok: true, message: `Watching — you'll get a push if this train is delayed ≥ ${threshold} min, even with the app closed.` });
+      setDelayWatchStatus({ ok: true, message: `Watching — you'll get a push every ~${repeatMinutes} min while this train is delayed ≥ ${threshold} min, even with the app closed.` });
+      return { ok: true };
     } catch (e) {
       setDelayWatchStatus({ ok: false, message: describeApiError(e) });
+      return { ok: false };
     } finally {
       setDelayWatchBusy(false);
     }
-  }, [apiBaseUrl, trainNumber, trackDate, delayThreshold, getOrCreatePushToken]);
+  }, [apiBaseUrl, trainNumber, trackDate, delayThreshold, delayRepeatMinutes, getOrCreatePushToken]);
 
-  // AUTO-ENABLE (per explicit request: Delay Alerts should register for
-  // background push automatically, with no manual "Watch this train" tap
-  // required first). Fires once per train+date the moment real tracking
-  // data first arrives for it. autoTriedRef — not just delayWatchActive —
-  // is what stops this from re-arming on every ~5s payload update AND
-  // from re-arming right behind the user's back the moment they tap "Stop
-  // watching": once a key's been tried this mount, it's never retried,
-  // whether that attempt turned the watch on or the user turned it back off.
-  const autoTriedRef = useRef(new Set());
-  const connectedTrainNumber = payload?.train_number ? String(payload.train_number).trim() : "";
-  const hasPayload = !!payload;
-  useEffect(() => {
-    if (!hasPayload || !connectedTrainNumber) return;
-    const key = `${connectedTrainNumber}|${trackDate.trim() || ""}`;
-    if (delayWatchActive || autoTriedRef.current.has(key)) return;
-    autoTriedRef.current.add(key);
-    watchThisTrainForDelay({ trainNumber: connectedTrainNumber });
-  }, [hasPayload, connectedTrainNumber, trackDate, delayWatchActive, watchThisTrainForDelay]);
+  // REPLACED: this used to auto-arm a Delay Alert silently the instant a
+  // train connected (fixed 15-min threshold, no repeat control, no user
+  // action). Per explicit request, Delay Alerts are now opt-in only, via
+  // the bell icon below (see delayModalVisible + DelayAlertModal), which
+  // also lets the user pick the repeat cadence, not just the threshold.
+  // A watch is only ever created from that sheet's confirm handler
+  // (openDelayAlertConfirm below) now.
 
   const stopWatchingDelay = useCallback(async () => {
     const num = trainNumber.trim();
@@ -722,6 +729,23 @@ export default function LiveTrackingScreen({ navigation }) {
       setDelayWatchBusy(false);
     }
   }, [apiBaseUrl, trainNumber, trackDate]);
+
+  // Confirm handler for DelayAlertModal — the ONLY place a delay watch
+  // gets created now. Sets state so the rest of the screen (and the sheet,
+  // next time it's opened) reflects the just-picked values, then arms the
+  // watch with those same values passed explicitly so there's no race
+  // with React batching the setState calls above.
+  const confirmDelayAlert = useCallback((thresholdVal, repeatVal) => {
+    setDelayThreshold(String(thresholdVal));
+    setDelayRepeatMinutes(String(repeatVal));
+    watchThisTrainForDelay({ threshold: thresholdVal, repeatMinutes: repeatVal }).then((result) => {
+      if (result && result.ok) setDelayModalVisible(false);
+      // On failure the sheet stays open with delayWatchStatus's error
+      // message showing (see statusMessage on DelayAlertModal below), so
+      // the user can see what went wrong and try again without re-picking
+      // everything.
+    });
+  }, [watchThisTrainForDelay]);
 
   const setSmartAlarm = useCallback(async () => {
     const num = trainNumber.trim();
@@ -1372,42 +1396,19 @@ export default function LiveTrackingScreen({ navigation }) {
         )}
       </SectionCard>
 
-      {/* FEATURE: Delay Alert + Smart Alarm, right on Live Tracking (moved
-          off the separate More Tools menu — see the top-of-file comment).
-          Both only show once a train is actually being tracked; watching a
-          train or arming an alarm before that point doesn't mean anything. */}
-      {payload && (
-        <SectionCard title="🔔 Delay Alert" subtitle="Turns on automatically for this train — you'll get a push the moment it's delayed past your threshold, even with the app closed.">
-          <View style={styles.row}>
-            <LabeledInput
-              label="Alert if delay ≥ (min)" value={delayThreshold} onChangeText={setDelayThreshold}
-              keyboardType="number-pad" editable={!delayWatchActive} style={styles.half}
-            />
-            <View style={styles.half}>
-              <Text style={styles.fieldLabel}> </Text>
-              <PrimaryButton
-                title={delayWatchActive ? "Stop watching" : "Watch this train"}
-                onPress={delayWatchActive ? stopWatchingDelay : () => watchThisTrainForDelay()}
-                loading={delayWatchBusy}
-                variant={delayWatchActive ? "secondary" : "primary"}
-              />
-            </View>
-          </View>
-          {delayWatchResult && (
-            <Text style={[styles.resultLine, delayWatchResult.breached && styles.dangerText]}>
-              {delayWatchResult.error
-                ? "check failed"
-                : delayWatchResult.predicted_delay_minutes == null
-                  ? "no prediction yet"
-                  : `${delayWatchResult.breached ? "⚠ " : ""}+${formatDelayDuration(delayWatchResult.predicted_delay_minutes)}${delayWatchResult.breached ? " — threshold breached" : ""}`}
-            </Text>
-          )}
-          {delayWatchStatus && (
-            <Text style={[styles.webNoticeText, !delayWatchStatus.ok && styles.errorText]}>{delayWatchStatus.message}</Text>
-          )}
-        </SectionCard>
-      )}
+      {/* FEATURE: Delay Alert — moved off this inline card onto the bell
+          icon + DelayAlertModal sheet (see near the end of this component's
+          JSX, and confirmDelayAlert above). Arming no longer requires a
+          live connection, so it isn't gated on `payload` any more — it
+          uses whatever train number + date is in the form above, same as
+          the sheet itself. delayWatchResult/delayWatchStatus are set here
+          same as before and surfaced inside the sheet (statusMessage) —
+          they just no longer render as their own standalone card. */}
 
+      {/* FEATURE: Smart Alarm, right on Live Tracking (moved off the
+          separate More Tools menu — see the top-of-file comment). Only
+          shows once a train is actually being tracked; arming an alarm
+          before that point doesn't mean anything. */}
       {payload && (
         <SectionCard title="⏰ Smart Alarm" subtitle="Wake-up alert as this train nears a station you pick — rings even if you close the app.">
           <LabeledInput label="Destination station code" value={alarmStation} onChangeText={setAlarmStation} autoCapitalize="characters" editable={!alarmArmed} />
@@ -1737,6 +1738,34 @@ export default function LiveTrackingScreen({ navigation }) {
       selected={trackDate}
       onSelect={setTrackDate}
       onClose={() => setDayPickerVisible(false)}
+    />
+
+    {/* FEATURE: Delay Alert bell — the only entry point for arming/editing
+        a delay watch now (see confirmDelayAlert above). Floats above the
+        content so it's reachable while scrolling; sits above showBottomBar
+        when that bar is showing so the two never overlap. Shows a small
+        dot while a watch is active for this train+date so the state is
+        visible without opening the sheet. */}
+    <TouchableOpacity
+      style={[styles.delayFab, showBottomBar && styles.delayFabAboveBar]}
+      onPress={() => setDelayModalVisible(true)}
+      activeOpacity={0.85}
+    >
+      <Ionicons name="notifications" size={22} color="#fff" />
+      {delayWatchActive && <View style={styles.delayFabDot} />}
+    </TouchableOpacity>
+    <DelayAlertModal
+      visible={delayModalVisible}
+      onClose={() => setDelayModalVisible(false)}
+      trainNumber={trainNumber}
+      trackDate={trackDate.trim()}
+      active={delayWatchActive}
+      busy={delayWatchBusy}
+      initialThreshold={delayThreshold}
+      initialRepeat={delayRepeatMinutes}
+      statusMessage={delayWatchStatus ? delayWatchStatus.message : null}
+      onConfirm={confirmDelayAlert}
+      onStop={() => { stopWatchingDelay(); setDelayModalVisible(false); }}
     />
     </View>
   );
@@ -2426,4 +2455,35 @@ const styles = StyleSheet.create({
   alarmChipText: { fontSize: 13, fontWeight: "600", color: colors.text },
   alarmChipTextActive: { color: "#fff" },
   removeAlarmText: { fontSize: 12.5, fontWeight: "600", color: colors.danger, textAlign: "center" },
+
+  // Delay Alert bell FAB (replaces the old inline card — see the JSX note
+  // near confirmDelayAlert / DelayAlertModal).
+  delayFab: {
+    position: "absolute",
+    right: spacing.lg,
+    bottom: spacing.lg,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: colors.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
+  delayFabAboveBar: { bottom: 78 },
+  delayFabDot: {
+    position: "absolute",
+    top: 6,
+    right: 6,
+    width: 11,
+    height: 11,
+    borderRadius: 6,
+    backgroundColor: colors.success,
+    borderWidth: 2,
+    borderColor: colors.primary,
+  },
 });

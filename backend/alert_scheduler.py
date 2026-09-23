@@ -18,13 +18,21 @@ use. One prediction pipeline, three ways of triggering it (on-demand
 single call, on-demand batch, background batch) — never a second,
 diverging implementation of "what counts as delayed".
 
-NOTIFICATION DEDUPING: a watch only gets pushed again if the predicted
-delay has INCREASED since the last push sent for it (tracked in
-push_store's last_notified_delay), not on every single tick it stays
-breached — otherwise someone watching a 20-minutes-late train would get
-a new notification every 15 minutes for the entire journey. Falling
-delay, or delay dropping back under threshold, resets nothing by itself
-(next re-breach at a higher number than before will still notify).
+NOTIFICATION DEDUPING: each watch carries its OWN repeat cadence
+(push_store's repeat_minutes column, set from DelayAlertModal's "Repeat
+the alert every" picker on Live Tracking — see LiveTrackingScreen.web.js).
+A breached watch re-pushes once at least repeat_minutes has elapsed since
+the last push sent for it (push_store's last_notified_at), not on every
+single scheduler tick — otherwise someone on a 10-minute repeat setting
+would get a new notification every ALERT_CHECK_INTERVAL_MINUTES instead
+of every 10 minutes as they actually asked for. This has gone through two
+earlier designs, in case either needs restoring: "only re-notify if the
+delay INCREASED" (too quiet — a steady delay never re-alerted) and later
+"push on every tick regardless" (too spammy, and not user-controllable).
+The time-based gate below replaces both. Falling delay, or delay dropping
+back under threshold, resets nothing by itself (the next re-breach just
+follows the same repeat_minutes cadence from wherever last_notified_at
+was left).
 
 HOSTING CAVEAT (stated plainly, not glossed over): this only fires while
 the backend process is actually running. A serverless/scale-to-zero host
@@ -35,6 +43,7 @@ platform. See README.md.
 """
 
 import logging
+import time
 from typing import Callable, Optional
 
 import push_notifications
@@ -205,17 +214,17 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
             continue
         breached += 1
 
-        # NOTE: this used to skip re-sending unless the delay got WORSE than
-        # the last notification, to avoid an identical alert every tick for
-        # as long as a train stayed delayed. Per explicit request, that gate
-        # is now removed — every tick a watch is breached, it pushes again,
-        # for as long as ALERT_CHECK_INTERVAL_MINUTES keeps firing. This is
-        # intentionally more frequent/spammier than before; if that turns
-        # out to be too noisy in practice, the old "only on increase" gate
-        # is just these three lines, easy to restore:
-        #   last_notified = w.get("last_notified_delay")
-        #   if last_notified is not None and delay <= last_notified:
-        #       continue
+        # FEATURE: per-watch repeat cadence (see module docstring above).
+        # last_notified_at is None the first time this watch breaches, so
+        # it always pushes right away then; after that it waits at least
+        # repeat_minutes between pushes. repeat_minutes falls back to the
+        # threshold itself only for a watch saved before this column
+        # existed (push_store's migration backfills a DEFAULT of 15, but
+        # an old client payload might still omit it).
+        last_notified_at = w.get("last_notified_at")
+        repeat_minutes = w.get("repeat_minutes") or w["threshold_minutes"]
+        if last_notified_at is not None and (time.time() - last_notified_at) < repeat_minutes * 60:
+            continue
 
         result = _push_one(w, delay, predicted_station)
         if result["sent"]:
@@ -241,10 +250,15 @@ def check_and_push_for_train(train_number: str, date: Optional[str], delay: Opti
     notification to visibly lag behind (and disagree with) the open
     tracking tab.
 
-    Deliberately separate from run_check_once's own dedupe behavior (see
-    module docstring above): pushes only when `delay` differs from the
-    watch's last_notified_delay, since this can be called every few
-    seconds while a tracking session is open.
+    Shares run_check_once's own repeat-cadence gate (see module docstring
+    above) rather than a separate "only when the number changes" rule —
+    this can be called every few seconds while a tracking session is
+    open, and the point of repeat_minutes is a predictable cadence either
+    way it fires from, not a faster heartbeat just because a tab happens
+    to be open. Reading and writing the SAME last_notified_at as
+    run_check_once also means the two paths cooperate correctly if both
+    are live for the same watch at once: whichever pushes first sets
+    last_notified_at, and the other's gate check then holds off too.
     """
     if delay is None:
         return {"checked": 0, "breached": 0, "pushed": 0, "push_failed": 0}
@@ -258,9 +272,10 @@ def check_and_push_for_train(train_number: str, date: Optional[str], delay: Opti
             continue
         breached += 1
 
-        last_notified = w.get("last_notified_delay")
-        if last_notified is not None and delay == last_notified:
-            continue  # figure hasn't actually changed since the last push — nothing new to say
+        last_notified_at = w.get("last_notified_at")
+        repeat_minutes = w.get("repeat_minutes") or w["threshold_minutes"]
+        if last_notified_at is not None and (time.time() - last_notified_at) < repeat_minutes * 60:
+            continue
 
         result = _push_one(w, delay, predicted_station)
         if result["sent"]:

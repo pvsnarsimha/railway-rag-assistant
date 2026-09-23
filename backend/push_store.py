@@ -57,13 +57,32 @@ def _init_db():
                 train_number TEXT NOT NULL,
                 date TEXT,
                 threshold_minutes INTEGER NOT NULL DEFAULT 15,
+                repeat_minutes INTEGER NOT NULL DEFAULT 15,
                 label TEXT,
                 last_notified_delay INTEGER,
+                last_notified_at REAL,
                 created_at REAL NOT NULL,
                 FOREIGN KEY(token) REFERENCES device_tokens(token)
             )
             """
         )
+        # MIGRATION: a `watches` table created before the "repeat every N
+        # min" feature existed won't have these two columns yet — SQLite's
+        # CREATE TABLE IF NOT EXISTS above is a no-op against an existing
+        # table, it doesn't add new columns to it. ALTER TABLE ADD COLUMN
+        # is the idempotent way to backfill them; it fails with "duplicate
+        # column name" on a table that already has them (a fresh table
+        # created just above, or a second app instance racing this same
+        # startup), which is exactly the case to swallow and move on from.
+        for stmt in (
+            "ALTER TABLE watches ADD COLUMN repeat_minutes INTEGER NOT NULL DEFAULT 15",
+            "ALTER TABLE watches ADD COLUMN last_notified_at REAL",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         conn.execute("CREATE INDEX IF NOT EXISTS idx_watches_token ON watches(token)")
         # FEATURE: Fare & Availability "Alert Zone" — same pattern as
         # `watches` above (delay alerts), a separate table since a fare
@@ -180,9 +199,10 @@ def replace_watches(token: str, watches: List[dict]) -> None:
         # same number (fixed after a real report of predictions/dedup
         # state bleeding across watches sharing a train number).
         existing = {
-            (row["train_number"], row["date"], row["label"]): row["last_notified_delay"]
+            (row["train_number"], row["date"], row["label"]): (row["last_notified_delay"], row["last_notified_at"])
             for row in conn.execute(
-                "SELECT train_number, date, label, last_notified_delay FROM watches WHERE token = ?", (token,)
+                "SELECT train_number, date, label, last_notified_delay, last_notified_at FROM watches WHERE token = ?",
+                (token,),
             )
         }
         conn.execute("DELETE FROM watches WHERE token = ?", (token,))
@@ -191,23 +211,31 @@ def replace_watches(token: str, watches: List[dict]) -> None:
             train_number = str(w.get("train_number", "")).strip()
             if not train_number:
                 continue
-            # Preserve last_notified_delay across a "replace" for a train
-            # that was already being watched, so re-saving the same
-            # watchlist (e.g. after editing an unrelated watch) doesn't
-            # re-fire a notification for a breach already sent.
-            carried_over = existing.get((train_number, w.get("date"), w.get("label")))
+            # Preserve last_notified_delay/last_notified_at across a
+            # "replace" for a train that was already being watched, so
+            # re-saving the same watchlist (e.g. after editing an
+            # unrelated watch, or updating this one's threshold/repeat
+            # cadence from DelayAlertModal) doesn't re-fire a notification
+            # early — see alert_scheduler.py's repeat-interval gate, which
+            # depends on last_notified_at surviving a replace.
+            carried_delay, carried_at = existing.get((train_number, w.get("date"), w.get("label")), (None, None))
             conn.execute(
                 """
-                INSERT INTO watches (token, train_number, date, threshold_minutes, label, last_notified_delay, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO watches (
+                    token, train_number, date, threshold_minutes, repeat_minutes,
+                    label, last_notified_delay, last_notified_at, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     token,
                     train_number,
                     w.get("date"),
                     int(w.get("threshold_minutes") or 15),
+                    int(w.get("repeat_minutes") or w.get("threshold_minutes") or 15),
                     w.get("label"),
-                    carried_over,
+                    carried_delay,
+                    carried_at,
                     now,
                 ),
             )
@@ -246,7 +274,10 @@ def list_watches_for_train(train_number: str, date: Optional[str] = None) -> Lis
 
 def mark_notified(watch_id: int, delay_minutes: int) -> None:
     with _connect() as conn:
-        conn.execute("UPDATE watches SET last_notified_delay = ? WHERE id = ?", (delay_minutes, watch_id))
+        conn.execute(
+            "UPDATE watches SET last_notified_delay = ?, last_notified_at = ? WHERE id = ?",
+            (delay_minutes, time.time(), watch_id),
+        )
 
 
 def stats() -> dict:

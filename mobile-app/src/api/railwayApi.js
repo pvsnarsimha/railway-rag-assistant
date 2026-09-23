@@ -352,6 +352,12 @@ export async function syncPushWatches(baseUrl, token, watches) {
     watches: watches.map((w) => ({
       train_number: w.trainNumber, date: w.date || null,
       threshold_minutes: w.threshold, label: w.label,
+      // FEATURE: per-watch repeat cadence (see LiveTrackingScreen.web.js's
+      // DelayAlertModal) — how often, in minutes, to re-push while this
+      // watch stays breached, instead of the backend's old "every
+      // scheduler tick" default. Falls back to the threshold itself if a
+      // caller (or an older cached local watch) never set one.
+      repeat_minutes: w.repeatMinutes || w.threshold || 15,
     })),
   });
   return data;

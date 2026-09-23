@@ -4839,6 +4839,12 @@ class PushWatch(BaseModel):
     train_number: str
     date: Optional[str] = None
     threshold_minutes: int = 15
+    # FEATURE: per-watch repeat cadence, set from DelayAlertModal's "Repeat
+    # the alert every" picker on Live Tracking (mobile-app). Defaults to
+    # threshold_minutes only if a caller never sends one at all (an older
+    # cached client build) — push_store.replace_watches does the same
+    # fallback again on the way into the DB.
+    repeat_minutes: Optional[int] = None
     label: Optional[str] = None
 
 
