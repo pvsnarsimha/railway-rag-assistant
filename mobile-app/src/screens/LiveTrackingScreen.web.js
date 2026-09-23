@@ -679,8 +679,8 @@ export default function LiveTrackingScreen({ navigation }) {
       const raw = await AsyncStorage.getItem(ALERTS_KEY);
       const existing = raw ? JSON.parse(raw) : [];
       const merged = existing.filter((w) => !(
-        String(w.trainNumber) === num && (w.date || null) === dateVal
-        && (!w.label || String(w.label).toUpperCase() === code)
+        String(w.trainNumber) === num
+        && (!w.label ? true : ((w.date || null) === dateVal && String(w.label).toUpperCase() === code))
       ));
       if (settings) {
         merged.push({ trainNumber: num, date: dateVal, label: code, threshold: settings.threshold, repeatMinutes: settings.repeatMinutes });
@@ -1245,6 +1245,23 @@ export default function LiveTrackingScreen({ navigation }) {
   }
   const journeyStartDate = resolveJourneyStartDate(trackDate, timeline);
 
+  // BUGFIX (train 20833, bell armed on WARANGAL after the trip had ended):
+  // RailKit can keep a stop's `status` at "upcoming" long after the train
+  // has really been there — RailRadar confirms the arrival first
+  // (actual_is_predicted === false) and RailKit never flips it. A bell on
+  // such a stop can never fire, so a stop counts as reached (no bell) if
+  // it — or ANY later stop — has a real recorded arrival/departure, the
+  // same rule the backend's _stop_really_reached applies to alerts.
+  const reallyReachedCodes = (() => {
+    const isReal = (st) => st.status === "current" || st.status === "passed"
+      || ["arrival", "departure"].some((k) => st[k] && st[k].actual && st[k].actual_is_predicted === false);
+    let lastIdx = -1;
+    timeline.forEach((st, i) => { if (st.kind !== "intermediate" && isReal(st)) lastIdx = i; });
+    const set = new Set();
+    timeline.forEach((st, i) => { if (i <= lastIdx && st.code) set.add(String(st.code).toUpperCase()); });
+    return set;
+  })();
+
   // BUGFIX: the real current position is very often INSIDE a collapsed
   // "+N No-Halt stations" group (most of a route's stations are
   // non-reporting) — auto-expand whichever group actually contains it so
@@ -1662,6 +1679,7 @@ export default function LiveTrackingScreen({ navigation }) {
                       nextStationName={payload?.next_station}
                       segmentSpeedSignal={payload?.segment_speed_signal}
                       alertArmed={!!stationWatches[(entry.code || "").toUpperCase()]}
+                      alertBlocked={ltJourneyLikelyComplete || reallyReachedCodes.has((entry.code || "").toUpperCase())}
                       onBellPress={openStationAlert}
                     />
                   </React.Fragment>
@@ -2105,7 +2123,7 @@ function TimelineStopRow({
   stop, isFirst, isLast, rowRef, journeyLikelyComplete,
   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
   statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
-  alertArmed, onBellPress,
+  alertArmed, alertBlocked, onBellPress,
 }) {
   // BUGFIX: once the journey looks likely complete (see
   // computeJourneyLikelyComplete near the top of this file), the train
@@ -2158,7 +2176,7 @@ function TimelineStopRow({
               station the train hasn't reached yet (a delay alert for a
               station already passed can't fire), plus on any station that
               still has an alert armed so it can be edited/stopped. */}
-          {onBellPress && stop.kind !== "intermediate" && stop.code && (alertArmed || (!isPassed && !isCurrent)) ? (
+          {onBellPress && stop.kind !== "intermediate" && stop.code && (alertArmed || (!isPassed && !isCurrent && !alertBlocked)) ? (
             <TouchableOpacity
               onPress={() => onBellPress(stop)}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}

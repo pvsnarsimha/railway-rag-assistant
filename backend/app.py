@@ -2221,6 +2221,15 @@ def _sync_station_delay_history(
     # intermediate GPS pings have shown up in the meantime, keeping the
     # predicted-vs-actual chart's route ordering (get_run_records() sorts by
     # this column) stable rather than drifting mid-journey.
+    # A stop RailKit still calls "upcoming" is really behind the train if
+    # any LATER reporting stop has a real recorded time (see
+    # _stop_really_reached) - don't keep persisting a fresh "prediction"
+    # for it (the WARANGAL rows logged after 20833 had already terminated).
+    last_really_reached_idx = -1
+    for _i, _s in enumerate(timeline_json):
+        if _s.get("kind") != "intermediate" and _stop_really_reached(_s):
+            last_really_reached_idx = _i
+
     reporting_rank = 0
     for idx, stop in enumerate(timeline_json):
         if stop.get("kind") == "intermediate":
@@ -2290,7 +2299,7 @@ def _sync_station_delay_history(
         # touches actual_delay_minutes, so it can never race with or
         # clobber the WRITE step below, whichever order polls happen to
         # run in.
-        if stop.get("status") == "upcoming":
+        if stop.get("status") == "upcoming" and idx > last_really_reached_idx:
             snapshot = final_predictions.get(code)
             if snapshot is not None and snapshot.get("predicted_delay_minutes") is not None:
                 try:
