@@ -610,10 +610,30 @@ export default function LiveTrackingScreen({ navigation }) {
   // date is pinned to today's real date at arming time (see
   // effectiveTrackDate) so an overnight run never silently switches to the
   // next day's run after midnight.
-  const [delayModalStation, setDelayModalStation] = useState(null); // { code, name } | null
-  const [stationWatches, setStationWatches] = useState({}); // CODE -> { threshold, repeatMinutes }
-  const [delayWatchBusy, setDelayWatchBusy] = useState(false);
-  const [delayWatchStatus, setDelayWatchStatus] = useState(null); // { ok, message } | null
+  //
+  // BUGFIX ("arming a bell on train A hid/disabled the bells on train B"):
+  // bell state used to be read off the "Track a train" INPUT FIELDS and a
+  // single screen-wide busy/status flag, and armed watches were keyed by
+  // station code alone. So once a bell was tapped on one train, switching
+  // to another train could show that train's bells as armed/blocked or its
+  // alert sheet stuck on "Saving…" (the first train's save — push-token +
+  // backend sync, often slow on a cold start — was still in flight). Now:
+  //   - activeTrack pins the train + date actually being TRACKED (set on
+  //     "Start tracking"), independent of whatever is typed in the form;
+  //   - every armed-watch map, busy flag and status message is keyed by
+  //     "train|date" (and station), so one train can never affect another.
+  const [activeTrack, setActiveTrack] = useState(null); // { trainNumber, date } | null
+  const activeTrackKey = activeTrack ? `${activeTrack.trainNumber}|${activeTrack.date}` : null;
+  const [delayModalStation, setDelayModalStation] = useState(null); // { code, name, trainNumber, date } | null
+  const [stationWatchesState, setStationWatchesState] = useState({ key: null, map: {} }); // map: CODE -> { threshold, repeatMinutes }
+  // Only ever expose the armed-watch map for the train currently tracked.
+  const stationWatches = stationWatchesState.key && stationWatchesState.key === activeTrackKey ? stationWatchesState.map : {};
+  const [delayWatchBusyKey, setDelayWatchBusyKey] = useState(null); // "train|date|CODE" of the save in flight
+  const [delayWatchStatusState, setDelayWatchStatusState] = useState(null); // { key, ok, message } | null
+  const delayModalKey = delayModalStation ? `${delayModalStation.trainNumber}|${delayModalStation.date}|${delayModalStation.code}` : null;
+  const delayWatchBusy = !!delayModalKey && delayWatchBusyKey === delayModalKey;
+  const delayWatchStatus = delayWatchStatusState && delayWatchStatusState.key === delayModalKey ? delayWatchStatusState : null;
+  const reloadWatchesSeqRef = useRef(0);
 
   // FEATURE: Smart Alarm — same station-arrival wake-up as
   // MoreToolsScreen.js's SmartAlarmTool / the native TrackedTrainCard.js,
@@ -628,25 +648,32 @@ export default function LiveTrackingScreen({ navigation }) {
   const [alarmArmed, setAlarmArmed] = useState(false);
   const alarmNotificationIdRef = useRef(null);
 
-  // Reflects already-armed station alerts for THIS train+date back onto
-  // the bells (filled icon) instead of always starting fresh.
+  // Reflects already-armed station alerts for the TRACKED train+date back
+  // onto the bells (filled icon) instead of always starting fresh. A
+  // sequence number drops a slow, stale read for a previous train so it
+  // can't overwrite the map for the train now on screen.
   const reloadStationWatches = useCallback(async () => {
-    const num = trainNumber.trim();
-    if (!num) { setStationWatches({}); return; }
-    const dateVal = effectiveTrackDate(trackDate);
+    const seq = ++reloadWatchesSeqRef.current;
+    if (!activeTrack) { setStationWatchesState({ key: null, map: {} }); return; }
+    const key = `${activeTrack.trainNumber}|${activeTrack.date}`;
+    const map = {};
     try {
       const raw = await AsyncStorage.getItem(ALERTS_KEY);
       const existing = raw ? JSON.parse(raw) : [];
-      const map = {};
       existing.forEach((w) => {
-        if (String(w.trainNumber) === num && (w.date || null) === dateVal && w.label) {
+        if (String(w.trainNumber) === activeTrack.trainNumber && (w.date || null) === activeTrack.date && w.label) {
           map[String(w.label).toUpperCase()] = { threshold: w.threshold, repeatMinutes: w.repeatMinutes };
         }
       });
-      setStationWatches(map);
-    } catch (e) { setStationWatches({}); }
-  }, [trainNumber, trackDate]);
+    } catch (e) { /* fall through with an empty map */ }
+    if (seq !== reloadWatchesSeqRef.current) return;
+    setStationWatchesState({ key, map });
+  }, [activeTrack]);
   useEffect(() => { reloadStationWatches(); }, [reloadStationWatches]);
+
+  // Switching to a different tracked train closes any alert sheet still
+  // open for the previous one.
+  useEffect(() => { setDelayModalStation(null); }, [activeTrackKey]);
 
   // Gets a usable push token — reuses whatever's already cached from
   // either this screen or MoreToolsScreen's own "Enable Background Push"
@@ -662,25 +689,38 @@ export default function LiveTrackingScreen({ navigation }) {
     return { token, platform };
   }, [apiBaseUrl]);
 
+  // Push-token acquisition on web waits on the service worker becoming
+  // active, which can hang indefinitely (blocked/failed SW install). Cap
+  // it so a stuck save can never leave the alert sheet on "Saving…".
+  const getPushTokenWithTimeout = useCallback(() => Promise.race([
+    getOrCreatePushToken(),
+    new Promise((resolve) => setTimeout(() => resolve({ token: null, reason: "Timed out enabling push on this device — the alert is saved on this device only." }), 20000)),
+  ]), [getOrCreatePushToken]);
+
   // Reads the FULL local delay-watch list, replaces just this
   // (train, date, station) entry, writes it back and syncs the WHOLE set
   // (syncPushWatches replaces the server's full list for this token, so a
   // single-item sync would wipe every other alert on this device). Also
   // drops any older train-wide (label-less) watch for the same train+date,
-  // which no longer has a UI to stop it from.
+  // which no longer has a UI to stop it from. The train + date come from
+  // the station object itself (captured when its bell was tapped), never
+  // from the form fields, so it always targets the train that bell was on.
   const saveStationWatch = useCallback(async (station, settings) => {
-    const num = trainNumber.trim();
-    if (!num) { setDelayWatchStatus({ ok: false, message: "Enter a train number above first." }); return { ok: false }; }
+    const num = String(station.trainNumber || "").trim();
+    const dateVal = station.date || null;
     const code = String(station.code || station.name || "").toUpperCase();
-    const dateVal = effectiveTrackDate(trackDate);
-    setDelayWatchBusy(true);
-    setDelayWatchStatus(null);
+    const key = `${num}|${dateVal}|${code}`;
+    const setStatus = (ok, message) => setDelayWatchStatusState({ key, ok, message });
+    if (!num) { setStatus(false, "Start tracking a train first."); return { ok: false }; }
+    setDelayWatchBusyKey(key);
+    setDelayWatchStatusState((prev) => (prev && prev.key === key ? null : prev));
     try {
       const raw = await AsyncStorage.getItem(ALERTS_KEY);
       const existing = raw ? JSON.parse(raw) : [];
       const merged = existing.filter((w) => !(
         String(w.trainNumber) === num
-        && (!w.label ? true : ((w.date || null) === dateVal && String(w.label).toUpperCase() === code))
+        && (w.date || null) === dateVal
+        && (!w.label || String(w.label).toUpperCase() === code)
       ));
       if (settings) {
         merged.push({ trainNumber: num, date: dateVal, label: code, threshold: settings.threshold, repeatMinutes: settings.repeatMinutes });
@@ -688,34 +728,44 @@ export default function LiveTrackingScreen({ navigation }) {
       await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(merged));
       await reloadStationWatches();
 
-      const { token, reason } = settings ? await getOrCreatePushToken() : { token: await AsyncStorage.getItem(PUSH_TOKEN_KEY) };
+      const { token, reason } = settings ? await getPushTokenWithTimeout() : { token: await AsyncStorage.getItem(PUSH_TOKEN_KEY) };
       if (!token) {
-        if (settings) setDelayWatchStatus({ ok: false, message: reason || "Saved, but background push isn't available on this device/browser." });
+        if (settings) setStatus(false, reason || "Saved, but background push isn't available on this device/browser.");
         return { ok: true };
       }
       await syncPushWatches(apiBaseUrl, token, merged);
       if (settings) {
-        setDelayWatchStatus({ ok: true, message: `Alert set for ${station.name}: a push every ${settings.repeatMinutes} min while it's predicted ≥ ${settings.threshold} min late.` });
+        setStatus(true, `Alert set for ${station.name}: a push every ${settings.repeatMinutes} min while it's predicted ≥ ${settings.threshold} min late.`);
       }
       return { ok: true };
     } catch (e) {
-      setDelayWatchStatus({ ok: false, message: describeApiError(e) });
+      setStatus(false, describeApiError(e));
       return { ok: false };
     } finally {
-      setDelayWatchBusy(false);
+      setDelayWatchBusyKey((prev) => (prev === key ? null : prev));
     }
-  }, [apiBaseUrl, trainNumber, trackDate, getOrCreatePushToken, reloadStationWatches]);
+  }, [apiBaseUrl, getPushTokenWithTimeout, reloadStationWatches]);
 
   const openStationAlert = useCallback((stop) => {
-    setDelayWatchStatus(null);
-    setDelayModalStation({ code: (stop.code || "").toUpperCase(), name: toDisplayCase(stop.name || stop.code || "") });
-  }, []);
+    if (!activeTrack) return;
+    setDelayModalStation({
+      code: (stop.code || "").toUpperCase(),
+      name: toDisplayCase(stop.name || stop.code || ""),
+      trainNumber: activeTrack.trainNumber,
+      date: activeTrack.date,
+    });
+  }, [activeTrack]);
 
   const confirmDelayAlert = useCallback((thresholdVal, repeatVal) => {
     if (!delayModalStation) return;
-    saveStationWatch(delayModalStation, { threshold: thresholdVal, repeatMinutes: repeatVal }).then((result) => {
-      if (result && result.ok) setDelayModalStation(null);
-      // On failure the sheet stays open showing delayWatchStatus's error.
+    const target = delayModalStation;
+    saveStationWatch(target, { threshold: thresholdVal, repeatMinutes: repeatVal }).then((result) => {
+      // Only close the sheet if it's still showing the station just saved
+      // (the user may have moved on to another station/train meanwhile).
+      // On failure the sheet stays open showing the error.
+      if (result && result.ok) {
+        setDelayModalStation((cur) => (cur && cur.code === target.code && cur.trainNumber === target.trainNumber && cur.date === target.date ? null : cur));
+      }
     });
   }, [delayModalStation, saveStationWatch]);
 
@@ -1209,6 +1259,12 @@ export default function LiveTrackingScreen({ navigation }) {
       dest: dest.trim(),
     };
     activeParamsRef.current = params;
+    // Pin the bells / delay alerts to THIS train + run date (blank = today,
+    // pinned now so it can't drift past midnight) — see activeTrack above.
+    const trackedDate = effectiveTrackDate(params.date);
+    setActiveTrack((prev) => (prev && prev.trainNumber === params.trainNumber && prev.date === trackedDate
+      ? prev
+      : { trainNumber: params.trainNumber, date: trackedDate }));
     openSocket(params, false);
   }
 
@@ -1252,6 +1308,10 @@ export default function LiveTrackingScreen({ navigation }) {
   // such a stop can never fire, so a stop counts as reached (no bell) if
   // it — or ANY later stop — has a real recorded arrival/departure, the
   // same rule the backend's _stop_really_reached applies to alerts.
+  // Bells only on a timeline that really belongs to the tracked train —
+  // never on a leftover payload from a different train.
+  const bellsEnabledForPayload = !!activeTrack
+    && (!payload?.train_number || String(payload.train_number).trim() === activeTrack.trainNumber);
   const reallyReachedCodes = (() => {
     // A genuinely recorded arrival can never be in the future: a provider
     // "actual" that is really an ETA (20834: VISAKHAPATNAM "14:03" at 12:08,
@@ -1402,12 +1462,11 @@ export default function LiveTrackingScreen({ navigation }) {
 
       {/* FEATURE: Delay Alert — moved off this inline card onto the bell
           icon + DelayAlertModal sheet (see near the end of this component's
-          JSX, and confirmDelayAlert above). Arming no longer requires a
-          live connection, so it isn't gated on `payload` any more — it
-          uses whatever train number + date is in the form above, same as
-          the sheet itself. delayWatchStatus is set here
-          same as before and surfaced inside the sheet (statusMessage) —
-          they just no longer render as their own standalone card. */}
+          JSX, and confirmDelayAlert above). Each bell arms an alert for
+          the train + date actually being TRACKED (activeTrack), not
+          whatever is typed in the form. delayWatchStatus is surfaced
+          inside the sheet (statusMessage) — it no longer renders as its
+          own standalone card. */}
 
       {/* FEATURE: Smart Alarm, right on Live Tracking (moved off the
           separate More Tools menu — see the top-of-file comment). Only
@@ -1695,7 +1754,7 @@ export default function LiveTrackingScreen({ navigation }) {
                       segmentSpeedSignal={payload?.segment_speed_signal}
                       alertArmed={!!stationWatches[(entry.code || "").toUpperCase()]}
                       alertBlocked={ltJourneyLikelyComplete || reallyReachedCodes.has((entry.code || "").toUpperCase())}
-                      onBellPress={openStationAlert}
+                      onBellPress={bellsEnabledForPayload ? openStationAlert : undefined}
                     />
                   </React.Fragment>
                 );
@@ -1752,8 +1811,8 @@ export default function LiveTrackingScreen({ navigation }) {
     <DelayAlertModal
       visible={!!delayModalStation}
       onClose={() => setDelayModalStation(null)}
-      trainNumber={trainNumber}
-      trackDate={effectiveTrackDate(trackDate)}
+      trainNumber={delayModalStation ? delayModalStation.trainNumber : ""}
+      trackDate={delayModalStation ? delayModalStation.date : ""}
       station={delayModalStation}
       active={!!(delayModalStation && stationWatches[delayModalStation.code])}
       busy={delayWatchBusy}
