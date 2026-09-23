@@ -185,6 +185,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
     """
     watches = push_store.list_all_watches_with_tokens()
     checked, breached, pushed, push_failed = 0, 0, 0, 0
+    groups = {}
 
     for w in watches:
         checked += 1
@@ -229,22 +230,48 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
         if delay is None or delay < w["threshold_minutes"]:
             continue
         breached += 1
+        # Collected, not pushed yet — see the grouping pass below.
+        groups.setdefault((w["token"], w["train_number"], w.get("date")), []).append((w, delay, predicted_station))
 
-        # FEATURE: per-watch repeat cadence (see module docstring above).
-        # last_notified_at is None the first time this watch breaches, so
-        # it always pushes right away then; after that it waits at least
-        # repeat_minutes between pushes. repeat_minutes falls back to the
-        # threshold itself only for a watch saved before this column
-        # existed (push_store's migration backfills a DEFAULT of 15, but
-        # an old client payload might still omit it).
-        if not _repeat_due(w):
+    # BUGFIX ("notification every 2 minutes after I closed the app"): each
+    # per-station bell is its own watch with its own repeat clock. Several
+    # stations on one train breach at DIFFERENT ticks (downstream delays
+    # grow as the prediction updates), so their 10-min clocks started 2, 4,
+    # 6... min apart and the pushes interleaved into one every scheduler
+    # tick. Breached watches are now grouped per (device, train, date):
+    # ONE notification naming every breached station, gated by the group's
+    # shortest repeat_minutes against its most recent push, and every watch
+    # in the group is marked notified together so their clocks stay in step.
+    for (_token, train_number, _date), items in groups.items():
+        watches_in_group = [it[0] for it in items]
+        last_times = [w.get("last_notified_at") for w in watches_in_group if w.get("last_notified_at")]
+        repeat = min((w.get("repeat_minutes") or w["threshold_minutes"]) for w in watches_in_group)
+        if last_times and not _repeat_due({"last_notified_at": max(last_times), "repeat_minutes": repeat,
+                                           "threshold_minutes": repeat}):
             continue
-
-        result = _push_one(w, delay, predicted_station)
+        items.sort(key=lambda it: -it[1])
+        head_w, head_delay, head_station = items[0]
+        summary_text = None
+        if len(items) > 1:
+            summary_text = ", ".join(f"{(st or 'next stop').title()} ~{d} min" for _w, d, st in items[:4])
+        result = push_notifications.send_delay_alert(
+            token=head_w["token"], train_number=train_number, label=head_w.get("label"),
+            predicted_delay_minutes=head_delay, predicted_for_station=head_station,
+            stations_summary=summary_text,
+        )
         if result["sent"]:
             pushed += 1
+            for w, d, _st in items:
+                push_store.mark_notified(w["id"], d)
+            logger.info("PUSH sent train=%s stations=%s next in %s min",
+                        train_number, [st for _w, _d, st in items], repeat)
         else:
             push_failed += 1
+            logger.warning("Push failed for train=%s watches=%s: %s",
+                           train_number, [w["id"] for w in watches_in_group], result["error"])
+            error_text = (result["error"] or "").lower().replace(" ", "").replace("-", "")
+            if "notregistered" in error_text or "notfound" in error_text or "invalidregistration" in error_text:
+                push_store.unregister_token(head_w["token"])
 
     summary = {"checked": checked, "breached": breached, "pushed": pushed, "push_failed": push_failed}
     logger.info("Alert scheduler pass: %s", summary)

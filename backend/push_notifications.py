@@ -28,7 +28,12 @@ note surfaced to the /api/push/* endpoints and printed at startup.
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+
+def _ist_now() -> datetime:
+    """Train times are IST; Render runs in UTC, so stamp notifications in IST."""
+    return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 from typing import Optional
 
 import requests
@@ -183,9 +188,14 @@ def _webpush_config(title: str, body: str, tag: str):
 def send_delay_alert(
     token: str, train_number: str, label: Optional[str], predicted_delay_minutes: int,
     predicted_for_station: Optional[str] = None,
+    stations_summary: Optional[str] = None,
 ) -> dict:
     """
     Send one push notification for a breached delay-alert watch.
+    stations_summary: when several station alerts on the same train are
+    breached at once they're sent as ONE notification (see
+    alert_scheduler.run_check_once) and this replaces the single-station
+    wording, e.g. "Khammam ~27 min, Dornakal Jn ~25 min".
     Returns {"sent": bool, "error": str | None} — callers (the scheduler)
     are expected to keep going on a per-token failure (e.g. an
     uninstalled app / expired token) rather than aborting the whole
@@ -205,14 +215,17 @@ def send_delay_alert(
     # train's real predicted delay moves — labeling each with its own
     # "as of HH:MM" makes that legible instead of looking like a
     # contradiction or a stale/buggy figure.
-    checked_at = datetime.now()
+    checked_at = _ist_now()
     title = f"Train {train_number} delayed"
     display_name = f"{train_number}" + (f" — {label}" if label else "")
     station_phrase = f" at {predicted_for_station}" if predicted_for_station else ""
-    body = (
-        f"{display_name} is now predicted ~{predicted_delay_minutes} min late{station_phrase} "
-        f"(as of {checked_at.strftime('%H:%M')})."
-    )
+    if stations_summary:
+        body = f"Train {train_number} predicted late — {stations_summary} (as of {checked_at.strftime('%H:%M')})."
+    else:
+        body = (
+            f"{display_name} is now predicted ~{predicted_delay_minutes} min late{station_phrase} "
+            f"(as of {checked_at.strftime('%H:%M')})."
+        )
     data = {
         "type": "delay_alert",
         "train_number": str(train_number),
@@ -259,7 +272,7 @@ def send_fare_alert(
     contract as send_delay_alert/send_station_status_alert; callers
     (alert_scheduler) keep going on a per-token failure.
     """
-    checked_at = datetime.now()
+    checked_at = _ist_now()
     display_name = f"{train_number}" + (f" — {label}" if label else "")
     route_phrase = f"{source} → {dest} ({travel_class})"
     if reason == "fare_drop" and old_fare is not None and new_fare is not None:
@@ -312,7 +325,7 @@ def send_alarm_alert(
     — the SAME real live-position-driven check the in-tab alarm already uses).
     Same never-raises contract as the other send_* functions here.
     """
-    checked_at = datetime.now()
+    checked_at = _ist_now()
     title = f"⏰ Smart Alarm — {station}"
     display_name = f"{train_number}" + (f" — {label}" if label else "")
     eta_phrase = f" ETA {eta_text}" if eta_text else ""
