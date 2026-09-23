@@ -142,6 +142,22 @@ def _push_station_status(w: dict, station: Optional[str], message: str, actual_t
     return result
 
 
+# Scheduler ticks never land exactly on a repeat boundary (a pass takes a
+# few seconds, APScheduler jitters), so a strict "elapsed >= 10 min" check
+# on a 2-minute tick would read 9m58s at the 10-min tick and slip the push
+# to the 12-min tick. This slack lets a 10/20/30-min repeat fire on the
+# tick nearest its boundary instead of one tick late.
+_REPEAT_SLACK_SECONDS = 45
+
+
+def _repeat_due(w: dict) -> bool:
+    last_notified_at = w.get("last_notified_at")
+    if last_notified_at is None:
+        return True
+    repeat_minutes = w.get("repeat_minutes") or w["threshold_minutes"]
+    return (time.time() - last_notified_at) >= repeat_minutes * 60 - _REPEAT_SLACK_SECONDS
+
+
 def _resolve_prediction(predict_fn, w: dict):
     """
     Normalizes whatever predict_fn returns into (status, delay, station,
@@ -221,9 +237,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
         # threshold itself only for a watch saved before this column
         # existed (push_store's migration backfills a DEFAULT of 15, but
         # an old client payload might still omit it).
-        last_notified_at = w.get("last_notified_at")
-        repeat_minutes = w.get("repeat_minutes") or w["threshold_minutes"]
-        if last_notified_at is not None and (time.time() - last_notified_at) < repeat_minutes * 60:
+        if not _repeat_due(w):
             continue
 
         result = _push_one(w, delay, predicted_station)
@@ -272,9 +286,7 @@ def check_and_push_for_train(train_number: str, date: Optional[str], delay: Opti
             continue
         breached += 1
 
-        last_notified_at = w.get("last_notified_at")
-        repeat_minutes = w.get("repeat_minutes") or w["threshold_minutes"]
-        if last_notified_at is not None and (time.time() - last_notified_at) < repeat_minutes * 60:
+        if not _repeat_due(w):
             continue
 
         result = _push_one(w, delay, predicted_station)

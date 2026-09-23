@@ -139,7 +139,7 @@ def _startup_diagnostics():
         # exact prior "predict for the next reporting station" behavior.
         return _predict_for_watch_station(train_number, date, label)
 
-    _interval = int(os.environ.get("ALERT_CHECK_INTERVAL_MINUTES", "15") or "15")
+    _interval = int(os.environ.get("ALERT_CHECK_INTERVAL_MINUTES", "2") or "2")
     # FEATURE: Fare & Availability "Alert Zone" — same dependency-injection
     # pattern as the delay watch above: alert_scheduler never imports
     # app.py directly, it's handed a plain callable that wraps the real

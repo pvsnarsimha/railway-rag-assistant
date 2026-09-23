@@ -34,7 +34,6 @@ const TOOLS = [
   { key: "seat", label: "💺 Seat Picker" },
   { key: "compare", label: "⚖️ Route Compare" },
   { key: "refund", label: "💸 Refund" },
-  { key: "alerts", label: "🔔 Delay Alerts" },
   { key: "crowd", label: "👥 Station Crowd" },
   { key: "offline", label: "📴 Offline Stations" },
   { key: "gantt", label: "📊 Journey Timeline" },
@@ -837,7 +836,7 @@ function FareHeatmapTool({ apiBaseUrl }) {
 
       {/* FEATURE: Fare & Availability "Alert Zone" */}
       <Text style={[styles.resultSubhead, { marginTop: spacing.lg }]}>🔔 Watch This Route</Text>
-      <Text style={styles.disclaimer}>Build a heatmap above first (real baseline fare needed). You'll be notified when fare drops past your threshold or availability improves (WL → RAC → AVAILABLE) — checked here on refresh, plus in the background if push is enabled on the Delay Alerts tab.</Text>
+      <Text style={styles.disclaimer}>Build a heatmap above first (real baseline fare needed). You'll be notified when fare drops past your threshold or availability improves (WL → RAC → AVAILABLE) — checked here on refresh, plus in the background once push is enabled (tap a station's 🔔 on Live Tracking).</Text>
       <LabeledInput label="Alert if fare drops by ≥ (%)" value={thresholdPct} onChangeText={setThresholdPct} keyboardType="number-pad" />
       <LabeledInput label="Label (optional)" value={watchLabel} onChangeText={setWatchLabel} />
       <PrimaryButton title="Watch This Route" onPress={addFareWatch} disabled={baselineFare == null} style={{ marginTop: spacing.sm }} />

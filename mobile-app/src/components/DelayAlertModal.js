@@ -3,12 +3,17 @@ import { Modal, View, Text, TouchableOpacity, TextInput, StyleSheet } from "reac
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 
-const PRESETS = ["10", "15", "20", "30", "45"];
+// Threshold ("alert when delay >= X") and repeat ("notify every Y") use
+// separate preset rows: repeat is offered as 10/20/30 min per request.
+const THRESHOLD_PRESETS = ["10", "15", "20", "30", "45"];
+const REPEAT_PRESETS = ["10", "20", "30"];
+const DEFAULT_THRESHOLD = "20";
+const DEFAULT_REPEAT = "10";
 
-function ChipRow({ value, isCustomOpen, onPick, onPickCustom, disabled }) {
+function ChipRow({ presets, value, isCustomOpen, onPick, onPickCustom, disabled }) {
   return (
     <View style={styles.chipRow}>
-      {PRESETS.map((m) => {
+      {presets.map((m) => {
         const active = !isCustomOpen && value === m;
         return (
           <TouchableOpacity
@@ -54,6 +59,7 @@ export default function DelayAlertModal({
   onClose,
   trainNumber,
   trackDate,
+  station,
   active,
   busy,
   initialThreshold,
@@ -62,24 +68,24 @@ export default function DelayAlertModal({
   onConfirm,
   onStop,
 }) {
-  const [thresholdChip, setThresholdChip] = React.useState("15");
+  const [thresholdChip, setThresholdChip] = React.useState(DEFAULT_THRESHOLD);
   const [thresholdCustomOpen, setThresholdCustomOpen] = React.useState(false);
   const [thresholdCustomText, setThresholdCustomText] = React.useState("");
 
-  const [repeatChip, setRepeatChip] = React.useState("15");
+  const [repeatChip, setRepeatChip] = React.useState(DEFAULT_REPEAT);
   const [repeatCustomOpen, setRepeatCustomOpen] = React.useState(false);
   const [repeatCustomText, setRepeatCustomText] = React.useState("");
 
   React.useEffect(() => {
     if (!visible) return;
-    const t = String(initialThreshold || "15");
-    const r = String(initialRepeat || "15");
-    setThresholdChip(PRESETS.includes(t) ? t : "");
-    setThresholdCustomOpen(!PRESETS.includes(t));
-    setThresholdCustomText(!PRESETS.includes(t) ? t : "");
-    setRepeatChip(PRESETS.includes(r) ? r : "");
-    setRepeatCustomOpen(!PRESETS.includes(r));
-    setRepeatCustomText(!PRESETS.includes(r) ? r : "");
+    const t = String(initialThreshold || DEFAULT_THRESHOLD);
+    const r = String(initialRepeat || DEFAULT_REPEAT);
+    setThresholdChip(THRESHOLD_PRESETS.includes(t) ? t : "");
+    setThresholdCustomOpen(!THRESHOLD_PRESETS.includes(t));
+    setThresholdCustomText(!THRESHOLD_PRESETS.includes(t) ? t : "");
+    setRepeatChip(REPEAT_PRESETS.includes(r) ? r : "");
+    setRepeatCustomOpen(!REPEAT_PRESETS.includes(r));
+    setRepeatCustomText(!REPEAT_PRESETS.includes(r) ? r : "");
   }, [visible, initialThreshold, initialRepeat]);
 
   const thresholdValue = thresholdCustomOpen ? parseInt(thresholdCustomText, 10) : parseInt(thresholdChip, 10);
@@ -100,11 +106,15 @@ export default function DelayAlertModal({
 
           <Text style={styles.subject}>
             {num ? `Train ${num}` : "Enter a train number above first"}
-            {num && trackDate ? ` · ${trackDate}` : num ? " · today" : ""}
+            {num && station ? ` · ${station.name}${station.code ? ` (${station.code})` : ""}` : ""}
+            {num ? ` · ${trackDate || "today"}` : ""}
           </Text>
 
-          <Text style={styles.fieldLabel}>Alert me when delay is at least</Text>
+          <Text style={styles.fieldLabel}>
+            Alert me when delay{station ? ` at ${station.name}` : ""} is at least
+          </Text>
           <ChipRow
+            presets={THRESHOLD_PRESETS}
             value={thresholdChip}
             isCustomOpen={thresholdCustomOpen}
             onPick={(m) => { setThresholdChip(m); setThresholdCustomOpen(false); }}
@@ -122,6 +132,7 @@ export default function DelayAlertModal({
 
           <Text style={[styles.fieldLabel, { marginTop: spacing.md }]}>Repeat the alert every</Text>
           <ChipRow
+            presets={REPEAT_PRESETS}
             value={repeatChip}
             isCustomOpen={repeatCustomOpen}
             onPick={(m) => { setRepeatChip(m); setRepeatCustomOpen(false); }}
@@ -137,8 +148,9 @@ export default function DelayAlertModal({
             />
           )}
           <Text style={styles.hint}>
-            While {num || "this train"} stays delayed at or past your threshold, you'll get a push this often —
-            even with the app closed.
+            While {num || "this train"} is predicted to reach {station ? station.name : "this station"} at or past
+            your threshold, you'll get a push this often — even with the app closed. Stops by itself once the
+            train reaches the station.
           </Text>
 
           {statusMessage ? <Text style={styles.status}>{statusMessage}</Text> : null}
@@ -153,7 +165,7 @@ export default function DelayAlertModal({
 
           {active && (
             <TouchableOpacity onPress={onStop} disabled={busy} style={styles.stopBtn}>
-              <Text style={styles.stopBtnText}>Stop watching this train</Text>
+              <Text style={styles.stopBtnText}>Stop alert for this station</Text>
             </TouchableOpacity>
           )}
         </TouchableOpacity>
