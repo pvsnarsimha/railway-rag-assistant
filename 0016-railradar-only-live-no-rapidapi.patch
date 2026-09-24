@@ -1,0 +1,308 @@
+diff --git a/backend/app.py b/backend/app.py
+index 94457a5..72b302f 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -5382,6 +5382,17 @@ def _warm_live_sources(train_number: Optional[str]) -> None:
+             pass
+ 
+ 
++@app.get("/api/live/provider-check")
++def api_live_provider_check(train_number: str, date: Optional[str] = None):
++    """DIAGNOSTIC: is RailRadar (the primary live source) configured on this
++    backend and answering for this train right now — and if not, exactly
++    why (key not set, 401 bad key, 404 no data, 429 quota, no route)."""
++    tn = (train_number or "").strip()
++    if not (tn.isdigit() and len(tn) == 5):
++        raise HTTPException(status_code=400, detail="train_number must be 5 digits")
++    return quick_live.railradar_status(tn, (date or "").strip() or None)
++
++
+ @app.get("/api/live/warmup")
+ def api_live_warmup(train_number: Optional[str] = None):
+     """FEATURE (fast Live Tracking on internet): the app calls this as soon
+@@ -7814,6 +7825,11 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
+                     "delay_minutes": position.delay_minutes,
+                     "train_name": getattr(position, "train_name", None),
+                     "live_source": live_source,
++                    # Why RailRadar wasn't used for this frame (key missing,
++                    # 401/404/429, no route...) — shown on the screen so a
++                    # RailKit frame is never a silent mystery.
++                    "railradar_error": (quick_live.LAST_RAILRADAR_ERROR.get(str(train_number))
++                                        if live_source == "railkit" else None),
+                     "position_source": (
+                         "railradar_segment_progress" if interp_lat is not None
+                         else gps_tracking.position_source_label(current_timeline_entry.get("coordinates_from"))
+@@ -8030,6 +8046,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
+                     pass
+             except railway_api.RailwayAPIError as e:
+                 payload["error"] = str(e)
++                payload["railradar_error"] = quick_live.LAST_RAILRADAR_ERROR.get(str(train_number))
+                 # RailKit / railkit-service unavailable: keep the screen live
+                 # on RailRadar (else RapidAPI) instead of sending a frame
+                 # with no timeline.
+diff --git a/backend/quick_live.py b/backend/quick_live.py
+index 178b6fa..4c2969f 100644
+--- a/backend/quick_live.py
++++ b/backend/quick_live.py
+@@ -14,13 +14,13 @@ This module builds a complete, lighter payload (same shape the screen
+ already renders: timeline, timeline_grouped, current/next station, lat/lng,
+ km to next, ETA) straight from providers the backend calls DIRECTLY, with
+ no railkit-service hop:
+-  1. RailRadar live   (api.railradar.in — real crowdsourced GPS position,
+-                       segment progress between stations, live speed)
+-  2. RapidAPI IRCTC1  (liveTrainStatus) — used only if RailRadar has nothing.
++  RailRadar live (api.railradar.in — real crowdsourced GPS position,
++  segment progress between stations, live speed). RapidAPI is NOT used for
++  live tracking; if RailRadar has nothing, the full poll uses RailKit.
+ It is sent the moment the socket opens; the full RailKit-based poll then
+ replaces it seamlessly. The same builder is the fallback whenever RailKit /
+ railkit-service fails mid-session, so the screen keeps moving on RailRadar
+-instead of going blank.
++instead of going blank (RailRadar -> RailKit only).
+ 
+ Nothing here is invented: every station, time and position comes from the
+ provider response; anything missing stays None.
+@@ -28,13 +28,11 @@ provider response; anything missing stays None.
+ 
+ import re
+ from datetime import datetime, timezone
+-from typing import List, Optional
++from typing import Optional
+ 
+ import gps_tracking
+ import railradar_fallback
+-import rapidapi_provider
+ import running_status
+-from gps_tracking import StopTiming, TimelineStop
+ 
+ _HHMM = re.compile(r"(\d{1,2}):(\d{2})")
+ 
+@@ -58,78 +56,16 @@ def _first(d: dict, *keys):
+     return None
+ 
+ 
+-# --------------------------------------------------------------- RapidAPI
+-def _rapidapi_stops(train_number: str) -> "tuple[List[TimelineStop], Optional[str]]":
+-    """IRCTC1 liveTrainStatus -> TimelineStop list. Field names follow the
+-    listing's commonly documented shape (previous_stations /
+-    upcoming_stations / current_station_code, station_code, station_name,
+-    sta/std/eta/etd, distance_from_source, arrival_delay, stoppage flags),
+-    read tolerantly; returns [] if the response doesn't look like that."""
+-    try:
+-        body = rapidapi_provider.get_live_train_status(train_number)
+-    except Exception:  # noqa: BLE001 - quick path must never raise
+-        return [], None
+-    data = body.get("data") if isinstance(body, dict) else None
+-    if not isinstance(data, dict):
+-        return [], None
+-    prev = data.get("previous_stations") or []
+-    upcoming = data.get("upcoming_stations") or []
+-    cur_code = _first(data, "current_station_code", "currentStationCode")
+-    train_name = _first(data, "train_name", "trainName")
+-    rows = [(r, "passed") for r in prev if isinstance(r, dict)] + [(r, "upcoming") for r in upcoming if isinstance(r, dict)]
+-    stops: List[TimelineStop] = []
+-    for r, st in rows:
+-        code = _first(r, "station_code", "stationCode")
+-        name = _first(r, "station_name", "stationName") or code
+-        if not code and not name:
+-            continue
+-        status = "current" if cur_code and code == cur_code else st
+-        is_halt = not (r.get("non_stops") is True or r.get("is_non_stop") is True or r.get("isHalt") is False)
+-        delay = _int(_first(r, "arrival_delay", "delay"))
+-        arr = StopTiming(scheduled=_hhmm(_first(r, "sta", "scheduled_arrival")),
+-                         expected=_hhmm(_first(r, "eta", "expected_arrival")),
+-                         actual=_hhmm(_first(r, "eta")) if st == "passed" else None,
+-                         delay_minutes=delay)
+-        dep = StopTiming(scheduled=_hhmm(_first(r, "std", "scheduled_departure")),
+-                         expected=_hhmm(_first(r, "etd", "expected_departure")),
+-                         actual=_hhmm(_first(r, "etd")) if st == "passed" else None,
+-                         delay_minutes=_int(_first(r, "departure_delay", "delay")))
+-        fb = gps_tracking._lookup_station(code) if code else None
+-        stops.append(TimelineStop(
+-            code=code, name=name, kind="stoppage" if is_halt else "intermediate", status=status,
+-            lat=(fb or {}).get("lat"), lng=(fb or {}).get("lng"),
+-            coordinates_from="fallback_table" if fb else "none",
+-            distance_km=_first(r, "distance_from_source", "distance"), halt_minutes=_first(r, "halt"),
+-            day=_first(r, "day", "a_day"), arrival=arr, departure=dep,
+-        ))
+-    return stops, train_name
+-
+-
+-def _railradar_train_name(train_number: str) -> Optional[str]:
+-    try:
+-        data = railradar_fallback._fetch_raw(train_number)
+-    except Exception:  # noqa: BLE001
+-        return None
+-    return _first(data, "trainName", "train_name", "name") or _first(data.get("train") or {}, "name", "trainName")
+-
+-
+ def build_quick_payload(train_number: str, date_ddmmyyyy: Optional[str] = None) -> Optional[dict]:
+-    """Fast live payload from RailRadar (else RapidAPI). None if neither has data."""
++    """Fast live payload from RailRadar ONLY (no RapidAPI — "99% RailRadar,
++    1% RailKit"). None if RailRadar has no data; the full poll then falls
++    back to RailKit."""
+     source = "railradar"
+-    try:
+-        # Blank date = RailRadar's own "current run" auto-detect (same call,
+-        # same cache entry the full poll's RailRadar reads use).
+-        stops = railradar_fallback.fetch_railradar_timeline(train_number, date_ddmmyyyy)
+-    except Exception:  # noqa: BLE001
+-        stops = []
+-    train_name = None
+-    if stops:
+-        train_name = _railradar_train_name(train_number)
+-    else:
+-        source = "rapidapi"
+-        stops, train_name = _rapidapi_stops(train_number)
+-    if not stops:
++    rr = railradar_primary(train_number, date_ddmmyyyy, force_ignore_flag=True)
++    if rr is None:
+         return None
++    stops, _pos, _start, _fetched = rr
++    train_name = _pos.train_name if _pos else None
+ 
+     try:
+         gps_tracking.finalize_timeline_stops(stops)
+@@ -244,21 +180,49 @@ def _iso_to_ddmmyyyy(iso: Optional[str]) -> Optional[str]:
+     return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+ 
+ 
+-def railradar_primary(train_number: str, date_ddmmyyyy: Optional[str] = None, force_refresh: bool = False):
++LAST_RAILRADAR_ERROR: dict = {}
++
++
++def _today_ddmmyyyy_ist() -> str:
++    return running_status.ist_now().strftime("%d-%m-%Y")
++
++
++def railradar_primary(train_number: str, date_ddmmyyyy: Optional[str] = None, force_refresh: bool = False,
++                      force_ignore_flag: bool = False):
+     """Live stops + position from RailRadar, in the SAME TimelineStop /
+     LivePosition shapes the RailKit path produces, so everything downstream
+     (predictions, ETAs, alerts, grouping) runs unchanged.
+     Returns (stops, position, run_start_ddmmyyyy, fetched_epoch) or None."""
+-    if not RAILRADAR_PRIMARY:
++    if not RAILRADAR_PRIMARY and not force_ignore_flag:
+         return None
+-    iso = railradar_fallback._ddmmyyyy_to_iso(date_ddmmyyyy)
+-    try:
+-        data = railradar_fallback._fetch_raw(train_number, iso, _force_refresh=force_refresh)
+-    except Exception:  # noqa: BLE001 - RailRadar unavailable -> caller falls back to RailKit
+-        return None
+-    stops = railradar_fallback.fetch_railradar_timeline(train_number, date_ddmmyyyy)  # same cache entry
++    # Try the requested run first; when that's today (or blank), also try
++    # RailRadar's own "current run" auto-detect before giving up — an
++    # explicit today's date for a train that hasn't started yet can come
++    # back empty while the running train is right there.
++    attempts = [date_ddmmyyyy]
++    if date_ddmmyyyy and date_ddmmyyyy == _today_ddmmyyyy_ist():
++        attempts.append(None)
++    data = stops = None
++    used_date = None
++    last_err = None
++    for d in attempts:
++        iso = railradar_fallback._ddmmyyyy_to_iso(d)
++        try:
++            data = railradar_fallback._fetch_raw(train_number, iso, _force_refresh=force_refresh)
++        except Exception as e:  # noqa: BLE001
++            last_err = str(e)
++            data = None
++            continue
++        stops = railradar_fallback.fetch_railradar_timeline(train_number, d)  # same cache entry
++        if stops:
++            used_date = d
++            break
++        last_err = "RailRadar returned no route/stations for this train and date."
+     if not stops:
++        LAST_RAILRADAR_ERROR[str(train_number)] = last_err or railradar_fallback.get_last_error() or "RailRadar has no data."
+         return None
++    LAST_RAILRADAR_ERROR.pop(str(train_number), None)
++    iso = railradar_fallback._ddmmyyyy_to_iso(used_date)
+     gps_tracking.finalize_timeline_stops(stops)
+     name = _first(data, "trainName", "train_name", "name") or _first(data.get("train") or {}, "name", "trainName")
+     position = gps_tracking.position_from_stops(train_number, stops, train_name=name)
+@@ -287,3 +251,24 @@ def train_info_nonblocking(train_number: str):
+         _train_info_inflight[train_number] = t
+         t.start()
+     return None
++
++
++def railradar_status(train_number: str, date_ddmmyyyy: Optional[str] = None) -> dict:
++    """Diagnostics for /api/live/provider-check: is RailRadar configured and
++    answering for this train right now, and if not, exactly why."""
++    key_set = bool(railradar_fallback._api_key())
++    rr = railradar_primary(train_number, date_ddmmyyyy, force_refresh=True, force_ignore_flag=True) if key_set else None
++    out = {
++        "train_number": train_number,
++        "railradar_primary_enabled": RAILRADAR_PRIMARY,
++        "railradar_key_set": key_set,
++        "railradar_ok": rr is not None,
++        "railradar_error": None if rr is not None else (
++            LAST_RAILRADAR_ERROR.get(str(train_number)) if key_set else "RAILRADAR_API_KEY is not set on this backend service."),
++    }
++    if rr is not None:
++        stops, pos, start, _f = rr
++        out.update({"stations": len(stops), "run_start": start,
++                    "current_station": pos.current_station_name if pos else None,
++                    "train_name": pos.train_name if pos else None})
++    return out
+diff --git a/backend/rapidapi_provider.py b/backend/rapidapi_provider.py
+index c10ba5a..4d63a38 100644
+--- a/backend/rapidapi_provider.py
++++ b/backend/rapidapi_provider.py
+@@ -162,15 +162,3 @@ def get_seat_availability(train_number: str, source_code: str, dest_code: str,
+     params = {k: v for k, v in params.items() if v is not None}
+     return _get("/api/v1/checkSeatAvailability", params)
+ 
+-
+-# FEATURE: fast live-status source for Live Tracking's first frame (see
+-# quick_live.py) — IRCTC1's liveTrainStatus. Only used when RailRadar has
+-# nothing for the train. Cached 45s like RailKit's own live status. Same
+-# honesty note as the rest of this file: the response shape is the
+-# listing's commonly documented one, parsed tolerantly by quick_live.py.
+-from api_cache import cached  # noqa: E402
+-
+-
+-@cached(ttl_seconds=45, prefix="rapidapi_live_status")
+-def get_live_train_status(train_number: str, start_day: int = 0) -> dict:
+-    return _get("/api/v1/liveTrainStatus", {"trainNo": str(train_number).strip(), "startDay": str(start_day)})
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.web.js b/mobile-app/src/screens/LiveTrackingScreen.web.js
+index 3fcd508..321c232 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.web.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.web.js
+@@ -1988,9 +1988,17 @@ export default function LiveTrackingScreen({ navigation }) {
+             </Text>
+           ) : null}
+           {shareLinkNote && <Text style={styles.errorText}>{shareLinkNote}</Text>}
+-          {!gpsOn && payload && (payload.provider_note || payload.quick_frame) ? (
+-            <Text style={styles.bgTrackText}>
+-              {payload.provider_note || `Live position from ${payload.quick_source === "rapidapi" ? "RapidAPI" : "RailRadar"} — full details loading…`}
++          {!gpsOn && payload ? (
++            // Which provider this frame came from — RailRadar is primary;
++            // RailKit only when RailRadar has nothing, with the reason shown.
++            <Text style={[styles.bgTrackText, payload.live_source === "railkit" && { color: colors.danger }]}>
++              {payload.live_source === "railkit"
++                ? `Live data: RailKit (backup) — RailRadar unavailable${payload.railradar_error ? `: ${payload.railradar_error}` : ""}`
++                : payload.provider_note
++                  ? payload.provider_note
++                  : payload.quick_frame
++                    ? "Live data: RailRadar — loading full details…"
++                    : payload.live_source === "railradar" ? "Live data: RailRadar" : null}
+             </Text>
+           ) : null}
+         </View>
+@@ -2043,6 +2051,14 @@ export default function LiveTrackingScreen({ navigation }) {
+         />
+       )}
+ 
++      {activeTrack && payload && !(payload.timeline && payload.timeline.length) && payload.error ? (
++        <View style={[styles.ryInfoBanner, { backgroundColor: "#fdecec", borderColor: "#f3b4b4" }]}>
++          <Ionicons name="cloud-offline-outline" size={16} color={colors.danger} />
++          <Text style={styles.ryInfoBannerText}>
++            {`Couldn't get live data yet. RailRadar: ${payload.railradar_error || "no data"}. RailKit: ${payload.error}. Retrying…`}
++          </Text>
++        </View>
++      ) : null}
+       {activeTrack && !payload ? (
+         <View style={styles.ryLoadingCard}>
+           <Ionicons name="train-outline" size={18} color={colors.primary} />

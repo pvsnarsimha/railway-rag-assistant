@@ -1988,9 +1988,17 @@ export default function LiveTrackingScreen({ navigation }) {
             </Text>
           ) : null}
           {shareLinkNote && <Text style={styles.errorText}>{shareLinkNote}</Text>}
-          {!gpsOn && payload && (payload.provider_note || payload.quick_frame) ? (
-            <Text style={styles.bgTrackText}>
-              {payload.provider_note || `Live position from ${payload.quick_source === "rapidapi" ? "RapidAPI" : "RailRadar"} — full details loading…`}
+          {!gpsOn && payload ? (
+            // Which provider this frame came from — RailRadar is primary;
+            // RailKit only when RailRadar has nothing, with the reason shown.
+            <Text style={[styles.bgTrackText, payload.live_source === "railkit" && { color: colors.danger }]}>
+              {payload.live_source === "railkit"
+                ? `Live data: RailKit (backup) — RailRadar unavailable${payload.railradar_error ? `: ${payload.railradar_error}` : ""}`
+                : payload.provider_note
+                  ? payload.provider_note
+                  : payload.quick_frame
+                    ? "Live data: RailRadar — loading full details…"
+                    : payload.live_source === "railradar" ? "Live data: RailRadar" : null}
             </Text>
           ) : null}
         </View>
@@ -2043,6 +2051,14 @@ export default function LiveTrackingScreen({ navigation }) {
         />
       )}
 
+      {activeTrack && payload && !(payload.timeline && payload.timeline.length) && payload.error ? (
+        <View style={[styles.ryInfoBanner, { backgroundColor: "#fdecec", borderColor: "#f3b4b4" }]}>
+          <Ionicons name="cloud-offline-outline" size={16} color={colors.danger} />
+          <Text style={styles.ryInfoBannerText}>
+            {`Couldn't get live data yet. RailRadar: ${payload.railradar_error || "no data"}. RailKit: ${payload.error}. Retrying…`}
+          </Text>
+        </View>
+      ) : null}
       {activeTrack && !payload ? (
         <View style={styles.ryLoadingCard}>
           <Ionicons name="train-outline" size={18} color={colors.primary} />

@@ -5382,6 +5382,17 @@ def _warm_live_sources(train_number: Optional[str]) -> None:
             pass
 
 
+@app.get("/api/live/provider-check")
+def api_live_provider_check(train_number: str, date: Optional[str] = None):
+    """DIAGNOSTIC: is RailRadar (the primary live source) configured on this
+    backend and answering for this train right now — and if not, exactly
+    why (key not set, 401 bad key, 404 no data, 429 quota, no route)."""
+    tn = (train_number or "").strip()
+    if not (tn.isdigit() and len(tn) == 5):
+        raise HTTPException(status_code=400, detail="train_number must be 5 digits")
+    return quick_live.railradar_status(tn, (date or "").strip() or None)
+
+
 @app.get("/api/live/warmup")
 def api_live_warmup(train_number: Optional[str] = None):
     """FEATURE (fast Live Tracking on internet): the app calls this as soon
@@ -7814,6 +7825,11 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "delay_minutes": position.delay_minutes,
                     "train_name": getattr(position, "train_name", None),
                     "live_source": live_source,
+                    # Why RailRadar wasn't used for this frame (key missing,
+                    # 401/404/429, no route...) — shown on the screen so a
+                    # RailKit frame is never a silent mystery.
+                    "railradar_error": (quick_live.LAST_RAILRADAR_ERROR.get(str(train_number))
+                                        if live_source == "railkit" else None),
                     "position_source": (
                         "railradar_segment_progress" if interp_lat is not None
                         else gps_tracking.position_source_label(current_timeline_entry.get("coordinates_from"))
@@ -8030,6 +8046,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     pass
             except railway_api.RailwayAPIError as e:
                 payload["error"] = str(e)
+                payload["railradar_error"] = quick_live.LAST_RAILRADAR_ERROR.get(str(train_number))
                 # RailKit / railkit-service unavailable: keep the screen live
                 # on RailRadar (else RapidAPI) instead of sending a frame
                 # with no timeline.
