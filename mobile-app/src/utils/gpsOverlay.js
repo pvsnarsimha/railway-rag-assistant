@@ -40,6 +40,52 @@ const DROP_LOCK_FIELDS = [
   "predicted_delay_low_minutes", "predicted_delay_high_minutes", "prediction_methods_compared",
 ];
 
+// ---------------------------------------------------------------------------
+// BUGFIX ("for GPS it is getting wrong data"): a phone that is ON this
+// train's route but NOT on the train (at home near the line, on a platform
+// waiting for it, on a different train) passed the old "within 5 km of the
+// route" check, so the whole screen jumped to the phone's position — e.g.
+// 20834 shown "just past Vijayawada" at 16:19 while the real train was still
+// ~250 km back, with made-up "2 hr 4 min late" pills. Now the phone's
+// position along the route must also agree with where the LIVE feed says
+// the train is (dead-reckoned forward when that reading is old / offline).
+// ---------------------------------------------------------------------------
+
+/** Train's distance-from-origin per the live feed, projected forward by
+ *  elapsed time when the reading is old. { km, ageMin, tolKm } or null. */
+export function liveTrainPosition(raw, now = new Date()) {
+  const tl = raw && Array.isArray(raw.timeline) ? raw.timeline : [];
+  if (!tl.length) return null;
+  let anchor = null;
+  tl.forEach((s) => { if ((s.status === "passed" || s.status === "current") && num(s.distance_km) != null) anchor = s; });
+  const firstKm = num(tl[0].distance_km);
+  let km = anchor ? num(anchor.distance_km) : (firstKm != null ? firstKm : null);
+  if (km == null) return null;
+  if (anchor && raw.distance_covered_since_last_stop_km != null) km += Math.max(0, Number(raw.distance_covered_since_last_stop_km) || 0);
+  const updated = raw.status_updated_at ? new Date(raw.status_updated_at).getTime() : NaN;
+  const ageMin = Number.isFinite(updated) ? Math.max(0, (now.getTime() - updated) / 60000) : 0;
+  const notStarted = !anchor;
+  const v = Number(raw.display_speed_kmph || raw.avg_speed_kmph) || 50;
+  // Dead-reckon forward only for a running train, and only up to 3 hours.
+  const moved = notStarted ? 0 : Math.min(ageMin, 180) / 60 * Math.min(Math.max(v, 20), 110);
+  const lastKm = num(tl[tl.length - 1].distance_km);
+  const est = lastKm != null ? Math.min(km + moved, lastKm) : km + moved;
+  // Allowed disagreement: 20 km baseline, widening with how stale the
+  // reading is (the train may have sped up or been held).
+  const tolKm = 20 + (notStarted ? 0 : Math.min(ageMin, 180) / 60 * 40);
+  return { km: est, ageMin, tolKm, notStarted };
+}
+
+/** Is the phone plausibly ON this train? { ok, gapKm, trainKm, ahead } */
+export function checkGpsOnTrain(raw, gps, now = new Date()) {
+  if (!gps || gps.error || gps.currentKm == null) return { ok: false, unknown: true };
+  const live = liveTrainPosition(raw, now);
+  if (!live) return { ok: true, unknown: true }; // nothing to compare against
+  const gap = gps.currentKm - live.km;
+  const acc = gps.accuracyM ? gps.accuracyM / 1000 : 0;
+  return { ok: Math.abs(gap) <= live.tolKm + acc, gapKm: Math.abs(gap), ahead: gap > 0, trainKm: live.km, notStarted: live.notStarted };
+}
+
 export function applyGpsOverlay(raw, gps, speedKmph, now = new Date()) {
   if (!raw || !gps || gps.error || gps.currentKm == null) return raw;
   if (gps.source !== "gps" && gps.source !== "cell") return raw;
@@ -53,9 +99,18 @@ export function applyGpsOverlay(raw, gps, speedKmph, now = new Date()) {
     if (d != null && d <= cur + 0.3) lastIdx = i;
   });
 
+  // A stop the live feed had NOT reached yet but the phone's GPS has just
+  // passed: its provider "actual" times are only predictions — never show
+  // them as real recorded times or as a delay pill.
+  const gpsOnlyPassed = (s) => {
+    if (s.status === "passed" || s.status === "current") return s;
+    const clean = (t) => (t ? { ...t, actual: null, delay_minutes: null, actual_is_predicted: true } : t);
+    return { ...s, arrival: clean(s.arrival), departure: clean(s.departure), gps_passed: true,
+      predicted_delay_minutes: null, predicted_eta: null };
+  };
   const mapped = tl.map((s, i) => {
-    if (i < lastIdx) return { ...s, status: "passed" };
-    if (i === lastIdx) return { ...s, status: "current" };
+    if (i < lastIdx) return { ...gpsOnlyPassed(s), status: "passed" };
+    if (i === lastIdx) return { ...gpsOnlyPassed(s), status: "current" };
     const out = { ...s, status: "upcoming" };
     const d = num(s.distance_km);
     if (d == null) return out;

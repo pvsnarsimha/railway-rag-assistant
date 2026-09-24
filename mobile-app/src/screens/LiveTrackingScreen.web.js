@@ -19,7 +19,7 @@ import { registerForPushNotifications, refreshWebPushToken, scheduleLocalAlarm, 
 import { formatDelayDuration } from "../utils/formatDelay";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 import OfflineTrackingCard from "../components/OfflineTrackingCard";
-import { applyGpsOverlay } from "../utils/gpsOverlay";
+import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
 } from "../services/backgroundTracking";
@@ -597,10 +597,19 @@ export default function LiveTrackingScreen({ navigation }) {
     const avg = rawPayload && (rawPayload.avg_speed_kmph || rawPayload.display_speed_kmph);
     return avg && avg > 10 ? avg : 50;
   }, [gpsResult, rawPayload]);
-  const payload = useMemo(
-    () => (gpsOn && gpsResult && !gpsResult.error ? applyGpsOverlay(rawPayload, gpsResult, gpsSpeedKmph) : rawPayload),
-    [gpsOn, gpsResult, gpsSpeedKmph, rawPayload],
+  // BUGFIX ("for GPS it is getting wrong data"): being NEAR the route isn't
+  // being ON the train. The phone's position along the route must also
+  // match where the live feed says the train is; until it does, the screen
+  // keeps showing the live (internet) data, never the phone's position.
+  const gpsVerdict = useMemo(
+    () => (gpsOn && gpsResult && !gpsResult.error ? checkGpsOnTrain(rawPayload, gpsResult) : null),
+    [gpsOn, gpsResult, rawPayload],
   );
+  const payload = useMemo(
+    () => (gpsVerdict && gpsVerdict.ok ? applyGpsOverlay(rawPayload, gpsResult, gpsSpeedKmph) : rawPayload),
+    [gpsVerdict, gpsResult, gpsSpeedKmph, rawPayload],
+  );
+  const gpsNotOnTrainCountRef = useRef(0);
 
   // REDESIGN (RailYatri-style live position marker): a real countdown to
   // the next WebSocket message — the backend sends a message every 5s
@@ -1790,6 +1799,24 @@ export default function LiveTrackingScreen({ navigation }) {
   }, [activeTrack, refreshNow]);
   const stopGps = useCallback(() => { setGpsOn(false); setApproachNotice(null); refreshNow(); }, [refreshNow]);
 
+  // Two GPS readings in a row that disagree with the live train position
+  // → the user is not on this train: say so and switch back to internet.
+  useEffect(() => {
+    if (!gpsOn || !gpsVerdict || gpsVerdict.unknown) return;
+    if (gpsVerdict.ok) { gpsNotOnTrainCountRef.current = 0; return; }
+    gpsNotOnTrainCountRef.current += 1;
+    if (gpsNotOnTrainCountRef.current < 2) return;
+    gpsNotOnTrainCountRef.current = 0;
+    const num = activeTrack ? activeTrack.trainNumber : "";
+    const km = Math.round(gpsVerdict.gapKm);
+    setGpsOn(false);
+    setApproachNotice(null);
+    setModeNotice(gpsVerdict.notStarted
+      ? `Train ${num} hasn't started yet, so you can't be on it. Use internet when you are not on the train — switching back to internet.`
+      : `You're about ${km} km ${gpsVerdict.ahead ? "ahead of" : "behind"} train ${num}, so you don't seem to be on it. Use internet when you are not on the train — switching back to internet.`);
+    if (activeParamsRef.current && !manualStopRef.current) refreshNow();
+  }, [gpsVerdict]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // REDESIGN (RailYatri-style live position marker): "X km covered so
   // far" — honestly derived, never invented, from two real payload
   // values: the last reporting station's own real distance-from-origin
@@ -2012,6 +2039,7 @@ export default function LiveTrackingScreen({ navigation }) {
           onResult={onGpsResult}
           onOffRoute={onGpsOffRoute}
           onStopGps={stopGps}
+          verifying={gpsOn && !!gpsResult && !gpsResult.error && !(gpsVerdict && gpsVerdict.ok)}
         />
       )}
 

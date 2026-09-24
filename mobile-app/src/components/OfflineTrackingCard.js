@@ -95,7 +95,7 @@ async function startGpsWatch(onFix, onError) {
 
 export default function OfflineTrackingCard({
   trainNumber, date, payload, connection, apiBaseUrl,
-  gpsOn, onNeedGps, onResult, onOffRoute, onStopGps,
+  gpsOn, onNeedGps, onResult, onOffRoute, onStopGps, verifying,
 }) {
   const online = useOnlineStatus();
   const [cache, setCache] = useState(null);
@@ -281,6 +281,7 @@ export default function OfflineTrackingCard({
     if (result.source === "timetable") bits.push("no GPS fix — timetable estimate");
     if (result.source === "cell") bits.push("cell tower");
     line = bits.join(" · ") || "GPS position on route";
+    if (verifying) line = `Checking you're on this train… (${line})`;
   }
 
   return (
