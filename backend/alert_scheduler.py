@@ -172,11 +172,66 @@ def _resolve_prediction(predict_fn, w: dict):
     if isinstance(result, dict):
         return (result.get("status", "predicted"), result.get("delay_minutes"),
                 result.get("station"), result.get("message"), result.get("actual_time"),
-                result.get("running"))
+                result.get("running"), result)
     if isinstance(result, tuple):
         delay, station = result
-        return ("predicted" if delay is not None else "unavailable", delay, station, None, None, None)
-    return ("predicted" if result is not None else "unavailable", result, None, None, None, None)
+        return ("predicted" if delay is not None else "unavailable", delay, station, None, None, None, {})
+    return ("predicted" if result is not None else "unavailable", result, None, None, None, None, {})
+
+
+# FEATURE: "10 min before, tell me the train is about to arrive — be alert".
+# Fires ONCE per bell (push_store.approach_notified_at) as soon as the live,
+# physics-checked ETA to that bell's station drops to this many minutes.
+APPROACH_ALERT_MINUTES = 10
+# Only announce an arrival as "just reached" when it really happened
+# recently; an old arrival (bell armed late, app reopened hours later) just
+# switches the bell off silently.
+REACHED_NOTICE_WINDOW_MINUTES = 45
+
+
+def _arrival_is_recent(actual_time: Optional[str]) -> bool:
+    import running_status  # local import: keeps this module importable in isolation
+    ahead = running_status.clock_minutes_ahead(actual_time, running_status.ist_now())
+    return ahead is not None and -REACHED_NOTICE_WINDOW_MINUTES <= ahead <= 5
+
+
+def _retire_reached_watch(w: dict, station: Optional[str], actual_time: Optional[str],
+                          running: Optional[dict]) -> bool:
+    """FEATURE: bell auto-off. The train has really reached this bell's
+    station: send one final "reached — alert switched off" notice (only if
+    the arrival is recent and this device wasn't already told), then retire
+    the watch so no further notification is ever sent for it. Returns True
+    when a push was sent."""
+    sent = False
+    if w.get("last_notified_delay") != _ALREADY_REACHED_SENTINEL and _arrival_is_recent(actual_time):
+        import running_status
+        clock = running_status._hhmm(actual_time)
+        name = running_status._title(station) or station or (w.get("label") or "your station")
+        msg = f"Reached {name}" + (f" at {clock}" if clock else "") + " · this station's alert is now switched off."
+        res = push_notifications.send_station_status_alert(
+            token=w["token"], train_number=w["train_number"], label=None,
+            station=station, message=msg, actual_time=actual_time, running=running,
+        )
+        sent = bool(res.get("sent"))
+    try:
+        push_store.retire_watch(w)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Couldn't retire watch id=%s: %s", w.get("id"), e)
+    return sent
+
+
+def _push_approach(w: dict, extra: dict, delay: Optional[int], station: Optional[str],
+                   running: Optional[dict]) -> bool:
+    res = push_notifications.send_approach_alert(
+        token=w["token"], train_number=w["train_number"], station=station or w.get("label"),
+        minutes=extra.get("minutes_to_arrival"), eta_text=extra.get("predicted_eta"),
+        km=extra.get("km_to_station"), delay_minutes=delay, running=running,
+    )
+    if res.get("sent"):
+        push_store.mark_approach_notified(w["id"])
+        return True
+    logger.warning("Approach push failed for watch id=%s: %s", w["id"], res.get("error"))
+    return False
 
 
 def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[int], Optional[str]]"]) -> dict:
@@ -200,7 +255,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
             cache_key = (str(w["train_number"]), w.get("date"), (w.get("label") or "").strip().upper())
             if cache_key not in prediction_cache:
                 prediction_cache[cache_key] = _resolve_prediction(predict_fn, w)
-            status, delay, predicted_station, message, actual_time, running = prediction_cache[cache_key]
+            status, delay, predicted_station, message, actual_time, running, extra = prediction_cache[cache_key]
         except Exception as e:  # noqa: BLE001 - one bad watch shouldn't kill the pass
             logger.warning("Prediction failed for watch id=%s train=%s: %s", w["id"], w["train_number"], e)
             continue
@@ -226,27 +281,48 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
         # a watch whose label doesn't match a real station on this train's
         # route gets no notification at all (not a delay, just an invalid
         # watch) — same for "unavailable" (no live data to go on yet).
-        if status in ("not_on_route", "unavailable", "journey_completed"):
+        if status == "journey_completed":
+            # Whole run is over — nothing left to alert on for this bell.
+            try:
+                push_store.retire_watch(w)
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        if status in ("not_on_route", "unavailable"):
             continue
         if status == "already_reached":
+            # BUGFIX / FEATURE (bell auto-off): once the train reaches a
+            # bell's station the bell switches itself off — one final
+            # "Reached X at HH:MM" notice (only if it just happened), then
+            # the watch is retired so NO further notification is sent for
+            # it, even if the device later re-syncs its old local list.
             breached += 1
-            last_notified = w.get("last_notified_delay")
-            if last_notified == _ALREADY_REACHED_SENTINEL:
-                continue  # already told this device this station was reached
-            result = _push_station_status(w, predicted_station, message or "", actual_time, running)
-            if result["sent"]:
-                logger.info("PUSH sent (already reached, one-time) watch id=%s train=%s station=%s",
+            if _retire_reached_watch(w, predicted_station, actual_time, running):
+                logger.info("PUSH sent (reached, bell auto-off) watch id=%s train=%s station=%s",
                             w["id"], w["train_number"], predicted_station)
                 pushed += 1
             else:
-                push_failed += 1
+                logger.info("Bell auto-off (silent) watch id=%s train=%s station=%s",
+                            w["id"], w["train_number"], predicted_station)
             continue
+
+        # FEATURE: "train about to arrive in the next ~10 min — be alert".
+        minutes_to_arrival = (extra or {}).get("minutes_to_arrival")
+        if (status == "predicted" and w.get("label") and minutes_to_arrival is not None
+                and 0 <= minutes_to_arrival <= APPROACH_ALERT_MINUTES and not w.get("approach_notified_at")):
+            if _push_approach(w, extra, delay, predicted_station, running):
+                pushed += 1
+                push_store.mark_notified(w["id"], delay if delay is not None else 0)
+                logger.info("PUSH sent (arriving in ~%s min) watch id=%s train=%s station=%s",
+                            minutes_to_arrival, w["id"], w["train_number"], predicted_station)
+                continue  # the approach notice already carries the delay — no second push this tick
+            push_failed += 1
 
         if delay is None or delay < w["threshold_minutes"]:
             continue
         breached += 1
         # Collected, not pushed yet — see the grouping pass below.
-        groups.setdefault((w["token"], w["train_number"], w.get("date")), []).append((w, delay, predicted_station))
+        groups.setdefault((w["token"], w["train_number"], w.get("date")), []).append((w, delay, predicted_station, extra or {}))
         running_by_train[(str(w["train_number"]), w.get("date"))] = running
 
     # BUGFIX ("notification every 2 minutes after I closed the app"): each
@@ -266,10 +342,10 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
                                            "threshold_minutes": repeat}):
             continue
         items.sort(key=lambda it: -it[1])
-        head_w, head_delay, head_station = items[0]
+        head_w, head_delay, head_station, head_extra = items[0]
         summary_text = None
         if len(items) > 1:
-            summary_text = ", ".join(f"{(st or 'next stop').title()} ~{d} min" for _w, d, st in items[:4])
+            summary_text = ", ".join(f"{(st or 'next stop').title()} ~{d} min" for _w, d, st, _x in items[:4])
             if len(items) > 4:
                 summary_text += f" +{len(items) - 4} more"
         result = push_notifications.send_delay_alert(
@@ -277,13 +353,15 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
             predicted_delay_minutes=head_delay, predicted_for_station=head_station,
             stations_summary=summary_text,
             running=running_by_train.get((str(train_number), _date)),
+            eta_text=head_extra.get("predicted_eta"), minutes_to_arrival=head_extra.get("minutes_to_arrival"),
+            km_to_station=head_extra.get("km_to_station"),
         )
         if result["sent"]:
             pushed += 1
-            for w, d, _st in items:
+            for w, d, _st, _x in items:
                 push_store.mark_notified(w["id"], d)
             logger.info("PUSH sent train=%s stations=%s next in %s min",
-                        train_number, [st for _w, _d, st in items], repeat)
+                        train_number, [st for _w, _d, st, _x in items], repeat)
         else:
             push_failed += 1
             logger.warning("Push failed for train=%s watches=%s: %s",

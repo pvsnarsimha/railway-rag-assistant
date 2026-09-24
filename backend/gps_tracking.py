@@ -1555,6 +1555,8 @@ def group_timeline_for_display(timeline_json: list) -> list:
                  "predicted_delay_low_minutes": p.get("predicted_delay_low_minutes"),
                  "predicted_delay_high_minutes": p.get("predicted_delay_high_minutes"),
                  "predicted_eta": p.get("predicted_eta"),
+                 "predicted_eta_source": p.get("predicted_eta_source"),
+                 "minutes_away": p.get("minutes_away"),
                  "distance_ahead_km": p.get("distance_ahead_km")}
                 for p in pending
             ],

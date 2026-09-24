@@ -199,6 +199,9 @@ def send_delay_alert(
     predicted_for_station: Optional[str] = None,
     stations_summary: Optional[str] = None,
     running: Optional[dict] = None,
+    eta_text: Optional[str] = None,
+    minutes_to_arrival: Optional[float] = None,
+    km_to_station: Optional[float] = None,
 ) -> dict:
     """
     Send one push notification for a breached delay-alert watch.
@@ -236,6 +239,17 @@ def send_delay_alert(
             f"{display_name} is now predicted ~{predicted_delay_minutes} min late{station_phrase} "
             f"(as of {checked_at.strftime('%H:%M')})."
         )
+    # Current, physics-checked ETA to the bell's station — "ETA 04:07 ·
+    # 2 km away" rather than a far-off timetable-based time.
+    eta_bits = []
+    if eta_text:
+        eta_bits.append(f"ETA {eta_text}")
+    if minutes_to_arrival is not None:
+        eta_bits.append("arriving now" if minutes_to_arrival < 1 else f"in ~{int(round(minutes_to_arrival))} min")
+    if km_to_station is not None:
+        eta_bits.append(f"{km_to_station:g} km away")
+    if eta_bits:
+        body += f"\n{(predicted_for_station or 'Station').title()}: " + " · ".join(eta_bits)
     # FEATURE (RailYatri-style): lead with WHERE the train is right now —
     # "Crossed Aluva at 17:54 · 26 km to Thrissur" — then the prediction.
     position_line = (running or {}).get("headline")
@@ -371,6 +385,59 @@ def send_alarm_alert(
         notification=messaging.Notification(title=title, body=body),
         data=data,
         webpush=_webpush_config(title, body, tag=f"smart_alarm-{train_number}-{station}"),
+    )
+    try:
+        messaging.send(fcm_message)
+        return {"sent": True, "error": None}
+    except Exception as e:  # noqa: BLE001
+        return {"sent": False, "error": str(e)}
+
+
+def send_approach_alert(
+    token: str, train_number: str, station: Optional[str], minutes: Optional[float] = None,
+    eta_text: Optional[str] = None, km: Optional[float] = None, delay_minutes: Optional[int] = None,
+    running: Optional[dict] = None,
+) -> dict:
+    """
+    FEATURE: "train about to arrive — be alert". Sent ONCE per bell when
+    the live, physics-checked ETA to that bell's station drops to ~10 min
+    (see alert_scheduler.APPROACH_ALERT_MINUTES). Always alerts (buzz +
+    re-notify) — this is the one a passenger waiting on the platform or
+    about to get down must not miss. Same never-raises contract.
+    """
+    checked_at = _ist_now()
+    name = " ".join(w.capitalize() if len(w) > 2 else w for w in str(station or "your station").split())
+    when = "any moment now" if minutes is not None and minutes < 1 else (
+        f"in ~{int(round(minutes))} min" if minutes is not None else "in the next 10 min")
+    title = f"🚆 {train_number} arriving at {name} {when}"
+    bits = []
+    if eta_text:
+        bits.append(f"ETA {eta_text}")
+    if km is not None:
+        bits.append(f"{km:g} km away")
+    if delay_minutes is not None:
+        bits.append("on time" if delay_minutes <= 0 else f"{delay_minutes} min late")
+    body = f"Please be alert — the train will reach {name} in the next 5–10 minutes."
+    if bits:
+        body += "\n" + " · ".join(bits)
+    if (running or {}).get("headline"):
+        body = f"{running['headline']}\n{body}"
+    body += f"\n(as of {checked_at.strftime('%H:%M')})"
+    data = {
+        "type": "approach_alert", "train_number": str(train_number), "station": station or "",
+        "eta": eta_text or "", "minutes": "" if minutes is None else str(int(round(minutes))),
+        "checked_at": checked_at.strftime("%H:%M"),
+    }
+    if _is_expo_token(token):
+        return _send_via_expo(token, title, body, data, sound="default")
+    if not _ensure_initialized():
+        return {"sent": False, "error": _init_error}
+    from firebase_admin import messaging
+    fcm_message = messaging.Message(
+        token=token,
+        notification=messaging.Notification(title=title, body=body),
+        data=data,
+        webpush=_webpush_config(title, body, tag=f"approach-{train_number}-{station or ''}"),
     )
     try:
         messaging.send(fcm_message)

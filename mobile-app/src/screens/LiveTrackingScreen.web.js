@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Share, Linking } from "react-native";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Share, Linking, Modal } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
@@ -18,6 +18,7 @@ import { registerForPushNotifications, refreshWebPushToken, scheduleLocalAlarm, 
 import { formatDelayDuration } from "../utils/formatDelay";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 import OfflineTrackingCard from "../components/OfflineTrackingCard";
+import { applyGpsOverlay } from "../utils/gpsOverlay";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
 } from "../services/backgroundTracking";
@@ -34,6 +35,51 @@ import {
 // watchlist or a second push registration.
 const PUSH_TOKEN_KEY = "moreTools.pushToken";
 const ALERTS_KEY = "moreTools.delayAlerts";
+
+// FEATURE ("Start tracking should show the live tracking INSTANTLY, and
+// coming back to the app it should be back on the live position within a
+// second"): the last live payload per train is kept on the device and
+// painted immediately on Start / app resume, while the live connection
+// catches up in the background (the server also pushes its own latest
+// snapshot the moment the socket opens — see ws_track_train).
+const LAST_PAYLOAD_PREFIX = "liveTracking.lastPayload.";
+const LAST_PAYLOAD_MAX_AGE_MS = 6 * 3600 * 1000;
+const LAST_PAYLOAD_SAVE_EVERY_MS = 15000;
+function lastPayloadKey(trainNumber, date) {
+  return `${LAST_PAYLOAD_PREFIX}${String(trainNumber || "").trim()}|${effectiveTrackDate(date)}`;
+}
+async function loadLastPayload(trainNumber, date) {
+  try {
+    const raw = await AsyncStorage.getItem(lastPayloadKey(trainNumber, date));
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    if (!v || !v.payload || Date.now() - (v.savedAt || 0) > LAST_PAYLOAD_MAX_AGE_MS) return null;
+    return v.payload;
+  } catch (e) {
+    return null;
+  }
+}
+async function saveLastPayload(trainNumber, date, payload) {
+  try {
+    await AsyncStorage.setItem(lastPayloadKey(trainNumber, date), JSON.stringify({ savedAt: Date.now(), payload }));
+  } catch (e) { /* storage full / private mode — the live feed still works */ }
+}
+
+// FEATURE: "train about to arrive in the next 5–10 min, be alert" — for
+// an armed bell. The server pushes this too; the in-app banner (and, on
+// GPS with no internet, a local notification) covers the cases a server
+// push can't reach.
+const APPROACH_ALERT_MINUTES = 10;
+function showLocalNotice(title, body, tag) {
+  try {
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      // eslint-disable-next-line no-new
+      new Notification(title, { body, tag, renotify: true, vibrate: [200, 100, 200, 100, 200] });
+      return true;
+    }
+  } catch (e) { /* ignore */ }
+  return false;
+}
 
 // Custom Smart Alarm lead time, per the exact UX requested: a quick-pick
 // row of common values, or "Custom" for a free-typed value — plain
@@ -160,6 +206,28 @@ function pruneExpiredWatches(list) {
     if (!m) return true;
     return new Date(+m[3], +m[2] - 1, +m[1]) >= cutoff;
   });
+}
+
+// FEATURE: bell auto-off — drops local delay watches the server has
+// already switched off (station reached). `retired` rows come back from
+// POST /api/push/watches as { train_number, date, label }.
+function dropRetiredWatches(list, retired) {
+  if (!Array.isArray(retired) || !retired.length) return list;
+  const gone = new Set(retired.map((r) => `${String(r.train_number).trim()}|${r.date || ""}|${String(r.label || "").toUpperCase()}`));
+  return (list || []).filter((w) => !gone.has(`${String(w.trainNumber).trim()}|${w.date || ""}|${String(w.label || "").toUpperCase()}`));
+}
+
+// "Today" / "Yesterday" / "Tomorrow" / "24 Sep" for the header date switch.
+function trackDateLabel(ddmmyyyy) {
+  const m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(String(ddmmyyyy || ""));
+  if (!m) return "Today";
+  const d = new Date(+m[3], +m[2] - 1, +m[1]);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const diff = Math.round((d.getTime() - today.getTime()) / 86400000);
+  if (diff === 0) return "Today";
+  if (diff === -1) return "Yesterday";
+  if (diff === 1) return "Tomorrow";
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 }
 
 function effectiveTrackDate(trackDateInput) {
@@ -487,8 +555,51 @@ export default function LiveTrackingScreen({ navigation }) {
   const [trackDate, setTrackDate] = useState("");
   const [dayPickerVisible, setDayPickerVisible] = useState(false);
   const [connection, setConnection] = useState("idle");
-  const [payload, setPayload] = useState(null);
+  // The last payload from the live server feed (or its on-device copy).
+  const [rawPayload, setPayload] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const lastPayloadSavedAtRef = useRef(0);
+
+  // FEATURE: GPS mode (RailYatri-style "Are you inside the train?").
+  // GPS is used only when the user confirms they're ON this train (or
+  // there's no internet) — then the whole screen (timeline, train marker,
+  // ETAs, next station, map) is driven by the phone's own GPS position via
+  // applyGpsOverlay. If the GPS fix is far from this train's route the user
+  // isn't on it: an error is shown and tracking switches back to internet.
+  const [gpsOn, setGpsOn] = useState(false);
+  const [gpsAsk, setGpsAsk] = useState(null); // null | { reason }
+  const [gpsResult, setGpsResult] = useState(null);
+  const [modeNotice, setModeNotice] = useState(null); // red RailYatri-style banner text
+  const gpsHistoryRef = useRef([]); // [{ km, t }] recent GPS route positions, for a real speed
+  const onGpsResult = useCallback((r) => {
+    setGpsResult(r);
+    if (r && !r.error && r.currentKm != null && (r.source === "gps" || r.source === "cell")) {
+      const t = r.fixAt || Date.now();
+      const hist = gpsHistoryRef.current.filter((h) => t - h.t < 5 * 60000 && t >= h.t);
+      hist.push({ km: r.currentKm, t });
+      gpsHistoryRef.current = hist.slice(-30);
+    }
+  }, []);
+  const gpsSpeedKmph = useMemo(() => {
+    if (!gpsResult || gpsResult.error) return null;
+    if (gpsResult.speedKmph != null && gpsResult.speedKmph >= 10) return Math.min(gpsResult.speedKmph, 130);
+    const hist = gpsHistoryRef.current;
+    if (hist.length >= 2) {
+      const a = hist[0], b = hist[hist.length - 1];
+      const dtH = (b.t - a.t) / 3600000;
+      if (dtH > 45 / 3600) {
+        const v = (b.km - a.km) / dtH;
+        if (v >= 10) return Math.min(v, 130);
+      }
+    }
+    // Stopped at a signal/station: ETAs assume it resumes at its usual pace.
+    const avg = rawPayload && (rawPayload.avg_speed_kmph || rawPayload.display_speed_kmph);
+    return avg && avg > 10 ? avg : 50;
+  }, [gpsResult, rawPayload]);
+  const payload = useMemo(
+    () => (gpsOn && gpsResult && !gpsResult.error ? applyGpsOverlay(rawPayload, gpsResult, gpsSpeedKmph) : rawPayload),
+    [gpsOn, gpsResult, gpsSpeedKmph, rawPayload],
+  );
 
   // REDESIGN (RailYatri-style live position marker): a real countdown to
   // the next WebSocket message — the backend sends a message every 5s
@@ -567,7 +678,7 @@ export default function LiveTrackingScreen({ navigation }) {
   // real WS message actually arrived, independent of React state, so the
   // watchdog can check it on its own timer without re-subscribing.
   const lastMessageAtRef = useRef(0);
-  const reconnectDelayRef = useRef(3000);
+  const reconnectDelayRef = useRef(1000);
   // RailYatri-style collapsed "+N No-Halt stations" groups — which ones the
   // user has tapped open, keyed by index within timelineGrouped below.
   const [expandedGroups, setExpandedGroups] = useState({});
@@ -654,6 +765,14 @@ export default function LiveTrackingScreen({ navigation }) {
   const delayWatchBusy = !!delayModalKey && delayWatchBusyKey === delayModalKey;
   const delayWatchStatus = delayWatchStatusState && delayWatchStatusState.key === delayModalKey ? delayWatchStatusState : null;
   const reloadWatchesSeqRef = useRef(0);
+  // FEATURE: bell auto-off + "arriving in ~10 min" notices shown in-app.
+  const [bellNotice, setBellNotice] = useState(null);
+  const [approachNotice, setApproachNotice] = useState(null); // { code, name, minutes, eta }
+  const approachFiredRef = useRef({});
+  // Collapses the "Track a train" form into a compact RailYatri-style
+  // header once a train is being tracked (tap "Change" to edit).
+  const [formOpen, setFormOpen] = useState(true);
+  const datePickForHeaderRef = useRef(false);
 
   // FEATURE: Smart Alarm — same station-arrival wake-up as
   // MoreToolsScreen.js's SmartAlarmTool / the native TrackedTrainCard.js,
@@ -690,6 +809,8 @@ export default function LiveTrackingScreen({ navigation }) {
     setStationWatchesState({ key, map });
   }, [activeTrack]);
   useEffect(() => { reloadStationWatches(); }, [reloadStationWatches]);
+  const reloadStationWatchesRef = useRef(null);
+  useEffect(() => { reloadStationWatchesRef.current = reloadStationWatches; }, [reloadStationWatches]);
 
   // Switching to a different tracked train closes any alert sheet still
   // open for the previous one.
@@ -729,7 +850,14 @@ export default function LiveTrackingScreen({ navigation }) {
         const raw = await AsyncStorage.getItem(ALERTS_KEY);
         const list = pruneExpiredWatches(raw ? JSON.parse(raw) : []);
         await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(list));
-        if (list.length || (cached && cached !== token)) await syncPushWatches(apiBaseUrl, token, list);
+        if (list.length || (cached && cached !== token)) {
+          const res = await syncPushWatches(apiBaseUrl, token, list);
+          const kept = dropRetiredWatches(list, res && res.retired);
+          if (kept.length !== list.length) {
+            await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(kept));
+            if (!cancelled) reloadStationWatchesRef.current && reloadStationWatchesRef.current();
+          }
+        }
       } catch (e) { /* best-effort — arming a bell still syncs on its own */ }
     })();
     return () => { cancelled = true; };
@@ -779,7 +907,12 @@ export default function LiveTrackingScreen({ navigation }) {
         if (settings) setStatus(false, reason || "Saved, but background push isn't available on this device/browser.");
         return { ok: true };
       }
-      await syncPushWatches(apiBaseUrl, token, merged);
+      const syncRes = await syncPushWatches(apiBaseUrl, token, merged);
+      const kept = dropRetiredWatches(merged, syncRes && syncRes.retired);
+      if (kept.length !== merged.length) {
+        await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(kept));
+        await reloadStationWatches();
+      }
       if (settings) {
         setStatus(true, `Alert set for ${station.name}: a push every ${settings.repeatMinutes} min while it's predicted ≥ ${settings.threshold} min late.`);
       }
@@ -1073,8 +1206,10 @@ export default function LiveTrackingScreen({ navigation }) {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       setRefreshing(true);
       wsRef.current.send(JSON.stringify({ type: "refresh" }));
+    } else if (activeParamsRef.current && !manualStopRef.current) {
+      openSocket(activeParamsRef.current, true); // eslint-disable-line no-use-before-define
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     return () => {
@@ -1111,38 +1246,55 @@ export default function LiveTrackingScreen({ navigation }) {
   //      foregrounded) — the single most common real moment a mobile
   //      browser's suspended socket needs replacing — checked immediately
   //      instead of waiting out the watchdog's own poll interval.
+  // FEATURE ("if I exit the app or jump into another app and come back, it
+  // should NOT lag to reconnect — within 1 sec it should be back on the
+  // live position"): the moment the page is visible / focused / back from
+  // the bfcache / back online, a socket that isn't OPEN, or is nominally
+  // open but silent for more than ~2 server pushes, is replaced
+  // IMMEDIATELY (no backoff); a healthy one is just asked for a fresh push
+  // right now. The screen keeps showing the last live position meanwhile
+  // (never a "Connecting…" blank), and the server replies to a new socket
+  // with its latest snapshot instantly.
   useEffect(() => {
-    const STALE_MS = 25000; // ~5x the backend's real 5s push cadence
+    const STALE_MS = 12000; // > 2x the backend's real 5s push cadence
     const watchdog = setInterval(() => {
       if (manualStopRef.current || !wsRef.current) return;
       if (wsRef.current.readyState !== WebSocket.OPEN) return;
       if (Date.now() - lastMessageAtRef.current > STALE_MS) {
-        wsRef.current.close(); // -> existing onclose handler auto-reconnects
-      }
-    }, 8000);
-
-    function onVisibilityChange() {
-      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
-      if (manualStopRef.current || !activeParamsRef.current) return;
-      const stale = Date.now() - lastMessageAtRef.current > STALE_MS;
-      const dead = !wsRef.current
-        || wsRef.current.readyState === WebSocket.CLOSED
-        || wsRef.current.readyState === WebSocket.CLOSING;
-      if (stale || dead) {
         openSocket(activeParamsRef.current, true);
       }
+    }, 4000);
+
+    function resumeNow() {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (manualStopRef.current || !activeParamsRef.current) return;
+      const ws = wsRef.current;
+      const quietFor = Date.now() - lastMessageAtRef.current;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING || quietFor > 7000) {
+        if (reconnectTimeoutRef.current) { clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
+        reconnectDelayRef.current = 1000;
+        openSocket(activeParamsRef.current, true);
+      } else if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: "refresh" })); } catch (e) { /* ignore */ }
+      }
     }
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", onVisibilityChange);
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", resumeNow);
+    if (typeof window !== "undefined") {
+      window.addEventListener("focus", resumeNow);
+      window.addEventListener("pageshow", resumeNow);
+      window.addEventListener("online", resumeNow);
     }
 
     return () => {
       clearInterval(watchdog);
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", resumeNow);
+      if (typeof window !== "undefined") {
+        window.removeEventListener("focus", resumeNow);
+        window.removeEventListener("pageshow", resumeNow);
+        window.removeEventListener("online", resumeNow);
       }
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Does the actual work of opening the WebSocket for a fixed set of
   // params (captured once in activeParamsRef when the user presses "Start
@@ -1159,16 +1311,32 @@ export default function LiveTrackingScreen({ navigation }) {
     // wiping the marker/route/fitBounds state here made the map visibly
     // jump/re-fit to a new pan+zoom on every reconnect instead of just
     // letting the marker glide onto its next real position on a static map.
-    const isSameTrainReconnect = params.trainNumber === lastConnectedTrainRef.current;
-    wsRef.current?.close();
+    const connectKey = `${params.trainNumber}|${effectiveTrackDate(params.date)}`;
+    const isSameTrainReconnect = connectKey === lastConnectedTrainRef.current;
+    const old = wsRef.current;
     wsRef.current = null;
+    if (old) {
+      // Detach first so the old socket's late onclose can't schedule a
+      // second, competing reconnect.
+      old.onclose = null; old.onmessage = null; old.onerror = null;
+      try { old.close(); } catch (e) { /* ignore */ }
+    }
     setConnection("connecting");
-    if (!isRetry) {
+    if (!isRetry && !isSameTrainReconnect) {
+      // Switching trains: drop the old train's screen, then paint this
+      // train's last known live status from the device INSTANTLY (no blank
+      // "connecting" screen) while the live feed catches up.
       setPayload(null);
       setDelaySparkline([]);
       tripSummaryShownKeyRef.current = null;
       setTripSummary(null);
       setTripSummaryShareStatus(null);
+      const wantTrain = params.trainNumber;
+      loadLastPayload(wantTrain, params.date).then((cached) => {
+        if (!cached || String(cached.train_number || wantTrain) !== String(wantTrain)) return;
+        if (!activeParamsRef.current || activeParamsRef.current.trainNumber !== wantTrain) return;
+        setPayload((prev) => prev || { ...cached, from_device_cache: true });
+      });
     }
 
     if (!isSameTrainReconnect) {
@@ -1186,7 +1354,7 @@ export default function LiveTrackingScreen({ navigation }) {
       routeBoundsFitRef.current = false;
       autoScrolledRef.current = false;
     }
-    lastConnectedTrainRef.current = params.trainNumber;
+    lastConnectedTrainRef.current = connectKey;
 
     const url = buildTrackingWsUrl(wsBaseUrl, params.trainNumber, {
       date: params.date || undefined,
@@ -1207,14 +1375,25 @@ export default function LiveTrackingScreen({ navigation }) {
       // A successful connection means whatever went wrong last time is
       // over — back off from scratch next time, instead of the delay
       // staying stretched out from an earlier stretch of bad connectivity.
-      reconnectDelayRef.current = 3000;
+      reconnectDelayRef.current = 1000;
       lastMessageAtRef.current = Date.now();
     };
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         lastMessageAtRef.current = Date.now();
+        if (data.snapshot) {
+          // Server's own last-known payload, sent the instant the socket
+          // opens — shown only if nothing fresher is already on screen.
+          setPayload((prev) => (!prev || prev.from_device_cache || prev.snapshot ? data : prev));
+          return;
+        }
         setPayload(data);
+        if (data.timeline && data.timeline.length && !data.error
+            && Date.now() - lastPayloadSavedAtRef.current > LAST_PAYLOAD_SAVE_EVERY_MS) {
+          lastPayloadSavedAtRef.current = Date.now();
+          saveLastPayload(params.trainNumber, params.date, data);
+        }
 
         // FEATURE: Live delay-trend sparkline.
         const sparkValue = data.predicted_delay_minutes != null ? data.predicted_delay_minutes : data.delay_minutes;
@@ -1278,7 +1457,7 @@ export default function LiveTrackingScreen({ navigation }) {
       if (manualStopRef.current) return;
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       const delay = reconnectDelayRef.current;
-      reconnectDelayRef.current = Math.min(delay * 1.5, 20000);
+      reconnectDelayRef.current = Math.min(delay * 1.6, 15000);
       reconnectTimeoutRef.current = setTimeout(() => {
         reconnectTimeoutRef.current = null;
         openSocket(activeParamsRef.current, true);
@@ -1312,12 +1491,20 @@ export default function LiveTrackingScreen({ navigation }) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-    reconnectDelayRef.current = 3000;
+    reconnectDelayRef.current = 1000;
     manualStopRef.current = false;
+    if (activeParamsRef.current && activeParamsRef.current.trainNumber !== params.trainNumber) {
+      // GPS mode belongs to the train the user said they're on — a
+      // different train starts back on internet.
+      setGpsOn(false);
+      setModeNotice(null);
+      gpsHistoryRef.current = [];
+    }
     activeParamsRef.current = params;
     // Pin the bells / delay alerts to THIS train + run date (blank = today,
     // pinned now so it can't drift past midnight) — see activeTrack above.
     const trackedDate = effectiveTrackDate(params.date);
+    setFormOpen(false);
     setActiveTrack((prev) => (prev && prev.trainNumber === params.trainNumber && prev.date === trackedDate
       ? prev
       : { trainNumber: params.trainNumber, date: trackedDate }));
@@ -1338,6 +1525,9 @@ export default function LiveTrackingScreen({ navigation }) {
   // screen or closing the app keeps it going in the background.
   function stopTracking() {
     const params = activeParamsRef.current;
+    setGpsOn(false);
+    setModeNotice(null);
+    setFormOpen(true);
     disconnect();
     clearActiveTrack();
     setBgTracking(null);
@@ -1480,6 +1670,96 @@ export default function LiveTrackingScreen({ navigation }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.current_station]);
 
+  // FEATURE: bell auto-off. Once the train (live feed OR the phone's own
+  // GPS) has really reached a station whose bell is armed, that bell turns
+  // itself off: removed from this device's list, re-synced so the server
+  // stops too (the server independently retires it as well), and a short
+  // "reached — alert switched off" note is shown. No further notifications
+  // are sent for that station.
+  const armedCodesKey = Object.keys(stationWatches).sort().join(",");
+  const reachedCodesKey = [...reallyReachedCodes].sort().join(",");
+  useEffect(() => {
+    if (!activeTrack || !bellsEnabledForPayload || !armedCodesKey) return;
+    const hit = armedCodesKey.split(",").filter((c) => c && (ltJourneyLikelyComplete || reallyReachedCodes.has(c)));
+    if (!hit.length) return;
+    const track = activeTrack;
+    const names = hit.map((c) => {
+      const st = timeline.find((x) => String(x.code || "").toUpperCase() === c);
+      return st ? toDisplayCase(st.name) : c;
+    });
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(ALERTS_KEY);
+        const list = raw ? JSON.parse(raw) : [];
+        const kept = list.filter((w) => !(String(w.trainNumber) === track.trainNumber
+          && (w.date || null) === track.date && hit.includes(String(w.label || "").toUpperCase())));
+        if (kept.length === list.length) return;
+        await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(kept));
+        await reloadStationWatches();
+        const msg = `${names.join(", ")} reached — ${hit.length > 1 ? "those alerts are" : "its alert is"} switched off now.`;
+        setBellNotice(msg);
+        if (gpsOn) showLocalNotice(`🔕 Train ${track.trainNumber}`, msg, `bell-off-${track.trainNumber}`);
+        const token = await AsyncStorage.getItem(PUSH_TOKEN_KEY);
+        if (token) { try { await syncPushWatches(apiBaseUrl, token, kept); } catch (e) { /* server retires it on its own too */ } }
+      } catch (e) { /* best-effort */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [armedCodesKey, reachedCodesKey, activeTrackKey, ltJourneyLikelyComplete]);
+
+  // FEATURE: "before 10 min, tell me the train is about to arrive — be
+  // alert". For every armed bell, the live (or GPS) ETA to that station is
+  // watched; once it's within APPROACH_ALERT_MINUTES a banner is shown
+  // once. On GPS (often no internet on the train, so no server push can
+  // arrive) a local system notification is raised too.
+  useEffect(() => {
+    if (!activeTrack || !payload || !armedCodesKey) return;
+    armedCodesKey.split(",").forEach((code) => {
+      if (!code) return;
+      const st = timeline.find((x) => String(x.code || "").toUpperCase() === code && x.status === "upcoming");
+      if (!st) return;
+      const minutes = st.minutes_away != null ? st.minutes_away : minutesFromNowClockTime(st.predicted_eta);
+      if (minutes == null || minutes < 0 || minutes > APPROACH_ALERT_MINUTES) return;
+      const key = `${activeTrackKey}|${code}`;
+      if (approachFiredRef.current[key]) return;
+      approachFiredRef.current[key] = true;
+      const name = toDisplayCase(st.name);
+      setApproachNotice({ code, name, minutes, eta: st.predicted_eta || null });
+      if (gpsOn || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+        showLocalNotice(
+          `🚆 ${activeTrack.trainNumber} arriving at ${name} ${minutes < 1 ? "now" : `in ~${minutes} min`}`,
+          `Please be alert — the train reaches ${name} in the next 5–10 minutes${st.predicted_eta ? ` (ETA ${st.predicted_eta})` : ""}.`,
+          `approach-${activeTrack.trainNumber}-${code}`,
+        );
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payload, armedCodesKey]);
+
+  // GPS mode switching (RailYatri's "Are you inside the train?").
+  const askGps = useCallback((reason) => { setGpsAsk({ reason: reason || "manual" }); }, []);
+  const answerInTrain = useCallback((yes) => {
+    const reason = gpsAsk ? gpsAsk.reason : "manual";
+    setGpsAsk(null);
+    if (yes) {
+      gpsHistoryRef.current = [];
+      setModeNotice(null);
+      setGpsOn(true);
+    } else {
+      setGpsOn(false);
+      setModeNotice(reason === "offline"
+        ? "No internet — live status needs internet when you're not on the train."
+        : null);
+    }
+  }, [gpsAsk]);
+  const onGpsOffRoute = useCallback((r) => {
+    const km = r && r.offRouteKm != null ? Math.round(r.offRouteKm) : null;
+    setGpsOn(false);
+    setApproachNotice(null);
+    setModeNotice(`You don't seem to be on train ${activeTrack ? activeTrack.trainNumber : ""}${km != null ? ` (${km} km away from its route)` : ""}. Use internet when you are not on the train — switching back to internet.`);
+    if (activeParamsRef.current && !manualStopRef.current) refreshNow();
+  }, [activeTrack, refreshNow]);
+  const stopGps = useCallback(() => { setGpsOn(false); setApproachNotice(null); refreshNow(); }, [refreshNow]);
+
   // REDESIGN (RailYatri-style live position marker): "X km covered so
   // far" — honestly derived, never invented, from two real payload
   // values: the last reporting station's own real distance-from-origin
@@ -1510,105 +1790,215 @@ export default function LiveTrackingScreen({ navigation }) {
   // making the user re-type it.
   const showBottomBar = !!payload && !ltJourneyLikelyComplete && !!payload.next_station;
 
+  // RailYatri-style status sentence for the status card.
+  const ltStatus = (() => {
+    if (!payload || !timeline.length) return { headline: "", sub: null };
+    const last = timeline[timeline.length - 1];
+    if (ltJourneyLikelyComplete || last.status === "passed" || (last.status === "current" && !ltNextEtaMinutes)) {
+      const t = (last.arrival && (last.arrival.actual || last.arrival.expected)) || null;
+      return { headline: "Train has reached destination.", sub: t ? `Arrived ${toDisplayCase(last.name)} at ${String(t).slice(0, 5)}` : null };
+    }
+    const curIdx = timeline.findIndex((x) => x.status === "current");
+    let lastReached = -1;
+    timeline.forEach((x, i) => { if (x.status === "passed" || x.status === "current") lastReached = i; });
+    const first = timeline[0];
+    const nextHalt = timeline.slice(Math.max(0, lastReached + 1)).find((x) => x.kind !== "intermediate");
+    let sub = null;
+    if (nextHalt) {
+      let eta = nextHalt.predicted_eta || (nextHalt.arrival && (nextHalt.arrival.expected || nextHalt.arrival.scheduled));
+      let mins = nextHalt.minutes_away != null ? nextHalt.minutes_away : minutesFromNowClockTime(nextHalt.predicted_eta);
+      // Never show a physically impossible ETA (e.g. "in 35 min" while
+      // 2 km away): beyond ~20 km/h + a halt, fall back to km / speed.
+      const kmAway = nextHalt.distance_ahead_km;
+      if (kmAway != null && mins != null && mins > (kmAway / 20) * 60 + 10) {
+        const v = payload.display_speed_kmph || payload.avg_speed_kmph || 50;
+        mins = Math.round((kmAway / Math.max(10, Math.min(v, 130))) * 60);
+        const d = new Date(Date.now() + mins * 60000);
+        eta = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      }
+      sub = `Next halt ${toDisplayCase(nextHalt.name)}${eta ? ` · ETA ${String(eta).slice(0, 5)}` : ""}${mins != null && mins >= 0 && mins <= 180 ? ` (in ${mins} min)` : ""}${nextHalt.predicted_eta_source === "gps" ? " · by GPS" : ""}`;
+    }
+    const departed = first.departure && first.departure.actual && first.departure.actual_is_predicted !== true;
+    if (lastReached === -1 || (curIdx === 0 && !departed)) {
+      const dep = first.departure && (first.departure.expected || first.departure.scheduled);
+      return {
+        headline: "Train hasn't started yet.",
+        sub: dep ? `Departs ${toDisplayCase(first.name)} at ${String(dep).slice(0, 5)}` : sub,
+      };
+    }
+    if (gpsOn && payload.gps_headline) return { headline: payload.gps_headline, sub };
+    const at = timeline[lastReached];
+    const timing = (at.departure && at.departure.actual) || (at.arrival && at.arrival.actual);
+    const verb = at.status === "current" && at.kind !== "intermediate" && !(at.departure && at.departure.actual) ? "At" : "Crossed";
+    const km = payload.distance_remaining_to_next_km;
+    const nxt = timeline[lastReached + 1];
+    const headline = `${verb} ${toDisplayCase(at.name)}${timing && verb === "Crossed" ? ` at ${String(timing).slice(0, 5)}` : ""}`
+      + (nxt ? (km != null ? ` · ${km} km to ${toDisplayCase(nxt.name)}` : ` · next ${toDisplayCase(nxt.name)}`) : "");
+    return { headline, sub };
+  })();
+
   return (
     <View style={styles.flex}>
     <ScrollView style={styles.flex} contentContainerStyle={[styles.content, showBottomBar && styles.contentWithBar]}>
-      <SectionCard title="Track a train" subtitle="Connects instantly and checks in every ~5s; the live position itself refreshes at least every 60s.">
-        <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
-        {/* BUGFIX: a plain (non-{}) JSX attribute string doesn't run JS's
-            escape parsing, so "\u2014" rendered as the literal 6 characters
-            backslash-u-2-0-1-4, not an em dash - only visible once this
-            screen's bundle was actually rebuilt and looked at directly
-            (see the mobile_web rebuild note elsewhere in this diff).
-            Wrapping the same text in a {} expression container makes it a
-            real JS string literal, where \u2014 IS a real escape. */}
-        <Text style={styles.fieldLabel}>{"Date (optional \u2014 defaults to today)"}</Text>
-        <TouchableOpacity style={styles.dateField} onPress={() => setDayPickerVisible(true)} activeOpacity={0.7}>
-          <Ionicons name="calendar-outline" size={16} color={colors.primary} />
-          <Text style={styles.dateFieldText}>
-            {trackDate.trim() ? (formatLongLabel(fromDdMmYyyy(trackDate)) || trackDate) : "Today"}
-          </Text>
-          <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-        </TouchableOpacity>
-        <View style={styles.row}>
-          <LabeledInput label="Source (optional)" placeholder="e.g. SC" value={source} onChangeText={setSource} style={styles.half} />
-          <LabeledInput label="Dest (optional)" placeholder="e.g. BZA" value={dest} onChangeText={setDest} style={styles.half} />
-        </View>
-        <View style={styles.row}>
-          <PrimaryButton title={connection === "open" ? "Reconnect" : "Start tracking"} onPress={connect} loading={connection === "connecting"} style={styles.half} />
-          <PrimaryButton title="Stop" variant="secondary" onPress={stopTracking} style={styles.half} />
-        </View>
-        {bgTracking && (
-          <View style={styles.bgTrackRow}>
-            <Ionicons
-              name={bgTracking.state === "on" ? "notifications" : bgTracking.state === "pending" ? "time-outline" : "notifications-off-outline"}
-              size={14}
-              color={bgTracking.state === "on" ? colors.success : colors.textMuted}
-            />
-            <Text style={styles.bgTrackText}>
-              {bgTracking.state === "on"
-                ? "Background tracking on — you'll keep getting live status notifications after you close the app. Tap Stop to end it."
-                : bgTracking.state === "pending"
-                  ? "Turning on background tracking…"
-                  : bgTracking.reason || "Background tracking is off."}
+      {(!activeTrack || formOpen) ? (
+        <SectionCard title="Track a train" subtitle="Shows the live position instantly and keeps it updating every few seconds.">
+          <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
+          <Text style={styles.fieldLabel}>{"Date (optional \u2014 defaults to today)"}</Text>
+          <TouchableOpacity style={styles.dateField} onPress={() => { datePickForHeaderRef.current = false; setDayPickerVisible(true); }} activeOpacity={0.7}>
+            <Ionicons name="calendar-outline" size={16} color={colors.primary} />
+            <Text style={styles.dateFieldText}>
+              {trackDate.trim() ? (formatLongLabel(fromDdMmYyyy(trackDate)) || trackDate) : "Today"}
             </Text>
+            <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+          <View style={styles.row}>
+            <LabeledInput label="Source (optional)" placeholder="e.g. SC" value={source} onChangeText={setSource} style={styles.half} />
+            <LabeledInput label="Dest (optional)" placeholder="e.g. BZA" value={dest} onChangeText={setDest} style={styles.half} />
           </View>
-        )}
-        <View style={styles.row}>
-          <ConnectionBadge connection={connection} />
-          {connection === "open" && (
-            <TouchableOpacity onPress={refreshNow} disabled={refreshing} style={styles.refreshRow}>
-              <Ionicons name="refresh" size={14} color={colors.primary} />
-              {/* BUGFIX: this used to show lastUpdated.toLocaleTimeString()
-                  \u2014 the CLIENT's own receipt clock time for the last
-                  WebSocket message, which advances every ~5s regardless of
-                  whether the position data itself actually changed (most
-                  messages just re-serve the same still-cached data). Now
-                  shows the real data freshness via the same
-                  payload.status_updated_at + formatAsOfAgo the position
-                  callout below uses, so this line and that callout never
-                  disagree about how fresh the data really is. */}
-              <Text style={styles.refreshText}>
-                {refreshing
-                  ? "Refreshing\u2026"
-                  : payload?.status_updated_at
-                    ? `Position as of ${formatAsOfAgo(payload.status_updated_at)}`
-                    : "Refresh now"}
+          <View style={styles.row}>
+            {/* No spinner / "Connecting…" state: tracking starts at once —
+                the last known position is shown instantly and the live
+                feed takes over the moment it answers. */}
+            <PrimaryButton title="Start tracking" onPress={connect} style={styles.half} />
+            {activeTrack ? (
+              <PrimaryButton title="Cancel" variant="secondary" onPress={() => setFormOpen(false)} style={styles.half} />
+            ) : null}
+          </View>
+        </SectionCard>
+      ) : (
+        <View style={styles.ryHeader}>
+          {/* REDESIGN (RailYatri-style header): "12728 - Godavari Sf Express",
+              route, and a Today/Yesterday date switch — the form itself is
+              tucked away behind "Change" once a train is being tracked. */}
+          <View style={styles.ryHeaderTop}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.ryTrainTitle} numberOfLines={1}>
+                {activeTrack.trainNumber}{payload?.train_name ? ` - ${toDisplayCase(payload.train_name)}` : ""}
               </Text>
+              {timeline.length >= 2 ? (
+                <Text style={styles.ryTrainSub} numberOfLines={1}>
+                  {(timeline[0].code || timeline[0].name)}-{(timeline[timeline.length - 1].code || timeline[timeline.length - 1].name)}
+                  {payload?.train_name ? "" : ` · ${toDisplayCase(timeline[0].name)} → ${toDisplayCase(timeline[timeline.length - 1].name)}`}
+                </Text>
+              ) : null}
+            </View>
+            <TouchableOpacity style={styles.ryDateBtn} onPress={() => { datePickForHeaderRef.current = true; setDayPickerVisible(true); }}>
+              <Text style={styles.ryDateBtnText}>{trackDateLabel(activeTrack.date)}</Text>
+              <Ionicons name="caret-down" size={12} color="#fff" />
             </TouchableOpacity>
-          )}
-          {/* FEATURE: Shareable read-only tracking link */}
-          {trainNumber.trim() && (
-            <TouchableOpacity onPress={shareTrackingLink} style={styles.refreshRow}>
-              <Ionicons name="link-outline" size={14} color={colors.primary} />
-              <Text style={styles.refreshText}>Share link</Text>
+          </View>
+          <View style={styles.ryHeaderRow}>
+            <LiveBadge connection={connection} hasPayload={!!payload} gpsOn={gpsOn} />
+            {payload?.status_updated_at ? (
+              <TouchableOpacity onPress={refreshNow} style={styles.refreshRow}>
+                <Ionicons name="refresh" size={13} color={colors.primary} />
+                <Text style={styles.refreshText}>{gpsOn ? "GPS fix" : "Position"} {formatAsOfAgo(payload.status_updated_at)}</Text>
+              </TouchableOpacity>
+            ) : null}
+            <View style={{ flex: 1 }} />
+            <TouchableOpacity onPress={shareTrackingLink} style={styles.ryIconBtn} accessibilityLabel="Share link">
+              <Ionicons name="share-social-outline" size={16} color={colors.primary} />
             </TouchableOpacity>
-          )}
+            <TouchableOpacity onPress={() => setFormOpen(true)} style={styles.ryIconBtn} accessibilityLabel="Change train">
+              <Ionicons name="create-outline" size={16} color={colors.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={stopTracking} style={styles.ryStopBtn}>
+              <Text style={styles.ryStopBtnText}>Stop</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Internet | GPS switch — GPS only after "Are you inside the train?" */}
+          <View style={styles.modeSwitch}>
+            <TouchableOpacity
+              style={[styles.modeBtn, !gpsOn && styles.modeBtnActive]}
+              onPress={() => { if (gpsOn) stopGps(); }}
+            >
+              <Ionicons name="globe-outline" size={14} color={!gpsOn ? "#fff" : colors.primary} />
+              <Text style={[styles.modeBtnText, !gpsOn && styles.modeBtnTextActive]}>Internet</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modeBtn, gpsOn && styles.modeBtnActive]}
+              onPress={() => { if (!gpsOn) askGps("manual"); }}
+            >
+              <Ionicons name="navigate-outline" size={14} color={gpsOn ? "#fff" : colors.primary} />
+              <Text style={[styles.modeBtnText, gpsOn && styles.modeBtnTextActive]}>GPS · I'm on this train</Text>
+            </TouchableOpacity>
+          </View>
+
+          {bgTracking && bgTracking.state !== "on" ? (
+            <Text style={styles.bgTrackText}>
+              {bgTracking.state === "pending" ? "Turning on background notifications…" : bgTracking.reason || "Background notifications are off."}
+            </Text>
+          ) : null}
+          {shareLinkNote && <Text style={styles.errorText}>{shareLinkNote}</Text>}
         </View>
-        {shareLinkNote && <Text style={styles.errorText}>{shareLinkNote}</Text>}
-        {activeTrack && (
-          <OfflineTrackingCard
-            trainNumber={activeTrack.trainNumber}
-            date={activeTrack.date}
-            payload={payload}
-            connection={connection}
-            apiBaseUrl={apiBaseUrl}
-          />
-        )}
-        <TouchableOpacity onPress={toggleMap} style={styles.mapToggleBtn}>
-          <Ionicons name="map-outline" size={14} color={colors.primary} />
-          <Text style={styles.mapToggleBtnText}>{showMap ? "Hide train on map" : "🗺️ Train on map"}</Text>
-        </TouchableOpacity>
-        {mapError && <Text style={styles.errorText}>{mapError}</Text>}
-        <View style={[styles.mapBox, !showMap && styles.mapBoxHidden]}>
-          <View ref={mapContainerRef} style={styles.mapInner} />
+      )}
+
+      {modeNotice ? (
+        <View style={styles.ryRedBanner}>
+          <Ionicons name="alert-circle-outline" size={18} color="#fff" />
+          <Text style={styles.ryRedBannerText}>{modeNotice}</Text>
+          <TouchableOpacity onPress={() => setModeNotice(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="close" size={16} color="#fff" />
+          </TouchableOpacity>
         </View>
-        {showMap && (
-          <Text style={styles.webNoticeText}>
-            {payload ? "Route + live position for this train." : "Start tracking above to plot this train's route and position."}
+      ) : null}
+      {approachNotice ? (
+        <View style={styles.ryAlertBanner}>
+          <Ionicons name="notifications" size={18} color="#fff" />
+          <Text style={styles.ryRedBannerText}>
+            Train arriving at {approachNotice.name} {approachNotice.minutes < 1 ? "now" : `in ~${approachNotice.minutes} min`}
+            {approachNotice.eta ? ` (ETA ${approachNotice.eta})` : ""} — please be alert.
           </Text>
-        )}
-      </SectionCard>
+          <TouchableOpacity onPress={() => setApproachNotice(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="close" size={16} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {bellNotice ? (
+        <View style={styles.ryInfoBanner}>
+          <Ionicons name="notifications-off-outline" size={16} color={colors.primary} />
+          <Text style={styles.ryInfoBannerText}>{bellNotice}</Text>
+          <TouchableOpacity onPress={() => setBellNotice(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="close" size={14} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {activeTrack && (
+        <OfflineTrackingCard
+          trainNumber={activeTrack.trainNumber}
+          date={activeTrack.date}
+          payload={rawPayload}
+          connection={connection}
+          apiBaseUrl={apiBaseUrl}
+          gpsOn={gpsOn}
+          onNeedGps={askGps}
+          onResult={onGpsResult}
+          onOffRoute={onGpsOffRoute}
+          onStopGps={stopGps}
+        />
+      )}
+
+      {activeTrack && !payload ? (
+        <View style={styles.ryLoadingCard}>
+          <Ionicons name="train-outline" size={18} color={colors.primary} />
+          <Text style={styles.ryLoadingText}>Getting train {activeTrack.trainNumber}'s live position…</Text>
+        </View>
+      ) : null}
+
+      {activeTrack ? (
+        <>
+          <TouchableOpacity onPress={toggleMap} style={styles.mapToggleBtn}>
+            <Ionicons name="map-outline" size={14} color={colors.primary} />
+            <Text style={styles.mapToggleBtnText}>{showMap ? "Hide train on map" : "🗺️ Train on map"}</Text>
+          </TouchableOpacity>
+          {mapError && <Text style={styles.errorText}>{mapError}</Text>}
+        </>
+      ) : null}
+      <View style={[styles.mapBox, !(showMap && activeTrack) && styles.mapBoxHidden]}>
+        <View ref={mapContainerRef} style={styles.mapInner} />
+      </View>
 
       {/* FEATURE: Delay Alert — moved off this inline card onto the bell
           icon + DelayAlertModal sheet (see near the end of this component's
@@ -1617,49 +2007,6 @@ export default function LiveTrackingScreen({ navigation }) {
           whatever is typed in the form. delayWatchStatus is surfaced
           inside the sheet (statusMessage) — it no longer renders as its
           own standalone card. */}
-
-      {/* FEATURE: Smart Alarm, right on Live Tracking (moved off the
-          separate More Tools menu — see the top-of-file comment). Only
-          shows once a train is actually being tracked; arming an alarm
-          before that point doesn't mean anything. */}
-      {payload && (
-        <SectionCard title="⏰ Smart Alarm" subtitle="Wake-up alert as this train nears a station you pick — rings even if you close the app.">
-          <LabeledInput label="Destination station code" value={alarmStation} onChangeText={setAlarmStation} autoCapitalize="characters" editable={!alarmArmed} />
-          <Text style={styles.fieldLabel}>Alert me before arrival</Text>
-          <View style={styles.chipRow}>
-            {["15", "20", "30", "40", "45"].map((m) => (
-              <TouchableOpacity
-                key={m}
-                disabled={alarmArmed}
-                onPress={() => { setAlarmLeadMinutes(m); setAlarmCustomOpen(false); }}
-                style={[styles.alarmChip, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipActive]}
-              >
-                <Text style={[styles.alarmChipText, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipTextActive]}>{m} min</Text>
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity disabled={alarmArmed} onPress={() => setAlarmCustomOpen(true)} style={[styles.alarmChip, alarmCustomOpen && styles.alarmChipActive]}>
-              <Text style={[styles.alarmChipText, alarmCustomOpen && styles.alarmChipTextActive]}>Custom</Text>
-            </TouchableOpacity>
-          </View>
-          {alarmCustomOpen && (
-            <LabeledInput
-              label="Custom — minutes, or H:MM for 1hr+ (e.g. 1:30 = 1hr 30min)"
-              value={alarmCustomText} onChangeText={setAlarmCustomText}
-              keyboardType="numbers-and-punctuation" editable={!alarmArmed}
-            />
-          )}
-          <PrimaryButton
-            title={alarmArmed ? "Armed" : "Set Alarm"} onPress={setSmartAlarm} loading={alarmBusy}
-            disabled={alarmArmed} style={{ marginTop: spacing.sm }}
-          />
-          {alarmArmed && (
-            <TouchableOpacity onPress={cancelSmartAlarm} style={{ marginTop: spacing.sm }}>
-              <Text style={styles.removeAlarmText}>Remove alarm for this station</Text>
-            </TouchableOpacity>
-          )}
-          {alarmStatus && <Text style={styles.webNoticeText}>{alarmStatus}</Text>}
-        </SectionCard>
-      )}
 
       {/* FEATURE: End-of-Trip Summary Card (shareable) */}
       {tripSummary && (
@@ -1752,24 +2099,19 @@ export default function LiveTrackingScreen({ navigation }) {
               done, this reads "Train has reached destination." exactly
               like RailYatri's own completed-run page; otherwise it's the
               same "Next station · ETA" summary as before. */}
-          {timeline.length >= 2 && (
-            <Text style={styles.routeHeaderText}>
-              Train {trainNumber.trim()} · {timeline[0].name || timeline[0].code} {"→"} {timeline[timeline.length - 1].name || timeline[timeline.length - 1].code}
-            </Text>
-          )}
-          <View ref={quickBarRef} style={styles.quickBar}>
-            <View style={styles.quickBarIconWrap}>
-              <Ionicons name="train" size={16} color={colors.textInverse} />
+          {/* REDESIGN (RailYatri-style status card): one plain sentence for
+              where the train is — "Train hasn't started yet", "Crossed X at
+              HH:MM · 2 km to Y", "Train has reached destination." — and the
+              next halt's live ETA underneath. On GPS it's the phone's own
+              position on the route. */}
+          <View ref={quickBarRef} style={styles.ryStatusCard}>
+            <View style={[styles.ryStatusIcon, gpsOn && { backgroundColor: colors.accent }]}>
+              <Ionicons name={gpsOn ? "navigate" : "train"} size={20} color="#fff" />
             </View>
-            {ltJourneyLikelyComplete ? (
-              <Text style={styles.quickBarText}>Train has reached destination.</Text>
-            ) : (
-              <Text style={styles.quickBarText}>
-                Next:{" "}
-                <Text style={styles.quickBarStation}>{payload.next_station || "—"}</Text>
-                <Text style={styles.quickBarEta}>  ETA {payload.next_station_live_eta || payload.next_station_expected_arrival || "—"}</Text>
-              </Text>
-            )}
+            <View style={{ flex: 1 }}>
+              <Text style={styles.ryStatusText}>{ltStatus.headline}</Text>
+              {ltStatus.sub ? <Text style={styles.ryStatusSub}>{ltStatus.sub}</Text> : null}
+            </View>
             <DelayPill minutes={ltEffectiveDelay} />
           </View>
 
@@ -1820,17 +2162,6 @@ export default function LiveTrackingScreen({ navigation }) {
             </SectionCard>
           )}
 
-          <SectionCard title="Crowd prediction" subtitle={payload.crowd_disclaimer}>
-            <InfoRow label="Level" value={payload.crowd_level || "—"} />
-            <InfoRow label="Score" value={payload.crowd_score != null ? String(payload.crowd_score) : "—"} />
-            {!!payload.crowd_basis?.length && (
-              <View style={styles.basisList}>
-                {payload.crowd_basis.map((b, i) => (
-                  <Text key={i} style={styles.basisItem}>• {b}</Text>
-                ))}
-              </View>
-            )}
-          </SectionCard>
 
           {/* REDESIGN (RailYatri-style running status): Arrival | Station |
               Departure columns, a "DayN: <date>" pill at each real day
@@ -1862,6 +2193,7 @@ export default function LiveTrackingScreen({ navigation }) {
                       onReportInaccuracy={reportInaccuracy}
                       nextStationName={payload?.next_station}
                       segmentSpeedSignal={payload?.segment_speed_signal}
+                      gpsMode={gpsOn}
                     />
                   );
                 }
@@ -1902,6 +2234,7 @@ export default function LiveTrackingScreen({ navigation }) {
                       onReportInaccuracy={reportInaccuracy}
                       nextStationName={payload?.next_station}
                       segmentSpeedSignal={payload?.segment_speed_signal}
+                      gpsMode={gpsOn}
                       alertArmed={!!stationWatches[(entry.code || "").toUpperCase()]}
                       alertBlocked={ltJourneyLikelyComplete || reallyReachedCodes.has((entry.code || "").toUpperCase())}
                       onBellPress={bellsEnabledForPayload ? openStationAlert : undefined}
@@ -1911,7 +2244,62 @@ export default function LiveTrackingScreen({ navigation }) {
               });
             })()}
           </SectionCard>
+
+          <SectionCard title="Crowd prediction" subtitle={payload.crowd_disclaimer}>
+            <InfoRow label="Level" value={payload.crowd_level || "—"} />
+            <InfoRow label="Score" value={payload.crowd_score != null ? String(payload.crowd_score) : "—"} />
+            {!!payload.crowd_basis?.length && (
+              <View style={styles.basisList}>
+                {payload.crowd_basis.map((b, i) => (
+                  <Text key={i} style={styles.basisItem}>• {b}</Text>
+                ))}
+              </View>
+            )}
+          </SectionCard>
         </>
+      )}
+
+      {/* FEATURE: Smart Alarm, right on Live Tracking (moved off the
+          separate More Tools menu — see the top-of-file comment). Only
+          shows once a train is actually being tracked; arming an alarm
+          before that point doesn't mean anything. */}
+      {payload && (
+        <SectionCard title="⏰ Smart Alarm" subtitle="Wake-up alert as this train nears a station you pick — rings even if you close the app.">
+          <LabeledInput label="Destination station code" value={alarmStation} onChangeText={setAlarmStation} autoCapitalize="characters" editable={!alarmArmed} />
+          <Text style={styles.fieldLabel}>Alert me before arrival</Text>
+          <View style={styles.chipRow}>
+            {["15", "20", "30", "40", "45"].map((m) => (
+              <TouchableOpacity
+                key={m}
+                disabled={alarmArmed}
+                onPress={() => { setAlarmLeadMinutes(m); setAlarmCustomOpen(false); }}
+                style={[styles.alarmChip, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipActive]}
+              >
+                <Text style={[styles.alarmChipText, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipTextActive]}>{m} min</Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity disabled={alarmArmed} onPress={() => setAlarmCustomOpen(true)} style={[styles.alarmChip, alarmCustomOpen && styles.alarmChipActive]}>
+              <Text style={[styles.alarmChipText, alarmCustomOpen && styles.alarmChipTextActive]}>Custom</Text>
+            </TouchableOpacity>
+          </View>
+          {alarmCustomOpen && (
+            <LabeledInput
+              label="Custom — minutes, or H:MM for 1hr+ (e.g. 1:30 = 1hr 30min)"
+              value={alarmCustomText} onChangeText={setAlarmCustomText}
+              keyboardType="numbers-and-punctuation" editable={!alarmArmed}
+            />
+          )}
+          <PrimaryButton
+            title={alarmArmed ? "Armed" : "Set Alarm"} onPress={setSmartAlarm} loading={alarmBusy}
+            disabled={alarmArmed} style={{ marginTop: spacing.sm }}
+          />
+          {alarmArmed && (
+            <TouchableOpacity onPress={cancelSmartAlarm} style={{ marginTop: spacing.sm }}>
+              <Text style={styles.removeAlarmText}>Remove alarm for this station</Text>
+            </TouchableOpacity>
+          )}
+          {alarmStatus && <Text style={styles.webNoticeText}>{alarmStatus}</Text>}
+        </SectionCard>
       )}
     </ScrollView>
     {showBottomBar && (
@@ -1952,9 +2340,46 @@ export default function LiveTrackingScreen({ navigation }) {
     <DayPickerModal
       visible={dayPickerVisible}
       selected={trackDate}
-      onSelect={setTrackDate}
+      onSelect={(v) => {
+        setTrackDate(v);
+        // Picked from the tracking header ("Today ▾"): switch the tracked
+        // run straight away, like RailYatri's Today/Yesterday switch.
+        if (datePickForHeaderRef.current && activeParamsRef.current) {
+          datePickForHeaderRef.current = false;
+          startTracking({ ...activeParamsRef.current, date: v }, false);
+        }
+      }}
       onClose={() => setDayPickerVisible(false)}
     />
+
+    {/* RailYatri-style "Are you inside the train?" — GPS mode is only
+        switched on when the user confirms they're ON this train. */}
+    <Modal visible={!!gpsAsk} transparent animationType="fade" onRequestClose={() => setGpsAsk(null)}>
+      <View style={styles.askBackdrop}>
+        <View style={styles.askCard}>
+          <TouchableOpacity style={styles.askClose} onPress={() => setGpsAsk(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="close" size={22} color={colors.textMuted} />
+          </TouchableOpacity>
+          <View style={styles.askIllustration}>
+            <Ionicons name="train" size={44} color="#fff" />
+          </View>
+          <Text style={styles.askTitle}>Are you inside the train?</Text>
+          <Text style={styles.askSub}>
+            {gpsAsk && gpsAsk.reason === "offline"
+              ? "No internet right now. If you're on this train, GPS can keep tracking it without internet."
+              : `If you're on train ${activeTrack ? activeTrack.trainNumber : ""}, your phone's GPS gives the most accurate position and ETAs.`}
+          </Text>
+          <View style={styles.askBtnRow}>
+            <TouchableOpacity style={[styles.askBtn, styles.askBtnYes]} onPress={() => answerInTrain(true)}>
+              <Text style={styles.askBtnYesText}>Yes</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.askBtn, styles.askBtnNo]} onPress={() => answerInTrain(false)}>
+              <Text style={styles.askBtnNoText}>No</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
 
     {/* FEATURE: per-station Delay Alert sheet — opened from the bell on
         each reporting station row in "Running status" (openStationAlert). */}
@@ -2008,7 +2433,7 @@ function TrainMarkerIcon() {
 // "Report Inaccuracy" link wired to the real /api/feedback endpoint.
 function LiveStatusCallout({
   stop, statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm,
-  totalCoveredKm, statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
+  totalCoveredKm, statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal, gpsMode,
 }) {
   return (
     <View style={styles.liveCallout}>
@@ -2019,9 +2444,10 @@ function LiveStatusCallout({
           <Text style={styles.liveCalloutRefreshText}>{refreshCountdown}s</Text>
         </View>
       </View>
-      <Text style={styles.liveCalloutMain}>
-        🚆 Train is currently at {toDisplayCase(stop.name)}
-        {stop.halt_minutes ? ` · halt ${stop.halt_minutes} min` : ""}
+      <Text style={[styles.liveCalloutMain, gpsMode && { color: colors.accent }]}>
+        {gpsMode
+          ? `📡 By your GPS: just past ${toDisplayCase(stop.name)}`
+          : `🚆 Train is currently at ${toDisplayCase(stop.name)}${stop.halt_minutes ? ` · halt ${stop.halt_minutes} min` : ""}`}
       </Text>
       {distanceRemainingToNextKm != null && (
         // REDESIGN (RailYatri parity): names the real upcoming station
@@ -2047,7 +2473,7 @@ function LiveStatusCallout({
           ⚠ {segmentSpeedSignal.live_kmph} km/h vs. usual ~{segmentSpeedSignal.typical_kmph} km/h here
         </Text>
       )}
-      <TouchableOpacity
+      {!gpsMode && <TouchableOpacity
         style={styles.liveCalloutReportLink}
         disabled={reportState !== "idle" || !statusResponseId}
         onPress={() => onReportInaccuracy(statusResponseId)}
@@ -2055,7 +2481,24 @@ function LiveStatusCallout({
         <Text style={styles.liveCalloutReportText}>
           {reportState === "sending" ? "Reporting…" : reportState === "sent" ? "Reported — thanks" : "Report Inaccuracy"}
         </Text>
-      </TouchableOpacity>
+      </TouchableOpacity>}
+    </View>
+  );
+}
+
+// No "Connecting…" / "Disconnected" flicker while tracking: the screen
+// always keeps the last live position on show and reconnects quietly in
+// the background — the "Position X ago" next to this says how fresh it is.
+function LiveBadge({ connection, hasPayload, gpsOn }) {
+  let s;
+  if (gpsOn) s = { color: colors.accent, label: "GPS", icon: "navigate" };
+  else if (hasPayload) s = { color: colors.success, label: "Live", icon: "radio-outline" };
+  else if (connection === "error") s = { color: colors.danger, label: "Can't reach server — check backend URL in Settings", icon: "warning-outline" };
+  else s = { color: colors.textMuted, label: "Loading…", icon: "time-outline" };
+  return (
+    <View style={styles.badgeRowInline}>
+      <Ionicons name={s.icon} size={14} color={s.color} />
+      <Text style={[styles.badgeText, { color: s.color }]}>{s.label}</Text>
     </View>
   );
 }
@@ -2092,17 +2535,25 @@ function InfoRow({ label, value }) {
 // in the timeline below, same red-for-late/green-for-on-time convention
 // the web frontend's .live-timeline__delay classes use.
 // ============================================================
+function humanDelay(minutes) {
+  const abs = Math.round(Math.abs(minutes));
+  if (abs < 60) return `${abs} min`;
+  const h = Math.floor(abs / 60), m = abs % 60;
+  return m ? `${h} hr ${m} min` : `${h} hr`;
+}
+
 function DelayPill({ minutes, small }) {
   if (minutes == null) return null;
   const late = minutes > 0;
   const early = minutes < 0;
-  const bg = late ? colors.danger : colors.success;
-  // minutes === 0 reads as a plain "Ontime" pill, same one-word wording as
-  // the RailYatri reference, rather than "0m on time".
-  const label = minutes === 0 ? "Ontime" : `${late ? "+" : ""}${formatDelayDuration(minutes)}${late ? " late" : " early"}`;
+  // REDESIGN (RailYatri): light chip — "10 min late" red on pale red,
+  // "On time" green on pale green.
+  const bg = late ? "#fdecec" : "#e7f6ec";
+  const fg = late ? colors.danger : colors.success;
+  const label = minutes === 0 ? "On time" : `${humanDelay(minutes)} ${late ? "late" : "early"}`;
   return (
     <View style={[styles.delayPill, { backgroundColor: bg }, small && styles.delayPillSmall]}>
-      <Text style={[styles.delayPillText, small && styles.delayPillTextSmall]}>{label}</Text>
+      <Text style={[styles.delayPillText, { color: fg }, small && styles.delayPillTextSmall]}>{label}</Text>
     </View>
   );
 }
@@ -2129,6 +2580,18 @@ function DayPill({ label }) {
 // confidence threshold, OR once it's anchored to a nearby real-grounded
 // point (predicted_delay_grounded_via) — this only reads that decision, it
 // doesn't make one; nothing here recomputes or re-guesses anything.
+// ETA line for a no-halt (passing) point ahead — ETA + minutes away only.
+function IntermediateEtaLine({ stop }) {
+  if (!stop.predicted_eta) return null;
+  return (
+    <Text style={styles.tlPredictedMuted}>
+      Passing ~{stop.predicted_eta}
+      {stop.minutes_away != null && stop.minutes_away <= 180 ? ` · in ${stop.minutes_away} min` : ""}
+      {stop.predicted_eta_source === "gps" ? " · GPS" : ""}
+    </Text>
+  );
+}
+
 function PredictedDelayLine({ stop }) {
   if (stop.predicted_delay_minutes == null) return null;
   const groundedVia = stop.predicted_delay_grounded_via || stop.predicted_delay_locked_via;
@@ -2160,9 +2623,15 @@ function PredictedDelayLine({ stop }) {
   return (
     <View style={styles.tlPredictedRow}>
       <Text style={styles.tlPredicted}>
-        ~{formatDelayDuration(stop.predicted_delay_minutes)} late (predicted)
+        {stop.predicted_delay_minutes > 0 ? `~${humanDelay(stop.predicted_delay_minutes)} late` : "On time"} (predicted)
         {stop.predicted_eta ? ` · ETA ~${stop.predicted_eta}` : ""}
+        {stop.minutes_away != null && stop.minutes_away <= 180 ? ` · in ${stop.minutes_away} min` : ""}
       </Text>
+      {stop.predicted_eta_source === "gps" && (
+        <View style={[styles.tlInfoBadge, styles.tlGpsBadge]}>
+          <Text style={[styles.tlInfoBadgeText, { color: "#9a4d00" }]}>📡 GPS</Text>
+        </View>
+      )}
       {badge && (
         <View style={styles.tlVerifiedBadge}>
           <Text style={styles.tlVerifiedBadgeText} numberOfLines={1}>{badge.text}</Text>
@@ -2208,7 +2677,7 @@ function PredictedDelayLine({ stop }) {
 function NoHaltGroupRow({
   group, expanded, onToggle,
   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
-  statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
+  statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal, gpsMode,
 }) {
   const stations = group.stations || [];
   const firstPassed = stations.length > 0 && stations[0].status === "passed";
@@ -2283,9 +2752,10 @@ function NoHaltGroupRow({
                   onReportInaccuracy={onReportInaccuracy}
                   nextStationName={nextStationName}
                   segmentSpeedSignal={segmentSpeedSignal}
+                  gpsMode={gpsMode}
                 />
               )}
-              {!current && <PredictedDelayLine stop={s} />}
+              {!current && !passed && <IntermediateEtaLine stop={s} />}
             </View>
             <View style={styles.tlTimeCol} />
           </View>
@@ -2319,10 +2789,19 @@ function TimeStack({ timing, staleUnconfirmed, placeholder, align }) {
     );
   }
   const hideActual = staleUnconfirmed && timing.actual_is_predicted;
+  // REDESIGN (RailYatri): scheduled time small/grey on top, the real time
+  // bold underneath — red when late, green when on time.
+  const late = timing.delay_minutes != null && timing.delay_minutes > 0;
+  const actColor = timing.delay_minutes == null ? colors.text : late ? colors.danger : colors.success;
   return (
     <View style={styles.tlTimeCol}>
-      <Text style={[styles.tlTimeExp, textAlign]}>{timing.expected || timing.scheduled || "—"}</Text>
-      {!hideActual && !!timing.actual && <Text style={[styles.tlTimeAct, textAlign]}>{timing.actual}</Text>}
+      <Text style={[styles.tlTimeExp, textAlign]}>{String(timing.scheduled || timing.expected || "—").slice(0, 5)}</Text>
+      {!hideActual && !!timing.actual && (
+        <Text style={[styles.tlTimeAct, { color: actColor }, textAlign]}>{String(timing.actual).slice(0, 5)}</Text>
+      )}
+      {!hideActual && !timing.actual && timing.expected && timing.expected !== timing.scheduled ? (
+        <Text style={[styles.tlTimeAct, { color: actColor }, textAlign]}>{String(timing.expected).slice(0, 5)}</Text>
+      ) : null}
     </View>
   );
 }
@@ -2347,7 +2826,7 @@ function TimelineStopRow({
   stop, isFirst, isLast, rowRef, journeyLikelyComplete,
   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
   statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
-  alertArmed, alertBlocked, onBellPress,
+  alertArmed, alertBlocked, onBellPress, gpsMode,
 }) {
   // BUGFIX: once the journey looks likely complete (see
   // computeJourneyLikelyComplete near the top of this file), the train
@@ -2425,6 +2904,7 @@ function TimelineStopRow({
             onReportInaccuracy={onReportInaccuracy}
             nextStationName={nextStationName}
             segmentSpeedSignal={segmentSpeedSignal}
+            gpsMode={gpsMode}
           />
         )}
         {/* BUGFIX: suppressed when staleUnconfirmed — see TimeStack's
@@ -2693,4 +3173,82 @@ const styles = StyleSheet.create({
     backgroundColor: "#eef4fb", alignItems: "center", justifyContent: "center",
   },
   tlBellArmed: { backgroundColor: colors.primary, borderColor: colors.primary },
+
+  // REDESIGN (RailYatri-style header / status / banners / GPS prompt).
+  ryHeader: {
+    backgroundColor: "#fff", borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
+    padding: spacing.md, marginBottom: spacing.sm,
+  },
+  ryHeaderTop: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  ryTrainTitle: { fontSize: 16, fontWeight: "700", color: colors.text },
+  ryTrainSub: { fontSize: 12.5, color: colors.textMuted, marginTop: 2 },
+  ryDateBtn: {
+    flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.primary,
+    borderRadius: 6, paddingVertical: 6, paddingHorizontal: 12,
+  },
+  ryDateBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+  ryHeaderRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: spacing.sm, flexWrap: "wrap" },
+  ryIconBtn: {
+    width: 30, height: 30, borderRadius: 15, borderWidth: 1, borderColor: "#cfe0f3",
+    backgroundColor: "#eef4fb", alignItems: "center", justifyContent: "center",
+  },
+  ryStopBtn: { paddingVertical: 5, paddingHorizontal: 12, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.danger },
+  ryStopBtnText: { color: colors.danger, fontWeight: "700", fontSize: 12 },
+  badgeRowInline: { flexDirection: "row", alignItems: "center", gap: 5 },
+  modeSwitch: {
+    flexDirection: "row", marginTop: spacing.sm, borderRadius: radius.pill, borderWidth: 1,
+    borderColor: colors.primary, overflow: "hidden",
+  },
+  modeBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingVertical: 7, backgroundColor: "#fff" },
+  modeBtnActive: { backgroundColor: colors.primary },
+  modeBtnText: { fontSize: 12.5, fontWeight: "600", color: colors.primary },
+  modeBtnTextActive: { color: "#fff" },
+  ryRedBanner: {
+    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#F2453D",
+    borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: spacing.sm,
+  },
+  ryAlertBanner: {
+    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.primary,
+    borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: spacing.sm,
+  },
+  ryRedBannerText: { flex: 1, color: "#fff", fontSize: 13, fontWeight: "600", lineHeight: 18 },
+  ryInfoBanner: {
+    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#eef4fb", borderWidth: 1,
+    borderColor: "#cfe0f3", borderRadius: 8, paddingVertical: 8, paddingHorizontal: 10, marginBottom: spacing.sm,
+  },
+  ryInfoBannerText: { flex: 1, color: colors.text, fontSize: 12.5 },
+  ryLoadingCard: {
+    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#fff", borderRadius: 8,
+    borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm,
+  },
+  ryLoadingText: { fontSize: 13, color: colors.textMuted },
+  ryStatusCard: {
+    flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fff",
+    borderRadius: 10, borderWidth: 1, borderColor: "#dbe6f5", paddingVertical: 12, paddingHorizontal: 12,
+    marginTop: spacing.sm, marginBottom: spacing.sm,
+    shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 4, shadowOffset: { width: 0, height: 1 }, elevation: 1,
+  },
+  ryStatusIcon: {
+    width: 40, height: 40, borderRadius: 20, backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
+  },
+  ryStatusText: { fontSize: 15, fontWeight: "700", color: colors.text, lineHeight: 20 },
+  ryStatusSub: { fontSize: 12.5, color: colors.textMuted, marginTop: 2 },
+  tlGpsBadge: { borderColor: colors.accent, backgroundColor: "#FFF4E5" },
+  tlPredictedMuted: { fontSize: 10.5, color: colors.textMuted, marginTop: 2 },
+  askBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center", padding: 24 },
+  askCard: { width: "100%", maxWidth: 340, backgroundColor: "#fff", borderRadius: 14, padding: 20, alignItems: "center" },
+  askClose: { position: "absolute", top: 10, right: 10 },
+  askIllustration: {
+    width: 110, height: 110, borderRadius: 55, backgroundColor: "#2F86E0",
+    alignItems: "center", justifyContent: "center", marginTop: 6, marginBottom: 14,
+  },
+  askTitle: { fontSize: 17, fontWeight: "700", color: colors.text, textAlign: "center" },
+  askSub: { fontSize: 12.5, color: colors.textMuted, textAlign: "center", marginTop: 6, lineHeight: 17 },
+  askBtnRow: { flexDirection: "row", gap: 12, marginTop: 18, alignSelf: "stretch" },
+  askBtn: { flex: 1, paddingVertical: 11, borderRadius: radius.pill, alignItems: "center" },
+  askBtnYes: { backgroundColor: "#0B2F5E" },
+  askBtnNo: { backgroundColor: "#E3EEFB" },
+  askBtnYesText: { color: "#fff", fontWeight: "700", fontSize: 15 },
+  askBtnNoText: { color: colors.primary, fontWeight: "700", fontSize: 15 },
 });

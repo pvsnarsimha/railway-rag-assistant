@@ -747,13 +747,19 @@ def _fetch_timeline_with_predictions(train_number: str, date: Optional[str], tra
         rr_stops = railradar_fallback.fetch_railradar_timeline(train_number, date)
     except Exception:
         rr_stops = []
+    try:
+        _live_km_fetch = _estimate_live_distance_km(train_number, date, timeline_json)
+    except Exception:  # noqa: BLE001
+        _live_km_fetch = None
     _predict_delay_per_reporting_station(
         timeline_json, total_distance_km, current_delay_minutes,
         trend.get("trend_per_stop"), trend.get("basis"),
         avg_speed_kmph, avg_speed_basis, date, travel_class,
         train_info_data=train_info_data, rr_stops=rr_stops,
+        live_current_distance_km=_live_km_fetch,
     )
     _mirror_origin_destination_timing(timeline_json)
+    _sanitize_upcoming_etas(timeline_json, _live_km_fetch, avg_speed_kmph)
     return timeline_json, position
 
 
@@ -856,6 +862,69 @@ def _last_really_reached_index(timeline_json: list, next_station_code: Optional[
     return last
 
 
+def _sanitize_upcoming_etas(timeline_json: list, current_distance_km: Optional[float],
+                            speed_kmph: Optional[float]) -> None:
+    """
+    BUGFIX ("2 km to Warangal at 04:05 but it says est. 04:40 / 04:50"):
+    an upcoming stop's predicted_eta can come from the timetable-anchored
+    or locked-in passes above (schedule + a delay figure frozen earlier),
+    which can be physically impossible for where the train really is now.
+    Final pass, run after every other ETA/lock pass: each upcoming stop's
+    ETA must be reachable from the real remaining distance at a plausible
+    speed (running_status.sane_eta) — otherwise it's replaced with
+    now + remaining km / current speed, and that reporting stop's predicted
+    delay is re-derived from the corrected ETA so the two never disagree.
+    Mutates timeline_json in place.
+    """
+    if current_distance_km is None:
+        return
+    now = running_status.ist_now()
+    for stop in timeline_json:
+        if stop.get("status") != "upcoming":
+            continue
+        stop_km = gps_tracking._distance_km_value(stop.get("distance_km"))
+        if stop_km is None or stop_km < current_distance_km - 0.5:
+            continue
+        km_rem = max(0.0, stop_km - current_distance_km)
+        arr = stop.get("arrival") or {}
+        raw = stop.get("predicted_eta") or arr.get("expected") or arr.get("scheduled")
+        info = running_status.sane_eta(raw, km_rem, speed_kmph, now)
+        stop["distance_ahead_km"] = round(km_rem, 1)
+        stop["minutes_away"] = round(info["minutes"]) if info["minutes"] is not None else None
+        if info["source"] != "distance" or not info["eta"]:
+            continue
+        stop["predicted_eta"] = info["eta"]
+        stop["predicted_eta_source"] = "distance"
+        if stop.get("kind") != "intermediate" and stop.get("predicted_delay_minutes") is not None:
+            sched_min = gps_tracking._time_str_to_minutes(arr.get("scheduled") or arr.get("expected"))
+            eta_min = gps_tracking._time_str_to_minutes(info["eta"])
+            if sched_min is not None and eta_min is not None:
+                diff = (eta_min - sched_min) % 1440
+                if diff > 720:
+                    diff -= 1440
+                if -120 < diff < 720:
+                    stop["predicted_delay_minutes"] = max(0, int(round(diff)))
+                    stop.pop("predicted_delay_low_minutes", None)
+                    stop.pop("predicted_delay_high_minutes", None)
+
+
+def _estimate_live_distance_km(train_number: str, date: Optional[str], timeline_json: list) -> Optional[float]:
+    """Train's live distance-from-origin for the background (no websocket)
+    path: RailRadar's real segment progress between the last reached and
+    next stop when available, else the last reached stop's own distance."""
+    try:
+        seg = railradar_fallback.get_segment_progress(train_number) or {}
+    except Exception:  # noqa: BLE001
+        seg = {}
+    try:
+        interp_km, _lat, _lng = gps_tracking.interpolate_live_position(timeline_json, seg.get("segment_progress"))
+    except Exception:  # noqa: BLE001
+        interp_km = None
+    if interp_km is not None:
+        return interp_km
+    return gps_tracking.current_position_distance_km(timeline_json)
+
+
 def _predict_for_watch_station(train_number: str, date: Optional[str], label: Optional[str] = None,
                                 travel_class: Optional[str] = None) -> dict:
     """
@@ -910,6 +979,17 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
     # train right now" snapshot — crossed station + time, km to the next
     # point, next halt + ETA — attached to EVERY outcome below so a push can
     # say "Crossed Aluva at 17:54 · 26 km to Thrissur", not only a delay.
+    live_km_holder = {"km": None, "done": False}
+
+    def _live_km():
+        if not live_km_holder["done"]:
+            live_km_holder["done"] = True
+            try:
+                live_km_holder["km"] = _estimate_live_distance_km(train_number, date, timeline_json)
+            except Exception:  # noqa: BLE001
+                live_km_holder["km"] = None
+        return live_km_holder["km"]
+
     def _running(speed=None):
         try:
             return running_status.build(
@@ -917,6 +997,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
                 delay_minutes=position.delay_minutes if position else None,
                 train_name=position.train_name if position else None,
                 speed_kmph=speed, is_really_reached=_stop_really_reached,
+                live_distance_km=_live_km(),
             )
         except Exception:  # noqa: BLE001 - a snapshot failure must never block an alert
             return None
@@ -955,8 +1036,10 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
         trend.get("trend_per_stop"), trend.get("basis"),
         avg_speed_kmph, avg_speed_basis, date, travel_class,
         train_info_data=train_info_data, rr_stops=rr_stops,
+        live_current_distance_km=_live_km(),
     )
     _mirror_origin_destination_timing(timeline_json)
+    _sanitize_upcoming_etas(timeline_json, _live_km(), avg_speed_kmph)
 
     # BUGFIX (train 20833, watch with no label): RailKit's own per-stop
     # `status` can stay "upcoming" long after a station has really been
@@ -1019,14 +1102,22 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
                 "running": _running(avg_speed_kmph),
                 "message": f"No upcoming reporting station left to predict for train {train_number}."}
 
+    running_snapshot = _running(avg_speed_kmph)
+    # FEATURE: real-time ETA / distance to THIS bell's station, sanity-
+    # checked against physics (see running_status.sane_eta) — drives the
+    # "arriving in ~10 min, be alert" push and the ETA shown in every alert.
+    eta_info = running_status.eta_to_stop(running_snapshot, target, avg_speed_kmph)
     return {
         "status": "predicted",
         "delay_minutes": target.get("predicted_delay_minutes"),
         "confidence": target.get("predicted_delay_confidence"),
         "station": target.get("name"),
-        "predicted_eta": target.get("predicted_eta"),
+        "station_code": target.get("code"),
+        "predicted_eta": eta_info.get("eta") or target.get("predicted_eta"),
+        "minutes_to_arrival": round(eta_info["minutes"]) if eta_info.get("minutes") is not None else None,
+        "km_to_station": eta_info.get("km"),
         "current_station": position.current_station_name if position else None,
-        "running": _running(avg_speed_kmph),
+        "running": running_snapshot,
         "message": f"{target.get('name')} is predicted ~{target.get('predicted_delay_minutes')} min late.",
     }
 
@@ -5054,7 +5145,11 @@ def api_push_sync_watches(req: SyncWatchesRequest):
     token = req.token.strip()
     push_store.register_token(token)
     push_store.replace_watches(token, [w.dict() for w in req.watches])
-    return {"ok": True, "watch_count": len(push_store.list_watches_for_token(token))}
+    # FEATURE: bell auto-off — tell the device which of its bells the
+    # server has already switched off (station reached), so it can drop
+    # them from its local list and show the bell as off.
+    return {"ok": True, "watch_count": len(push_store.list_watches_for_token(token)),
+            "retired": push_store.list_retired_for_token(token)}
 
 
 @app.get("/api/push/debug-watches")
@@ -5920,6 +6015,16 @@ def api_station_now(station_code: str, hours: int = 2):
 # overwritten wholesale by one value, never read-modified-written.
 _last_ws_poll_debug: dict = {}
 
+# FEATURE ("after clicking Start tracking it should instantly show the live
+# tracking, and coming back to the app it should be back within 1 sec"): the
+# first full poll of a fresh /ws/track connection runs the whole provider +
+# prediction pipeline and can take several seconds. The last good payload
+# per (train, requested date) is kept here and pushed the INSTANT a new
+# connection opens (flagged snapshot=True with its real age), then the live
+# poll replaces it moments later. Only recent snapshots are served.
+_last_ws_payload_cache: dict = {}
+_WS_SNAPSHOT_MAX_AGE_SECONDS = 20 * 60
+
 
 # =============================================================================
 # FEATURE: Real-Time Train Position via WebSockets
@@ -6093,6 +6198,17 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     # chart - see _snapshot_prediction_before_arrival. Same connection-
     # lifetime pattern as locked_station_predictions above.
     final_predictions_by_station = {}
+
+    snapshot_key = (train_number, requested_date_ddmmyyyy or "")
+    cached_snapshot = _last_ws_payload_cache.get(snapshot_key)
+    if cached_snapshot and time.time() - cached_snapshot[0] < _WS_SNAPSHOT_MAX_AGE_SECONDS:
+        try:
+            await websocket.send_json({
+                **cached_snapshot[1], "snapshot": True,
+                "snapshot_age_seconds": int(time.time() - cached_snapshot[0]),
+            })
+        except Exception:  # noqa: BLE001 - the live poll below still runs
+            pass
 
     try:
         while True:
@@ -7407,6 +7523,13 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # entry — RailKit's timeline is already ordered start to end.
                 stoppages = [s for s in timeline_json if s.get("kind") != "intermediate"]
                 destination_json = (stoppages or timeline_json or [None])[-1]
+                # Final physics sanity pass on every upcoming ETA — see
+                # _sanitize_upcoming_etas (no "est. 04:40" when 2 km away).
+                try:
+                    _sanitize_upcoming_etas(timeline_json, current_position_distance_km, eta_speed_kmph)
+                    timeline_grouped = gps_tracking.group_timeline_for_display(timeline_json)
+                except Exception:  # noqa: BLE001 - display polish must never break a poll
+                    pass
 
                 # FEATURE: Dynamic Re-route Suggestions During Live Tracking.
                 # See reroute_suggestions.py. Uses the SAME live timeline
@@ -7559,6 +7682,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "next_station_code": next_station_code_display,
                     "current_station_source": current_station_source,
                     "delay_minutes": position.delay_minutes,
+                    "train_name": getattr(position, "train_name", None),
                     "position_source": (
                         "railradar_segment_progress" if interp_lat is not None
                         else gps_tracking.position_source_label(current_timeline_entry.get("coordinates_from"))
@@ -7826,6 +7950,8 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 except Exception:
                     pass
             await websocket.send_json(payload)
+            if payload.get("timeline") and not payload.get("error"):
+                _last_ws_payload_cache[snapshot_key] = (time.time(), payload)
 
             # Auto-refresh every _TRACK_POLL_INTERVAL_SECONDS (5s) — but if the
             # client sends ANY message before that (the "Refresh now" button

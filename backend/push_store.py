@@ -77,6 +77,8 @@ def _init_db():
         for stmt in (
             "ALTER TABLE watches ADD COLUMN repeat_minutes INTEGER NOT NULL DEFAULT 15",
             "ALTER TABLE watches ADD COLUMN last_notified_at REAL",
+            # FEATURE: one-shot "arriving in ~10 min, be alert" push per bell.
+            "ALTER TABLE watches ADD COLUMN approach_notified_at REAL",
         ):
             try:
                 conn.execute(stmt)
@@ -84,6 +86,23 @@ def _init_db():
                 if "duplicate column" not in str(e).lower():
                     raise
         conn.execute("CREATE INDEX IF NOT EXISTS idx_watches_token ON watches(token)")
+        # FEATURE: bell auto-off. Once the train has really reached a bell's
+        # station, that watch is RETIRED: deleted, and remembered here so a
+        # later full re-sync from the device (the web page re-sends its whole
+        # local list on every load) can't quietly bring it back and restart
+        # the "already reached" notifications.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS retired_watches (
+                token TEXT NOT NULL,
+                train_number TEXT NOT NULL,
+                date TEXT NOT NULL DEFAULT '',
+                label TEXT NOT NULL DEFAULT '',
+                retired_at REAL NOT NULL,
+                PRIMARY KEY (token, train_number, date, label)
+            )
+            """
+        )
         # FEATURE: Fare & Availability "Alert Zone" — same pattern as
         # `watches` above (delay alerts), a separate table since a fare
         # watch tracks a route/class/quota rather than just a train, and
@@ -205,6 +224,7 @@ def unregister_token(token: str) -> None:
         conn.execute("DELETE FROM fare_watches WHERE token = ?", (token,))
         conn.execute("DELETE FROM alarm_watches WHERE token = ?", (token,))
         conn.execute("DELETE FROM tracking_watches WHERE token = ?", (token,))
+        conn.execute("DELETE FROM retired_watches WHERE token = ?", (token,))
         conn.execute("DELETE FROM device_tokens WHERE token = ?", (token,))
 
 
@@ -230,10 +250,21 @@ def replace_watches(token: str, watches: List[dict]) -> None:
         # same number (fixed after a real report of predictions/dedup
         # state bleeding across watches sharing a train number).
         existing = {
-            (row["train_number"], row["date"], row["label"]): (row["last_notified_delay"], row["last_notified_at"])
+            (row["train_number"], row["date"], (row["label"] or "").strip().upper() or None):
+                (row["last_notified_delay"], row["last_notified_at"], row["approach_notified_at"])
             for row in conn.execute(
-                "SELECT train_number, date, label, last_notified_delay, last_notified_at FROM watches WHERE token = ?",
+                "SELECT train_number, date, label, last_notified_delay, last_notified_at, approach_notified_at "
+                "FROM watches WHERE token = ?",
                 (token,),
+            )
+        }
+        # Bells already auto-switched-off (station reached) stay off even if
+        # the device re-sends them. Old entries (runs long over) are purged.
+        conn.execute("DELETE FROM retired_watches WHERE retired_at < ?", (time.time() - 4 * 86400,))
+        retired = {
+            (row["train_number"], row["date"], row["label"])
+            for row in conn.execute(
+                "SELECT train_number, date, label FROM retired_watches WHERE token = ?", (token,),
             )
         }
         conn.execute("DELETE FROM watches WHERE token = ?", (token,))
@@ -252,6 +283,8 @@ def replace_watches(token: str, watches: List[dict]) -> None:
             if not train_number:
                 continue
             key = (train_number, w.get("date"), (w.get("label") or "").strip().upper() or None)
+            if (key[0], key[1] or "", key[2] or "") in retired:
+                continue  # station already reached — this bell was auto-switched off
             deduped.pop(key, None)
             deduped[key] = w
         for w in list(deduped.values())[-MAX_WATCHES_PER_DEVICE:]:
@@ -263,14 +296,15 @@ def replace_watches(token: str, watches: List[dict]) -> None:
             # cadence from DelayAlertModal) doesn't re-fire a notification
             # early — see alert_scheduler.py's repeat-interval gate, which
             # depends on last_notified_at surviving a replace.
-            carried_delay, carried_at = existing.get((train_number, w.get("date"), w.get("label")), (None, None))
+            carried_delay, carried_at, carried_approach = existing.get(
+                (train_number, w.get("date"), (w.get("label") or "").strip().upper() or None), (None, None, None))
             conn.execute(
                 """
                 INSERT INTO watches (
                     token, train_number, date, threshold_minutes, repeat_minutes,
-                    label, last_notified_delay, last_notified_at, created_at
+                    label, last_notified_delay, last_notified_at, created_at, approach_notified_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     token,
@@ -282,6 +316,7 @@ def replace_watches(token: str, watches: List[dict]) -> None:
                     carried_delay,
                     carried_at,
                     now,
+                    carried_approach,
                 ),
             )
 
@@ -323,6 +358,33 @@ def mark_notified(watch_id: int, delay_minutes: int) -> None:
             "UPDATE watches SET last_notified_delay = ?, last_notified_at = ? WHERE id = ?",
             (delay_minutes, time.time(), watch_id),
         )
+
+
+def mark_approach_notified(watch_id: int) -> None:
+    """The one-shot "arriving in ~10 min" push went out for this bell."""
+    with _connect() as conn:
+        conn.execute("UPDATE watches SET approach_notified_at = ? WHERE id = ?", (time.time(), watch_id))
+
+
+def retire_watch(watch: dict) -> None:
+    """FEATURE: bell auto-off — the train has really reached this watch's
+    station. Deletes the watch and remembers it as retired so a later
+    re-sync of the device's local list can't resurrect it."""
+    label = (watch.get("label") or "").strip().upper()
+    with _connect() as conn:
+        conn.execute("DELETE FROM watches WHERE id = ?", (watch["id"],))
+        conn.execute(
+            "INSERT OR REPLACE INTO retired_watches (token, train_number, date, label, retired_at) VALUES (?, ?, ?, ?, ?)",
+            (watch["token"], str(watch["train_number"]).strip(), watch.get("date") or "", label, time.time()),
+        )
+
+
+def list_retired_for_token(token: str) -> List[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT train_number, date, label, retired_at FROM retired_watches WHERE token = ?", (token,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def stats() -> dict:

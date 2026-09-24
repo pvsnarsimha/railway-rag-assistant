@@ -1,0 +1,2729 @@
+diff --git a/backend/alert_scheduler.py b/backend/alert_scheduler.py
+index 4fed157..05aeeb6 100644
+--- a/backend/alert_scheduler.py
++++ b/backend/alert_scheduler.py
+@@ -172,11 +172,66 @@ def _resolve_prediction(predict_fn, w: dict):
+     if isinstance(result, dict):
+         return (result.get("status", "predicted"), result.get("delay_minutes"),
+                 result.get("station"), result.get("message"), result.get("actual_time"),
+-                result.get("running"))
++                result.get("running"), result)
+     if isinstance(result, tuple):
+         delay, station = result
+-        return ("predicted" if delay is not None else "unavailable", delay, station, None, None, None)
+-    return ("predicted" if result is not None else "unavailable", result, None, None, None, None)
++        return ("predicted" if delay is not None else "unavailable", delay, station, None, None, None, {})
++    return ("predicted" if result is not None else "unavailable", result, None, None, None, None, {})
++
++
++# FEATURE: "10 min before, tell me the train is about to arrive — be alert".
++# Fires ONCE per bell (push_store.approach_notified_at) as soon as the live,
++# physics-checked ETA to that bell's station drops to this many minutes.
++APPROACH_ALERT_MINUTES = 10
++# Only announce an arrival as "just reached" when it really happened
++# recently; an old arrival (bell armed late, app reopened hours later) just
++# switches the bell off silently.
++REACHED_NOTICE_WINDOW_MINUTES = 45
++
++
++def _arrival_is_recent(actual_time: Optional[str]) -> bool:
++    import running_status  # local import: keeps this module importable in isolation
++    ahead = running_status.clock_minutes_ahead(actual_time, running_status.ist_now())
++    return ahead is not None and -REACHED_NOTICE_WINDOW_MINUTES <= ahead <= 5
++
++
++def _retire_reached_watch(w: dict, station: Optional[str], actual_time: Optional[str],
++                          running: Optional[dict]) -> bool:
++    """FEATURE: bell auto-off. The train has really reached this bell's
++    station: send one final "reached — alert switched off" notice (only if
++    the arrival is recent and this device wasn't already told), then retire
++    the watch so no further notification is ever sent for it. Returns True
++    when a push was sent."""
++    sent = False
++    if w.get("last_notified_delay") != _ALREADY_REACHED_SENTINEL and _arrival_is_recent(actual_time):
++        import running_status
++        clock = running_status._hhmm(actual_time)
++        name = running_status._title(station) or station or (w.get("label") or "your station")
++        msg = f"Reached {name}" + (f" at {clock}" if clock else "") + " · this station's alert is now switched off."
++        res = push_notifications.send_station_status_alert(
++            token=w["token"], train_number=w["train_number"], label=None,
++            station=station, message=msg, actual_time=actual_time, running=running,
++        )
++        sent = bool(res.get("sent"))
++    try:
++        push_store.retire_watch(w)
++    except Exception as e:  # noqa: BLE001
++        logger.warning("Couldn't retire watch id=%s: %s", w.get("id"), e)
++    return sent
++
++
++def _push_approach(w: dict, extra: dict, delay: Optional[int], station: Optional[str],
++                   running: Optional[dict]) -> bool:
++    res = push_notifications.send_approach_alert(
++        token=w["token"], train_number=w["train_number"], station=station or w.get("label"),
++        minutes=extra.get("minutes_to_arrival"), eta_text=extra.get("predicted_eta"),
++        km=extra.get("km_to_station"), delay_minutes=delay, running=running,
++    )
++    if res.get("sent"):
++        push_store.mark_approach_notified(w["id"])
++        return True
++    logger.warning("Approach push failed for watch id=%s: %s", w["id"], res.get("error"))
++    return False
+ 
+ 
+ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[int], Optional[str]]"]) -> dict:
+@@ -200,7 +255,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
+             cache_key = (str(w["train_number"]), w.get("date"), (w.get("label") or "").strip().upper())
+             if cache_key not in prediction_cache:
+                 prediction_cache[cache_key] = _resolve_prediction(predict_fn, w)
+-            status, delay, predicted_station, message, actual_time, running = prediction_cache[cache_key]
++            status, delay, predicted_station, message, actual_time, running, extra = prediction_cache[cache_key]
+         except Exception as e:  # noqa: BLE001 - one bad watch shouldn't kill the pass
+             logger.warning("Prediction failed for watch id=%s train=%s: %s", w["id"], w["train_number"], e)
+             continue
+@@ -226,27 +281,48 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
+         # a watch whose label doesn't match a real station on this train's
+         # route gets no notification at all (not a delay, just an invalid
+         # watch) — same for "unavailable" (no live data to go on yet).
+-        if status in ("not_on_route", "unavailable", "journey_completed"):
++        if status == "journey_completed":
++            # Whole run is over — nothing left to alert on for this bell.
++            try:
++                push_store.retire_watch(w)
++            except Exception:  # noqa: BLE001
++                pass
++            continue
++        if status in ("not_on_route", "unavailable"):
+             continue
+         if status == "already_reached":
++            # BUGFIX / FEATURE (bell auto-off): once the train reaches a
++            # bell's station the bell switches itself off — one final
++            # "Reached X at HH:MM" notice (only if it just happened), then
++            # the watch is retired so NO further notification is sent for
++            # it, even if the device later re-syncs its old local list.
+             breached += 1
+-            last_notified = w.get("last_notified_delay")
+-            if last_notified == _ALREADY_REACHED_SENTINEL:
+-                continue  # already told this device this station was reached
+-            result = _push_station_status(w, predicted_station, message or "", actual_time, running)
+-            if result["sent"]:
+-                logger.info("PUSH sent (already reached, one-time) watch id=%s train=%s station=%s",
++            if _retire_reached_watch(w, predicted_station, actual_time, running):
++                logger.info("PUSH sent (reached, bell auto-off) watch id=%s train=%s station=%s",
+                             w["id"], w["train_number"], predicted_station)
+                 pushed += 1
+             else:
+-                push_failed += 1
++                logger.info("Bell auto-off (silent) watch id=%s train=%s station=%s",
++                            w["id"], w["train_number"], predicted_station)
+             continue
+ 
++        # FEATURE: "train about to arrive in the next ~10 min — be alert".
++        minutes_to_arrival = (extra or {}).get("minutes_to_arrival")
++        if (status == "predicted" and w.get("label") and minutes_to_arrival is not None
++                and 0 <= minutes_to_arrival <= APPROACH_ALERT_MINUTES and not w.get("approach_notified_at")):
++            if _push_approach(w, extra, delay, predicted_station, running):
++                pushed += 1
++                push_store.mark_notified(w["id"], delay if delay is not None else 0)
++                logger.info("PUSH sent (arriving in ~%s min) watch id=%s train=%s station=%s",
++                            minutes_to_arrival, w["id"], w["train_number"], predicted_station)
++                continue  # the approach notice already carries the delay — no second push this tick
++            push_failed += 1
++
+         if delay is None or delay < w["threshold_minutes"]:
+             continue
+         breached += 1
+         # Collected, not pushed yet — see the grouping pass below.
+-        groups.setdefault((w["token"], w["train_number"], w.get("date")), []).append((w, delay, predicted_station))
++        groups.setdefault((w["token"], w["train_number"], w.get("date")), []).append((w, delay, predicted_station, extra or {}))
+         running_by_train[(str(w["train_number"]), w.get("date"))] = running
+ 
+     # BUGFIX ("notification every 2 minutes after I closed the app"): each
+@@ -266,10 +342,10 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
+                                            "threshold_minutes": repeat}):
+             continue
+         items.sort(key=lambda it: -it[1])
+-        head_w, head_delay, head_station = items[0]
++        head_w, head_delay, head_station, head_extra = items[0]
+         summary_text = None
+         if len(items) > 1:
+-            summary_text = ", ".join(f"{(st or 'next stop').title()} ~{d} min" for _w, d, st in items[:4])
++            summary_text = ", ".join(f"{(st or 'next stop').title()} ~{d} min" for _w, d, st, _x in items[:4])
+             if len(items) > 4:
+                 summary_text += f" +{len(items) - 4} more"
+         result = push_notifications.send_delay_alert(
+@@ -277,13 +353,15 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
+             predicted_delay_minutes=head_delay, predicted_for_station=head_station,
+             stations_summary=summary_text,
+             running=running_by_train.get((str(train_number), _date)),
++            eta_text=head_extra.get("predicted_eta"), minutes_to_arrival=head_extra.get("minutes_to_arrival"),
++            km_to_station=head_extra.get("km_to_station"),
+         )
+         if result["sent"]:
+             pushed += 1
+-            for w, d, _st in items:
++            for w, d, _st, _x in items:
+                 push_store.mark_notified(w["id"], d)
+             logger.info("PUSH sent train=%s stations=%s next in %s min",
+-                        train_number, [st for _w, _d, st in items], repeat)
++                        train_number, [st for _w, _d, st, _x in items], repeat)
+         else:
+             push_failed += 1
+             logger.warning("Push failed for train=%s watches=%s: %s",
+diff --git a/backend/app.py b/backend/app.py
+index a9c7a1f..e65d503 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -747,13 +747,19 @@ def _fetch_timeline_with_predictions(train_number: str, date: Optional[str], tra
+         rr_stops = railradar_fallback.fetch_railradar_timeline(train_number, date)
+     except Exception:
+         rr_stops = []
++    try:
++        _live_km_fetch = _estimate_live_distance_km(train_number, date, timeline_json)
++    except Exception:  # noqa: BLE001
++        _live_km_fetch = None
+     _predict_delay_per_reporting_station(
+         timeline_json, total_distance_km, current_delay_minutes,
+         trend.get("trend_per_stop"), trend.get("basis"),
+         avg_speed_kmph, avg_speed_basis, date, travel_class,
+         train_info_data=train_info_data, rr_stops=rr_stops,
++        live_current_distance_km=_live_km_fetch,
+     )
+     _mirror_origin_destination_timing(timeline_json)
++    _sanitize_upcoming_etas(timeline_json, _live_km_fetch, avg_speed_kmph)
+     return timeline_json, position
+ 
+ 
+@@ -856,6 +862,69 @@ def _last_really_reached_index(timeline_json: list, next_station_code: Optional[
+     return last
+ 
+ 
++def _sanitize_upcoming_etas(timeline_json: list, current_distance_km: Optional[float],
++                            speed_kmph: Optional[float]) -> None:
++    """
++    BUGFIX ("2 km to Warangal at 04:05 but it says est. 04:40 / 04:50"):
++    an upcoming stop's predicted_eta can come from the timetable-anchored
++    or locked-in passes above (schedule + a delay figure frozen earlier),
++    which can be physically impossible for where the train really is now.
++    Final pass, run after every other ETA/lock pass: each upcoming stop's
++    ETA must be reachable from the real remaining distance at a plausible
++    speed (running_status.sane_eta) — otherwise it's replaced with
++    now + remaining km / current speed, and that reporting stop's predicted
++    delay is re-derived from the corrected ETA so the two never disagree.
++    Mutates timeline_json in place.
++    """
++    if current_distance_km is None:
++        return
++    now = running_status.ist_now()
++    for stop in timeline_json:
++        if stop.get("status") != "upcoming":
++            continue
++        stop_km = gps_tracking._distance_km_value(stop.get("distance_km"))
++        if stop_km is None or stop_km < current_distance_km - 0.5:
++            continue
++        km_rem = max(0.0, stop_km - current_distance_km)
++        arr = stop.get("arrival") or {}
++        raw = stop.get("predicted_eta") or arr.get("expected") or arr.get("scheduled")
++        info = running_status.sane_eta(raw, km_rem, speed_kmph, now)
++        stop["distance_ahead_km"] = round(km_rem, 1)
++        stop["minutes_away"] = round(info["minutes"]) if info["minutes"] is not None else None
++        if info["source"] != "distance" or not info["eta"]:
++            continue
++        stop["predicted_eta"] = info["eta"]
++        stop["predicted_eta_source"] = "distance"
++        if stop.get("kind") != "intermediate" and stop.get("predicted_delay_minutes") is not None:
++            sched_min = gps_tracking._time_str_to_minutes(arr.get("scheduled") or arr.get("expected"))
++            eta_min = gps_tracking._time_str_to_minutes(info["eta"])
++            if sched_min is not None and eta_min is not None:
++                diff = (eta_min - sched_min) % 1440
++                if diff > 720:
++                    diff -= 1440
++                if -120 < diff < 720:
++                    stop["predicted_delay_minutes"] = max(0, int(round(diff)))
++                    stop.pop("predicted_delay_low_minutes", None)
++                    stop.pop("predicted_delay_high_minutes", None)
++
++
++def _estimate_live_distance_km(train_number: str, date: Optional[str], timeline_json: list) -> Optional[float]:
++    """Train's live distance-from-origin for the background (no websocket)
++    path: RailRadar's real segment progress between the last reached and
++    next stop when available, else the last reached stop's own distance."""
++    try:
++        seg = railradar_fallback.get_segment_progress(train_number) or {}
++    except Exception:  # noqa: BLE001
++        seg = {}
++    try:
++        interp_km, _lat, _lng = gps_tracking.interpolate_live_position(timeline_json, seg.get("segment_progress"))
++    except Exception:  # noqa: BLE001
++        interp_km = None
++    if interp_km is not None:
++        return interp_km
++    return gps_tracking.current_position_distance_km(timeline_json)
++
++
+ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Optional[str] = None,
+                                 travel_class: Optional[str] = None) -> dict:
+     """
+@@ -910,6 +979,17 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
+     # train right now" snapshot — crossed station + time, km to the next
+     # point, next halt + ETA — attached to EVERY outcome below so a push can
+     # say "Crossed Aluva at 17:54 · 26 km to Thrissur", not only a delay.
++    live_km_holder = {"km": None, "done": False}
++
++    def _live_km():
++        if not live_km_holder["done"]:
++            live_km_holder["done"] = True
++            try:
++                live_km_holder["km"] = _estimate_live_distance_km(train_number, date, timeline_json)
++            except Exception:  # noqa: BLE001
++                live_km_holder["km"] = None
++        return live_km_holder["km"]
++
+     def _running(speed=None):
+         try:
+             return running_status.build(
+@@ -917,6 +997,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
+                 delay_minutes=position.delay_minutes if position else None,
+                 train_name=position.train_name if position else None,
+                 speed_kmph=speed, is_really_reached=_stop_really_reached,
++                live_distance_km=_live_km(),
+             )
+         except Exception:  # noqa: BLE001 - a snapshot failure must never block an alert
+             return None
+@@ -955,8 +1036,10 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
+         trend.get("trend_per_stop"), trend.get("basis"),
+         avg_speed_kmph, avg_speed_basis, date, travel_class,
+         train_info_data=train_info_data, rr_stops=rr_stops,
++        live_current_distance_km=_live_km(),
+     )
+     _mirror_origin_destination_timing(timeline_json)
++    _sanitize_upcoming_etas(timeline_json, _live_km(), avg_speed_kmph)
+ 
+     # BUGFIX (train 20833, watch with no label): RailKit's own per-stop
+     # `status` can stay "upcoming" long after a station has really been
+@@ -1019,14 +1102,22 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
+                 "running": _running(avg_speed_kmph),
+                 "message": f"No upcoming reporting station left to predict for train {train_number}."}
+ 
++    running_snapshot = _running(avg_speed_kmph)
++    # FEATURE: real-time ETA / distance to THIS bell's station, sanity-
++    # checked against physics (see running_status.sane_eta) — drives the
++    # "arriving in ~10 min, be alert" push and the ETA shown in every alert.
++    eta_info = running_status.eta_to_stop(running_snapshot, target, avg_speed_kmph)
+     return {
+         "status": "predicted",
+         "delay_minutes": target.get("predicted_delay_minutes"),
+         "confidence": target.get("predicted_delay_confidence"),
+         "station": target.get("name"),
+-        "predicted_eta": target.get("predicted_eta"),
++        "station_code": target.get("code"),
++        "predicted_eta": eta_info.get("eta") or target.get("predicted_eta"),
++        "minutes_to_arrival": round(eta_info["minutes"]) if eta_info.get("minutes") is not None else None,
++        "km_to_station": eta_info.get("km"),
+         "current_station": position.current_station_name if position else None,
+-        "running": _running(avg_speed_kmph),
++        "running": running_snapshot,
+         "message": f"{target.get('name')} is predicted ~{target.get('predicted_delay_minutes')} min late.",
+     }
+ 
+@@ -5054,7 +5145,11 @@ def api_push_sync_watches(req: SyncWatchesRequest):
+     token = req.token.strip()
+     push_store.register_token(token)
+     push_store.replace_watches(token, [w.dict() for w in req.watches])
+-    return {"ok": True, "watch_count": len(push_store.list_watches_for_token(token))}
++    # FEATURE: bell auto-off — tell the device which of its bells the
++    # server has already switched off (station reached), so it can drop
++    # them from its local list and show the bell as off.
++    return {"ok": True, "watch_count": len(push_store.list_watches_for_token(token)),
++            "retired": push_store.list_retired_for_token(token)}
+ 
+ 
+ @app.get("/api/push/debug-watches")
+@@ -5920,6 +6015,16 @@ def api_station_now(station_code: str, hours: int = 2):
+ # overwritten wholesale by one value, never read-modified-written.
+ _last_ws_poll_debug: dict = {}
+ 
++# FEATURE ("after clicking Start tracking it should instantly show the live
++# tracking, and coming back to the app it should be back within 1 sec"): the
++# first full poll of a fresh /ws/track connection runs the whole provider +
++# prediction pipeline and can take several seconds. The last good payload
++# per (train, requested date) is kept here and pushed the INSTANT a new
++# connection opens (flagged snapshot=True with its real age), then the live
++# poll replaces it moments later. Only recent snapshots are served.
++_last_ws_payload_cache: dict = {}
++_WS_SNAPSHOT_MAX_AGE_SECONDS = 20 * 60
++
+ 
+ # =============================================================================
+ # FEATURE: Real-Time Train Position via WebSockets
+@@ -6094,6 +6199,17 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
+     # lifetime pattern as locked_station_predictions above.
+     final_predictions_by_station = {}
+ 
++    snapshot_key = (train_number, requested_date_ddmmyyyy or "")
++    cached_snapshot = _last_ws_payload_cache.get(snapshot_key)
++    if cached_snapshot and time.time() - cached_snapshot[0] < _WS_SNAPSHOT_MAX_AGE_SECONDS:
++        try:
++            await websocket.send_json({
++                **cached_snapshot[1], "snapshot": True,
++                "snapshot_age_seconds": int(time.time() - cached_snapshot[0]),
++            })
++        except Exception:  # noqa: BLE001 - the live poll below still runs
++            pass
++
+     try:
+         while True:
+             # See requested_date_ddmmyyyy's comment above `while True:` -
+@@ -7407,6 +7523,13 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
+                 # entry — RailKit's timeline is already ordered start to end.
+                 stoppages = [s for s in timeline_json if s.get("kind") != "intermediate"]
+                 destination_json = (stoppages or timeline_json or [None])[-1]
++                # Final physics sanity pass on every upcoming ETA — see
++                # _sanitize_upcoming_etas (no "est. 04:40" when 2 km away).
++                try:
++                    _sanitize_upcoming_etas(timeline_json, current_position_distance_km, eta_speed_kmph)
++                    timeline_grouped = gps_tracking.group_timeline_for_display(timeline_json)
++                except Exception:  # noqa: BLE001 - display polish must never break a poll
++                    pass
+ 
+                 # FEATURE: Dynamic Re-route Suggestions During Live Tracking.
+                 # See reroute_suggestions.py. Uses the SAME live timeline
+@@ -7559,6 +7682,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
+                     "next_station_code": next_station_code_display,
+                     "current_station_source": current_station_source,
+                     "delay_minutes": position.delay_minutes,
++                    "train_name": getattr(position, "train_name", None),
+                     "position_source": (
+                         "railradar_segment_progress" if interp_lat is not None
+                         else gps_tracking.position_source_label(current_timeline_entry.get("coordinates_from"))
+@@ -7826,6 +7950,8 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
+                 except Exception:
+                     pass
+             await websocket.send_json(payload)
++            if payload.get("timeline") and not payload.get("error"):
++                _last_ws_payload_cache[snapshot_key] = (time.time(), payload)
+ 
+             # Auto-refresh every _TRACK_POLL_INTERVAL_SECONDS (5s) — but if the
+             # client sends ANY message before that (the "Refresh now" button
+diff --git a/backend/gps_tracking.py b/backend/gps_tracking.py
+index e8d3eaf..6ddc2d4 100644
+--- a/backend/gps_tracking.py
++++ b/backend/gps_tracking.py
+@@ -1555,6 +1555,8 @@ def group_timeline_for_display(timeline_json: list) -> list:
+                  "predicted_delay_low_minutes": p.get("predicted_delay_low_minutes"),
+                  "predicted_delay_high_minutes": p.get("predicted_delay_high_minutes"),
+                  "predicted_eta": p.get("predicted_eta"),
++                 "predicted_eta_source": p.get("predicted_eta_source"),
++                 "minutes_away": p.get("minutes_away"),
+                  "distance_ahead_km": p.get("distance_ahead_km")}
+                 for p in pending
+             ],
+diff --git a/backend/push_notifications.py b/backend/push_notifications.py
+index ec043d0..5fde884 100644
+--- a/backend/push_notifications.py
++++ b/backend/push_notifications.py
+@@ -199,6 +199,9 @@ def send_delay_alert(
+     predicted_for_station: Optional[str] = None,
+     stations_summary: Optional[str] = None,
+     running: Optional[dict] = None,
++    eta_text: Optional[str] = None,
++    minutes_to_arrival: Optional[float] = None,
++    km_to_station: Optional[float] = None,
+ ) -> dict:
+     """
+     Send one push notification for a breached delay-alert watch.
+@@ -236,6 +239,17 @@ def send_delay_alert(
+             f"{display_name} is now predicted ~{predicted_delay_minutes} min late{station_phrase} "
+             f"(as of {checked_at.strftime('%H:%M')})."
+         )
++    # Current, physics-checked ETA to the bell's station — "ETA 04:07 ·
++    # 2 km away" rather than a far-off timetable-based time.
++    eta_bits = []
++    if eta_text:
++        eta_bits.append(f"ETA {eta_text}")
++    if minutes_to_arrival is not None:
++        eta_bits.append("arriving now" if minutes_to_arrival < 1 else f"in ~{int(round(minutes_to_arrival))} min")
++    if km_to_station is not None:
++        eta_bits.append(f"{km_to_station:g} km away")
++    if eta_bits:
++        body += f"\n{(predicted_for_station or 'Station').title()}: " + " · ".join(eta_bits)
+     # FEATURE (RailYatri-style): lead with WHERE the train is right now —
+     # "Crossed Aluva at 17:54 · 26 km to Thrissur" — then the prediction.
+     position_line = (running or {}).get("headline")
+@@ -379,6 +393,59 @@ def send_alarm_alert(
+         return {"sent": False, "error": str(e)}
+ 
+ 
++def send_approach_alert(
++    token: str, train_number: str, station: Optional[str], minutes: Optional[float] = None,
++    eta_text: Optional[str] = None, km: Optional[float] = None, delay_minutes: Optional[int] = None,
++    running: Optional[dict] = None,
++) -> dict:
++    """
++    FEATURE: "train about to arrive — be alert". Sent ONCE per bell when
++    the live, physics-checked ETA to that bell's station drops to ~10 min
++    (see alert_scheduler.APPROACH_ALERT_MINUTES). Always alerts (buzz +
++    re-notify) — this is the one a passenger waiting on the platform or
++    about to get down must not miss. Same never-raises contract.
++    """
++    checked_at = _ist_now()
++    name = " ".join(w.capitalize() if len(w) > 2 else w for w in str(station or "your station").split())
++    when = "any moment now" if minutes is not None and minutes < 1 else (
++        f"in ~{int(round(minutes))} min" if minutes is not None else "in the next 10 min")
++    title = f"🚆 {train_number} arriving at {name} {when}"
++    bits = []
++    if eta_text:
++        bits.append(f"ETA {eta_text}")
++    if km is not None:
++        bits.append(f"{km:g} km away")
++    if delay_minutes is not None:
++        bits.append("on time" if delay_minutes <= 0 else f"{delay_minutes} min late")
++    body = f"Please be alert — the train will reach {name} in the next 5–10 minutes."
++    if bits:
++        body += "\n" + " · ".join(bits)
++    if (running or {}).get("headline"):
++        body = f"{running['headline']}\n{body}"
++    body += f"\n(as of {checked_at.strftime('%H:%M')})"
++    data = {
++        "type": "approach_alert", "train_number": str(train_number), "station": station or "",
++        "eta": eta_text or "", "minutes": "" if minutes is None else str(int(round(minutes))),
++        "checked_at": checked_at.strftime("%H:%M"),
++    }
++    if _is_expo_token(token):
++        return _send_via_expo(token, title, body, data, sound="default")
++    if not _ensure_initialized():
++        return {"sent": False, "error": _init_error}
++    from firebase_admin import messaging
++    fcm_message = messaging.Message(
++        token=token,
++        notification=messaging.Notification(title=title, body=body),
++        data=data,
++        webpush=_webpush_config(title, body, tag=f"approach-{train_number}-{station or ''}"),
++    )
++    try:
++        messaging.send(fcm_message)
++        return {"sent": True, "error": None}
++    except Exception as e:  # noqa: BLE001
++        return {"sent": False, "error": str(e)}
++
++
+ def send_station_status_alert(
+     token: str, train_number: str, label: Optional[str], station: Optional[str],
+     message: str, actual_time: Optional[str] = None, running: Optional[dict] = None,
+diff --git a/backend/push_store.py b/backend/push_store.py
+index e7c33e8..c687296 100644
+--- a/backend/push_store.py
++++ b/backend/push_store.py
+@@ -77,6 +77,8 @@ def _init_db():
+         for stmt in (
+             "ALTER TABLE watches ADD COLUMN repeat_minutes INTEGER NOT NULL DEFAULT 15",
+             "ALTER TABLE watches ADD COLUMN last_notified_at REAL",
++            # FEATURE: one-shot "arriving in ~10 min, be alert" push per bell.
++            "ALTER TABLE watches ADD COLUMN approach_notified_at REAL",
+         ):
+             try:
+                 conn.execute(stmt)
+@@ -84,6 +86,23 @@ def _init_db():
+                 if "duplicate column" not in str(e).lower():
+                     raise
+         conn.execute("CREATE INDEX IF NOT EXISTS idx_watches_token ON watches(token)")
++        # FEATURE: bell auto-off. Once the train has really reached a bell's
++        # station, that watch is RETIRED: deleted, and remembered here so a
++        # later full re-sync from the device (the web page re-sends its whole
++        # local list on every load) can't quietly bring it back and restart
++        # the "already reached" notifications.
++        conn.execute(
++            """
++            CREATE TABLE IF NOT EXISTS retired_watches (
++                token TEXT NOT NULL,
++                train_number TEXT NOT NULL,
++                date TEXT NOT NULL DEFAULT '',
++                label TEXT NOT NULL DEFAULT '',
++                retired_at REAL NOT NULL,
++                PRIMARY KEY (token, train_number, date, label)
++            )
++            """
++        )
+         # FEATURE: Fare & Availability "Alert Zone" — same pattern as
+         # `watches` above (delay alerts), a separate table since a fare
+         # watch tracks a route/class/quota rather than just a train, and
+@@ -205,6 +224,7 @@ def unregister_token(token: str) -> None:
+         conn.execute("DELETE FROM fare_watches WHERE token = ?", (token,))
+         conn.execute("DELETE FROM alarm_watches WHERE token = ?", (token,))
+         conn.execute("DELETE FROM tracking_watches WHERE token = ?", (token,))
++        conn.execute("DELETE FROM retired_watches WHERE token = ?", (token,))
+         conn.execute("DELETE FROM device_tokens WHERE token = ?", (token,))
+ 
+ 
+@@ -230,12 +250,23 @@ def replace_watches(token: str, watches: List[dict]) -> None:
+         # same number (fixed after a real report of predictions/dedup
+         # state bleeding across watches sharing a train number).
+         existing = {
+-            (row["train_number"], row["date"], row["label"]): (row["last_notified_delay"], row["last_notified_at"])
++            (row["train_number"], row["date"], (row["label"] or "").strip().upper() or None):
++                (row["last_notified_delay"], row["last_notified_at"], row["approach_notified_at"])
+             for row in conn.execute(
+-                "SELECT train_number, date, label, last_notified_delay, last_notified_at FROM watches WHERE token = ?",
++                "SELECT train_number, date, label, last_notified_delay, last_notified_at, approach_notified_at "
++                "FROM watches WHERE token = ?",
+                 (token,),
+             )
+         }
++        # Bells already auto-switched-off (station reached) stay off even if
++        # the device re-sends them. Old entries (runs long over) are purged.
++        conn.execute("DELETE FROM retired_watches WHERE retired_at < ?", (time.time() - 4 * 86400,))
++        retired = {
++            (row["train_number"], row["date"], row["label"])
++            for row in conn.execute(
++                "SELECT train_number, date, label FROM retired_watches WHERE token = ?", (token,),
++            )
++        }
+         conn.execute("DELETE FROM watches WHERE token = ?", (token,))
+         now = time.time()
+         # BUGFIX ("notifications only for a single train"): this used to
+@@ -252,6 +283,8 @@ def replace_watches(token: str, watches: List[dict]) -> None:
+             if not train_number:
+                 continue
+             key = (train_number, w.get("date"), (w.get("label") or "").strip().upper() or None)
++            if (key[0], key[1] or "", key[2] or "") in retired:
++                continue  # station already reached — this bell was auto-switched off
+             deduped.pop(key, None)
+             deduped[key] = w
+         for w in list(deduped.values())[-MAX_WATCHES_PER_DEVICE:]:
+@@ -263,14 +296,15 @@ def replace_watches(token: str, watches: List[dict]) -> None:
+             # cadence from DelayAlertModal) doesn't re-fire a notification
+             # early — see alert_scheduler.py's repeat-interval gate, which
+             # depends on last_notified_at surviving a replace.
+-            carried_delay, carried_at = existing.get((train_number, w.get("date"), w.get("label")), (None, None))
++            carried_delay, carried_at, carried_approach = existing.get(
++                (train_number, w.get("date"), (w.get("label") or "").strip().upper() or None), (None, None, None))
+             conn.execute(
+                 """
+                 INSERT INTO watches (
+                     token, train_number, date, threshold_minutes, repeat_minutes,
+-                    label, last_notified_delay, last_notified_at, created_at
++                    label, last_notified_delay, last_notified_at, created_at, approach_notified_at
+                 )
+-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
++                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 """,
+                 (
+                     token,
+@@ -282,6 +316,7 @@ def replace_watches(token: str, watches: List[dict]) -> None:
+                     carried_delay,
+                     carried_at,
+                     now,
++                    carried_approach,
+                 ),
+             )
+ 
+@@ -325,6 +360,33 @@ def mark_notified(watch_id: int, delay_minutes: int) -> None:
+         )
+ 
+ 
++def mark_approach_notified(watch_id: int) -> None:
++    """The one-shot "arriving in ~10 min" push went out for this bell."""
++    with _connect() as conn:
++        conn.execute("UPDATE watches SET approach_notified_at = ? WHERE id = ?", (time.time(), watch_id))
++
++
++def retire_watch(watch: dict) -> None:
++    """FEATURE: bell auto-off — the train has really reached this watch's
++    station. Deletes the watch and remembers it as retired so a later
++    re-sync of the device's local list can't resurrect it."""
++    label = (watch.get("label") or "").strip().upper()
++    with _connect() as conn:
++        conn.execute("DELETE FROM watches WHERE id = ?", (watch["id"],))
++        conn.execute(
++            "INSERT OR REPLACE INTO retired_watches (token, train_number, date, label, retired_at) VALUES (?, ?, ?, ?, ?)",
++            (watch["token"], str(watch["train_number"]).strip(), watch.get("date") or "", label, time.time()),
++        )
++
++
++def list_retired_for_token(token: str) -> List[dict]:
++    with _connect() as conn:
++        rows = conn.execute(
++            "SELECT train_number, date, label, retired_at FROM retired_watches WHERE token = ?", (token,),
++        ).fetchall()
++        return [dict(r) for r in rows]
++
++
+ def stats() -> dict:
+     with _connect() as conn:
+         token_count = conn.execute("SELECT COUNT(*) FROM device_tokens").fetchone()[0]
+diff --git a/backend/running_status.py b/backend/running_status.py
+index 434fd25..9033006 100644
+--- a/backend/running_status.py
++++ b/backend/running_status.py
+@@ -62,10 +62,61 @@ def _title(name: Optional[str]) -> Optional[str]:
+     return " ".join(w.capitalize() if len(w) > 2 else w.title() for w in str(name).split())
+ 
+ 
++# ---------------------------------------------------------------------------
++# BUGFIX ("train is 2 km from Warangal at 04:05 but the notification says
++# est. 04:40"): the next-halt ETA used to be read straight off the stop's
++# predicted_eta / expected / scheduled — a figure that can be anchored to the
++# timetable (schedule + a stale delay) or locked in from much earlier, so it
++# could be wildly out of line with where the train physically is. Every ETA
++# shown in a notification is now sanity-checked against physics: the real
++# remaining distance divided by a plausible train speed. A provider/model ETA
++# is kept only while it's physically possible (not faster than ~130 km/h,
++# not slower than ~20 km/h + a short halt allowance); otherwise it's replaced
++# by now + remaining km / current speed.
++# ---------------------------------------------------------------------------
++MAX_PLAUSIBLE_KMPH = 130.0
++MIN_PLAUSIBLE_KMPH = 20.0
++DEFAULT_SPEED_KMPH = 50.0
++
++
++def clock_minutes_ahead(hhmm: Optional[str], now: datetime) -> Optional[float]:
++    """Minutes from `now` until an HH:MM clock time, in (-720, 720]."""
++    if not hhmm:
++        return None
++    m = _HHMM_RE.search(str(hhmm))
++    if not m:
++        return None
++    t = int(m.group(1)) * 60 + int(m.group(2))
++    diff = (t - (now.hour * 60 + now.minute)) % 1440
++    return float(diff - 1440 if diff > 720 else diff)
++
++
++def sane_eta(provider_hhmm: Optional[str], km_remaining: Optional[float], speed_kmph: Optional[float],
++             now: Optional[datetime] = None) -> dict:
++    """Returns {"eta": "HH:MM"|None, "minutes": float|None, "source": "provider"|"distance"|None}."""
++    now = now or ist_now()
++    provider = _hhmm(provider_hhmm)
++    ahead = clock_minutes_ahead(provider, now)
++    if km_remaining is None:
++        if provider is None:
++            return {"eta": None, "minutes": None, "source": None}
++        return {"eta": provider, "minutes": ahead, "source": "provider"}
++    km = max(0.0, float(km_remaining))
++    speed = speed_kmph if speed_kmph and speed_kmph >= 10 else DEFAULT_SPEED_KMPH
++    speed = min(speed, MAX_PLAUSIBLE_KMPH)
++    lo = km / MAX_PLAUSIBLE_KMPH * 60.0
++    hi = km / MIN_PLAUSIBLE_KMPH * 60.0 + 10.0
++    if ahead is not None and lo - 2 <= ahead <= hi:
++        return {"eta": provider, "minutes": max(0.0, ahead), "source": "provider"}
++    minutes = km / speed * 60.0
++    eta = now + timedelta(minutes=minutes)
++    return {"eta": eta.strftime("%H:%M"), "minutes": minutes, "source": "distance"}
++
++
+ def build(timeline_json: list, *, delay_minutes: Optional[int] = None, train_name: Optional[str] = None,
+           speed_kmph: Optional[float] = None,
+           is_really_reached: Optional[Callable[[dict], bool]] = None,
+-          now: Optional[datetime] = None) -> Optional[dict]:
++          now: Optional[datetime] = None, live_distance_km: Optional[float] = None) -> Optional[dict]:
+     """
+     Returns a dict (all fields optional/None-able):
+       crossed_station, crossed_code, crossed_time, crossed_verb ("Crossed"|"Arrived at"|"Departed"),
+@@ -121,21 +172,43 @@ def build(timeline_json: list, *, delay_minutes: Optional[int] = None, train_nam
+     # far the train has plausibly run since it crossed the last point (real
+     # crossed time x real speed), and never below 0.
+     km_to_next = None
++    current_km = None  # best estimate of the train's own distance-from-origin right now
+     if crossed is not None and nxt is not None:
+         a, b = _km(crossed.get("distance_km")), _km(nxt.get("distance_km"))
+         if a is not None and b is not None and b >= a:
+-            gap = b - a
+-            since = _minutes_since(crossed_time, now)
+-            if since is not None and speed_kmph and speed_kmph > 0 and crossed_verb != "Arrived at":
+-                gap = max(0.0, gap - speed_kmph * since / 60.0)
+-            km_to_next = round(gap, 1)
+-
+-    def _eta(stop):
++            if live_distance_km is not None and a - 1 <= live_distance_km <= b + 1:
++                # Real live position (RailRadar segment progress) — most precise.
++                current_km = min(max(live_distance_km, a), b)
++            else:
++                gap = b - a
++                since = _minutes_since(crossed_time, now)
++                if since is not None and speed_kmph and speed_kmph > 0 and crossed_verb != "Arrived at":
++                    gap = max(0.0, gap - speed_kmph * since / 60.0)
++                current_km = b - gap
++            km_to_next = round(max(0.0, b - current_km), 1)
++    elif crossed is not None:
++        current_km = _km(crossed.get("distance_km"))
++
++    def _raw_eta(stop):
+         if not stop:
+             return None
+         arr = stop.get("arrival") or {}
+         return _hhmm(stop.get("predicted_eta")) or _hhmm(arr.get("expected")) or _hhmm(arr.get("scheduled"))
+ 
++    def _eta_info(stop):
++        if not stop:
++            return {"eta": None, "minutes": None, "source": None}
++        km_rem = None
++        stop_km = _km(stop.get("distance_km"))
++        if stop_km is not None and current_km is not None:
++            km_rem = max(0.0, stop_km - current_km)
++        info = sane_eta(_raw_eta(stop), km_rem, speed_kmph, now)
++        info["km"] = round(km_rem, 1) if km_rem is not None else None
++        return info
++
++    def _eta(stop):
++        return _eta_info(stop)["eta"]
++
+     def _delay(stop):
+         if not stop:
+             return None
+@@ -160,17 +233,48 @@ def build(timeline_json: list, *, delay_minutes: Optional[int] = None, train_nam
+         "km_to_next": km_to_next,
+         "next_halt": _title(next_halt.get("name")) if next_halt else None,
+         "next_halt_code": next_halt.get("code") if next_halt else None,
+-        "next_halt_eta": _eta(next_halt),
++        "next_halt_eta": None,
++        "next_halt_minutes": None,
++        "next_halt_km": None,
+         "next_halt_delay": _delay(next_halt),
+         "destination": _title(dest.get("name")),
+         "destination_eta": _hhmm(dest_arr.get("actual")) if completed else _eta(dest),
+         "completed": completed,
+     }
++    if next_halt is not None:
++        info = _eta_info(next_halt)
++        rs["next_halt_eta"] = info["eta"]
++        rs["next_halt_minutes"] = round(info["minutes"]) if info["minutes"] is not None else None
++        rs["next_halt_km"] = info.get("km")
++        # Keep the delay consistent with the (possibly corrected) ETA.
++        sched = _hhmm((next_halt.get("arrival") or {}).get("scheduled"))
++        if info["source"] == "distance" and sched and info["eta"]:
++            d = clock_minutes_ahead(info["eta"], datetime.combine(now.date(), datetime.strptime(sched, "%H:%M").time()))
++            if d is not None and -120 < d < 720:
++                rs["next_halt_delay"] = int(round(d))
++    rs["current_km"] = round(current_km, 1) if current_km is not None else None
+     rs["headline"] = headline(rs)
+     rs["detail"] = detail(rs)
+     return rs
+ 
+ 
++def eta_to_stop(rs: Optional[dict], stop: Optional[dict], speed_kmph: Optional[float] = None,
++                now: Optional[datetime] = None) -> dict:
++    """Sane ETA to ANY stop on the route (e.g. a bell's station) from a
++    running snapshot built above. {"eta", "minutes", "km", "source"}."""
++    if not stop:
++        return {"eta": None, "minutes": None, "km": None, "source": None}
++    now = now or ist_now()
++    cur = (rs or {}).get("current_km")
++    stop_km = _km(stop.get("distance_km"))
++    km_rem = max(0.0, stop_km - cur) if (stop_km is not None and cur is not None) else None
++    arr = stop.get("arrival") or {}
++    raw = _hhmm(stop.get("predicted_eta")) or _hhmm(arr.get("expected")) or _hhmm(arr.get("scheduled"))
++    info = sane_eta(raw, km_rem, speed_kmph, now)
++    info["km"] = round(km_rem, 1) if km_rem is not None else None
++    return info
++
++
+ def delay_phrase(minutes: Optional[int]) -> Optional[str]:
+     if minutes is None:
+         return None
+@@ -214,9 +318,12 @@ def detail(rs: dict) -> str:
+     s = f"Next halt {rs['next_halt']}"
+     if rs.get("next_halt_eta"):
+         s += f" exp. {rs['next_halt_eta']}"
++        mins = rs.get("next_halt_minutes")
++        if mins is not None and mins <= 90:
++            s += " (arriving now)" if mins < 1 else f" · in {int(mins)} min"
+     dp = delay_phrase(rs.get("next_halt_delay"))
+     if dp:
+-        s += f" ({dp})"
++        s += f" · {dp}"
+     return s
+ 
+ 
+diff --git a/mobile-app/src/components/OfflineTrackingCard.js b/mobile-app/src/components/OfflineTrackingCard.js
+index c1754f0..e5a57a9 100644
+--- a/mobile-app/src/components/OfflineTrackingCard.js
++++ b/mobile-app/src/components/OfflineTrackingCard.js
+@@ -1,16 +1,23 @@
+ // OfflineTrackingCard.js
+ // ----------------------
+-// FEATURE: Offline Live Tracking (RailYatri-style "works without internet").
++// FEATURE: GPS / Offline Live Tracking (RailYatri-style "works without internet").
+ //
+-// Shown under Live Tracking for the train being tracked. While online it
+-// quietly saves the train's route + timetable on the phone. When the
+-// internet drops (or the live connection has been down for a while) it
+-// switches on by itself and places the train using, in order:
+-//   1. Cell tower  — only on an Android EAS build with the CellTower native
+-//                    module (see utils/cellTower.js); browsers/Expo Go can't.
+-//   2. Phone GPS   — works with NO internet / mobile data (GPS is satellite).
+-//   3. Timetable   — cached schedule + last known delay, labelled "estimate".
+-// Nothing here makes a network call while offline.
++// REWORK (per request: "GPS should be used when the user is IN the train or
++// there's no internet; if the user isn't on that train, show an error"):
++// this card no longer decides on its own to switch GPS on. The Live
++// Tracking screen owns the mode:
++//   - `gpsOn` (controlled): the screen turns GPS on only after the user
++//     answers "Yes" to RailYatri's "Are you inside the train?" prompt.
++//   - `onNeedGps(reason)`: asked when the internet drops (or the live feed
++//     has been dead for a while) so the screen can show that prompt.
++//   - `onResult(result)`: every GPS/cell/timetable placement is reported
++//     up, so the screen can draw GPS-based predictions straight onto the
++//     live timeline (passed stations, train marker, ETA to every stop).
++//   - `onOffRoute(result)`: the fix is far from this train's route — the
++//     user isn't on this train; the screen shows the error and switches
++//     back to internet.
++// While online it still quietly saves the train's route + timetable on the
++// phone, so GPS placement works with NO internet at all later.
+ 
+ import React, { useCallback, useEffect, useRef, useState } from "react";
+ import { View, Text, StyleSheet, TouchableOpacity, Platform } from "react-native";
+@@ -18,14 +25,19 @@ import { Ionicons } from "@expo/vector-icons";
+ import { colors, spacing, radius } from "../theme/colors";
+ import { saveRouteCache, loadRouteCache, locateOnRoute, estimateFromTimetable } from "../utils/offlineTracker";
+ import {
+-  isCellTowerAvailable, cellTowerUnavailableReason, locateByCell, downloadCellMap, contributeObservation,
++  isCellTowerAvailable, locateByCell, downloadCellMap, contributeObservation,
+ } from "../utils/cellTower";
+ import { makePoster } from "../api/railwayApi";
+ 
+ const SAVE_EVERY_MS = 60000;
+ const LIVE_DOWN_AFTER_MS = 45000;
++// Only judge "you're not on this train" from a reasonably sharp fix, and
++// only after two such fixes in a row agree — one noisy indoor fix must not
++// kick a real passenger out of GPS mode.
++const OFF_ROUTE_MAX_ACCURACY_M = 1500;
++const OFF_ROUTE_CONFIRMATIONS = 2;
+ 
+-function useOnlineStatus() {
++export function useOnlineStatus() {
+   const [online, setOnline] = useState(
+     Platform.OS === "web" && typeof navigator !== "undefined" && "onLine" in navigator ? navigator.onLine : true
+   );
+@@ -53,9 +65,9 @@ async function startGpsWatch(onFix, onError) {
+         speed: p.coords.speed, source: "gps", at: p.timestamp || Date.now(),
+       }),
+       (e) => onError(e && e.code === 1
+-        ? "Location permission denied — allow location for this site to track offline."
+-        : "Waiting for a GPS fix… (move near a window; first fix can take a minute offline)"),
+-      { enableHighAccuracy: true, maximumAge: 15000, timeout: 60000 }
++        ? "Location permission denied — allow location for this site to track by GPS."
++        : "Waiting for a GPS fix… (move near a window; the first fix can take a minute offline)"),
++      { enableHighAccuracy: true, maximumAge: 5000, timeout: 60000 }
+     );
+     return () => navigator.geolocation.clearWatch(id);
+   }
+@@ -64,11 +76,11 @@ async function startGpsWatch(onFix, onError) {
+     const Location = require("expo-location");
+     const perm = await Location.requestForegroundPermissionsAsync();
+     if (perm.status !== "granted") {
+-      onError("Location permission denied — allow it to track offline.");
++      onError("Location permission denied — allow it to track by GPS.");
+       return () => {};
+     }
+     const sub = await Location.watchPositionAsync(
+-      { accuracy: Location.Accuracy.High, timeInterval: 10000, distanceInterval: 50 },
++      { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 30 },
+       (p) => onFix({
+         lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy,
+         speed: p.coords.speed, source: "gps", at: p.timestamp || Date.now(),
+@@ -81,12 +93,12 @@ async function startGpsWatch(onFix, onError) {
+   }
+ }
+ 
+-const SOURCE_LABEL = { gps: "GPS (no internet needed)", cell: "Cell tower", timetable: "Timetable estimate" };
+-
+-export default function OfflineTrackingCard({ trainNumber, date, payload, connection, apiBaseUrl }) {
++export default function OfflineTrackingCard({
++  trainNumber, date, payload, connection, apiBaseUrl,
++  gpsOn, onNeedGps, onResult, onOffRoute, onStopGps,
++}) {
+   const online = useOnlineStatus();
+   const [cache, setCache] = useState(null);
+-  const [active, setActive] = useState(false); // location tracking running
+   const [result, setResult] = useState(null);
+   const [locError, setLocError] = useState(null);
+   const lastSaveRef = useRef(0);
+@@ -95,26 +107,33 @@ export default function OfflineTrackingCard({ trainNumber, date, payload, connec
+   const liveOkAtRef = useRef(Date.now());
+   const cellMapFetchedRef = useRef(null);
+   const lastContribRef = useRef(0);
++  const offRouteCountRef = useRef(0);
++  const askedRef = useRef(false);
+   const [liveDown, setLiveDown] = useState(false);
+   const cacheRef = useRef(null);
+   useEffect(() => { cacheRef.current = cache; }, [cache]);
++  const cbRef = useRef({ onResult, onOffRoute, onNeedGps });
++  useEffect(() => { cbRef.current = { onResult, onOffRoute, onNeedGps }; }, [onResult, onOffRoute, onNeedGps]);
+ 
+   // Load whatever was saved last time (works fully offline).
+   useEffect(() => {
+     let cancelled = false;
+     setCache(null);
+     setResult(null);
++    askedRef.current = false;
+     if (!trainNumber) return undefined;
+-    loadRouteCache(trainNumber, date).then((c) => { if (!cancelled && c) setCache(c); });
++    loadRouteCache(trainNumber, date).then((c) => { if (!cancelled && c) setCache((prev) => prev || c); });
+     return () => { cancelled = true; };
+   }, [trainNumber, date]);
+ 
+   // Save the live route/timetable to the phone while online.
+   useEffect(() => {
+-    if (!payload || !payload.timeline || !payload.timeline.length) return;
++    if (!payload || !payload.timeline || !payload.timeline.length || payload.gps_overlay) return;
+     if (payload.train_number && String(payload.train_number) !== String(trainNumber)) return;
+-    liveOkAtRef.current = Date.now();
+-    setLiveDown(false);
++    if (!payload.snapshot) {
++      liveOkAtRef.current = Date.now();
++      setLiveDown(false);
++    }
+     if (Date.now() - lastSaveRef.current < SAVE_EVERY_MS && cache) return;
+     lastSaveRef.current = Date.now();
+     saveRouteCache(payload, { trainNumber, date }).then((c) => {
+@@ -130,8 +149,6 @@ export default function OfflineTrackingCard({ trainNumber, date, payload, connec
+   // "Live down" = no good live payload for a while (tunnel, no signal).
+   useEffect(() => {
+     const id = setInterval(() => {
+-      // `connection` is optional (the native screen doesn't expose it) —
+-      // without it, "no fresh live payload for 45s" alone decides.
+       if (connection !== "open" && Date.now() - liveOkAtRef.current > LIVE_DOWN_AFTER_MS) setLiveDown(true);
+     }, 5000);
+     return () => clearInterval(id);
+@@ -139,31 +156,57 @@ export default function OfflineTrackingCard({ trainNumber, date, payload, connec
+ 
+   const offlineMode = !online || liveDown;
+ 
++  // No internet → ask the screen to show "Are you inside the train?" once.
++  useEffect(() => {
++    if (offlineMode && !gpsOn && !askedRef.current && trainNumber) {
++      askedRef.current = true;
++      if (cbRef.current.onNeedGps) cbRef.current.onNeedGps(online ? "live_down" : "offline");
++    }
++    if (!offlineMode) askedRef.current = false;
++  }, [offlineMode, gpsOn, online, trainNumber]);
++
++  const report = useCallback((r) => {
++    setResult(r);
++    if (cbRef.current.onResult) cbRef.current.onResult(r);
++  }, []);
++
+   const recompute = useCallback((c) => {
+     const cc = c || cacheRef.current;
+     if (!cc) return;
+     const fix = lastFixRef.current;
+     const fresh = fix && Date.now() - (fix.at || 0) < 3 * 60000;
+-    const r = fresh ? locateOnRoute(cc, fix) : estimateFromTimetable(cc);
+-    setResult(r);
+-  }, []);
++    if (!fresh) {
++      report(estimateFromTimetable(cc));
++      return;
++    }
++    const r = locateOnRoute(cc, fix);
++    if (r && r.error && r.offRouteKm != null) {
++      const sharp = fix.accuracy == null || fix.accuracy <= OFF_ROUTE_MAX_ACCURACY_M;
++      offRouteCountRef.current = sharp ? offRouteCountRef.current + 1 : offRouteCountRef.current;
++      if (offRouteCountRef.current >= OFF_ROUTE_CONFIRMATIONS && cbRef.current.onOffRoute) {
++        offRouteCountRef.current = 0;
++        cbRef.current.onOffRoute(r);
++      }
++      setResult(r);
++      return;
++    }
++    offRouteCountRef.current = 0;
++    report(r);
++  }, [report]);
+ 
+   const stopLocation = useCallback(() => {
+     if (stopGpsRef.current) { stopGpsRef.current(); stopGpsRef.current = null; }
+-    setActive(false);
+   }, []);
+ 
+   const startLocation = useCallback(async () => {
+     if (stopGpsRef.current) return;
+-    setActive(true);
+     setLocError(null);
+-    stopGpsRef.current = await startGpsWatch(
++    offRouteCountRef.current = 0;
++    const stop = await startGpsWatch(
+       (fix) => {
+         lastFixRef.current = fix;
+         setLocError(null);
+         recompute();
+-        // Online + a sharp GPS fix: contribute a (cell, location) pair to the
+-        // crowdsourced tower map — only possible on the native cell build.
+         if (online && isCellTowerAvailable() && apiBaseUrl && Date.now() - lastContribRef.current > 120000) {
+           lastContribRef.current = Date.now();
+           contributeObservation(makePoster(apiBaseUrl), fix);
+@@ -171,21 +214,27 @@ export default function OfflineTrackingCard({ trainNumber, date, payload, connec
+       },
+       (msg) => setLocError(msg)
+     );
++    stopGpsRef.current = stop;
+   }, [recompute, online, apiBaseUrl]);
+ 
+-  // Auto-switch on when offline; auto-release GPS when back online.
++  // Controlled by the screen: GPS runs exactly while gpsOn is true.
+   useEffect(() => {
+-    if (offlineMode && cache) {
++    if (gpsOn) {
+       startLocation();
+-      recompute(cache);
+-    } else if (!offlineMode && active) {
++      if (cacheRef.current) recompute(cacheRef.current);
++    } else {
+       stopLocation();
++      lastFixRef.current = null;
++      setResult(null);
++      if (cbRef.current.onResult) cbRef.current.onResult(null);
+     }
+-  }, [offlineMode, cache]); // eslint-disable-line react-hooks/exhaustive-deps
++  }, [gpsOn]); // eslint-disable-line react-hooks/exhaustive-deps
++
++  useEffect(() => { if (gpsOn && cache) recompute(cache); }, [cache]); // eslint-disable-line react-hooks/exhaustive-deps
+ 
+-  // Cell-tower fallback + refresh of the timetable estimate every 30s.
++  // Cell-tower fallback + refresh of the estimate every 20s while on GPS.
+   useEffect(() => {
+-    if (!offlineMode) return undefined;
++    if (!gpsOn) return undefined;
+     const id = setInterval(async () => {
+       const fix = lastFixRef.current;
+       const gpsStale = !fix || fix.source !== "gps" || Date.now() - (fix.at || 0) > 60000;
+@@ -194,101 +243,68 @@ export default function OfflineTrackingCard({ trainNumber, date, payload, connec
+         if (cellFix) lastFixRef.current = { ...cellFix, at: Date.now() };
+       }
+       recompute();
+-    }, 30000);
++    }, 20000);
+     return () => clearInterval(id);
+-  }, [offlineMode, trainNumber, recompute]);
++  }, [gpsOn, trainNumber, recompute]);
+ 
+   useEffect(() => () => stopLocation(), [stopLocation]);
+ 
+   if (!trainNumber) return null;
+ 
+-  // Online & healthy: a single slim "ready" line so people know it exists.
+-  if (!offlineMode && !active) {
++  if (!gpsOn) {
++    if (!offlineMode) return null; // online: the Internet/GPS switch on the screen covers it
+     return (
+-      <View style={styles.readyRow}>
+-        <Ionicons name={cache ? "cloud-done-outline" : "cloud-download-outline"} size={16} color={cache ? colors.success : colors.textMuted} />
+-        <Text style={styles.readyText}>
+-          {cache
+-            ? `Offline tracking ready — route saved ${cache.savedAt ? new Date(cache.savedAt).toTimeString().slice(0, 5) : ""}. Works on GPS if you lose internet.`
+-            : "Saving this train's route for offline tracking…"}
++      <View style={[styles.strip, styles.stripWarn]}>
++        <Ionicons name="cloud-offline-outline" size={16} color={colors.danger} />
++        <Text style={styles.stripText}>
++          {online ? "Live feed not responding." : "No internet."}
++          {cache ? " On the train? Switch to GPS to keep tracking." : " Open this train once with internet to enable GPS tracking."}
+         </Text>
+-        {cache ? (
+-          <TouchableOpacity onPress={() => { startLocation(); recompute(); }} style={styles.linkBtn}>
+-            <Text style={styles.linkBtnText}>Try GPS</Text>
++        {cache && onNeedGps ? (
++          <TouchableOpacity onPress={() => onNeedGps("manual")} style={styles.linkBtn}>
++            <Text style={styles.linkBtnText}>Use GPS</Text>
+           </TouchableOpacity>
+         ) : null}
+       </View>
+     );
+   }
+ 
+-  return (
+-    <View style={styles.card}>
+-      <View style={styles.headerRow}>
+-        <Ionicons name={offlineMode ? "cloud-offline-outline" : "navigate-outline"} size={18} color={colors.accent} />
+-        <Text style={styles.title}>{offlineMode ? "Offline tracking" : "GPS tracking"}</Text>
+-        {result && !result.error ? (
+-          <View style={styles.badge}><Text style={styles.badgeText}>{SOURCE_LABEL[result.source] || result.source}</Text></View>
+-        ) : null}
+-      </View>
+-
+-      {!cache ? (
+-        <Text style={styles.muted}>No saved route for train {trainNumber} yet — open it once with internet so it can be tracked offline.</Text>
+-      ) : result && result.error ? (
+-        <Text style={styles.warn}>{result.error}</Text>
+-      ) : result ? (
+-        <>
+-          <Text style={styles.headline}>{result.headline}</Text>
+-          {result.nextHalt ? (
+-            <Text style={styles.detail}>
+-              Next halt {result.nextHalt}{result.nextHaltEta ? ` · est. ${result.nextHaltEta}` : ""}
+-              {result.delayMinutes > 0 ? ` · last known ${result.delayMinutes} min late` : ""}
+-            </Text>
+-          ) : null}
+-          <Text style={styles.muted}>
+-            {result.source === "gps" && result.accuracyM != null ? `GPS ±${Math.round(result.accuracyM)} m · ` : ""}
+-            {result.speedKmph != null && result.speedKmph > 1 ? `${Math.round(result.speedKmph)} km/h · ` : ""}
+-            {result.source === "timetable" ? "No location fix — estimated from timetable + last known delay · " : ""}
+-            Route saved {result.cacheAgeMinutes} min ago
+-          </Text>
+-        </>
+-      ) : (
+-        <Text style={styles.muted}>Getting your position…</Text>
+-      )}
+-
+-      {locError ? <Text style={styles.muted}>{locError}</Text> : null}
+-      {!isCellTowerAvailable() ? <Text style={styles.footnote}>{cellTowerUnavailableReason()}</Text> : null}
++  let line;
++  if (!cache) line = `No saved route for train ${trainNumber} yet — open it once with internet.`;
++  else if (locError && !result) line = locError;
++  else if (!result) line = "Getting your GPS position…";
++  else if (result.error) line = result.error;
++  else {
++    const bits = [];
++    if (result.source === "gps" && result.accuracyM != null) bits.push(`±${Math.round(result.accuracyM)} m`);
++    if (result.speedKmph != null) bits.push(result.speedKmph > 2 ? `${Math.round(result.speedKmph)} km/h` : "stopped");
++    if (result.source === "timetable") bits.push("no GPS fix — timetable estimate");
++    if (result.source === "cell") bits.push("cell tower");
++    line = bits.join(" · ") || "GPS position on route";
++  }
+ 
+-      <View style={styles.btnRow}>
+-        {active ? (
+-          <TouchableOpacity onPress={stopLocation} style={styles.linkBtn}><Text style={styles.linkBtnText}>Stop GPS</Text></TouchableOpacity>
+-        ) : (
+-          <TouchableOpacity onPress={() => { startLocation(); recompute(); }} style={styles.linkBtn}><Text style={styles.linkBtnText}>Use GPS</Text></TouchableOpacity>
+-        )}
++  return (
++    <View style={styles.strip}>
++      <Ionicons name="navigate" size={16} color={colors.accent} />
++      <View style={{ flex: 1 }}>
++        <Text style={styles.stripTitle}>GPS tracking{offlineMode ? " · no internet needed" : ""}</Text>
++        <Text style={[styles.stripText, result && result.error ? { color: colors.danger } : null]}>{line}</Text>
+       </View>
++      <TouchableOpacity onPress={onStopGps} style={styles.linkBtn}>
++        <Text style={styles.linkBtnText}>Stop GPS</Text>
++      </TouchableOpacity>
+     </View>
+   );
+ }
+ 
+ const styles = StyleSheet.create({
+-  readyRow: {
+-    flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+-    backgroundColor: colors.chip, borderRadius: radius.md, marginBottom: spacing.md,
+-  },
+-  readyText: { flex: 1, fontSize: 12, color: colors.textMuted },
+-  card: {
+-    backgroundColor: "#FFF8EE", borderColor: colors.accent, borderWidth: 1, borderRadius: radius.lg,
+-    padding: spacing.lg, marginBottom: spacing.md,
++  strip: {
++    flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
++    backgroundColor: "#FFF8EE", borderColor: colors.accent, borderWidth: 1, borderRadius: radius.md, marginBottom: spacing.sm,
+   },
+-  headerRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: spacing.sm, flexWrap: "wrap" },
+-  title: { fontSize: 15, fontWeight: "700", color: colors.text },
+-  badge: { backgroundColor: colors.card, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 2, borderWidth: 1, borderColor: colors.border },
+-  badgeText: { fontSize: 11, color: colors.primary, fontWeight: "600" },
+-  headline: { fontSize: 16, fontWeight: "700", color: colors.primary, marginBottom: 4 },
+-  detail: { fontSize: 13, color: colors.text, marginBottom: 4 },
+-  muted: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+-  warn: { fontSize: 13, color: colors.danger },
+-  footnote: { fontSize: 11, color: colors.textMuted, marginTop: 6, fontStyle: "italic" },
+-  btnRow: { flexDirection: "row", marginTop: spacing.sm },
+-  linkBtn: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.primary },
++  stripWarn: { backgroundColor: "#fdecec", borderColor: "#f3b4b4" },
++  stripTitle: { fontSize: 12.5, fontWeight: "700", color: colors.text },
++  stripText: { flex: 1, fontSize: 12, color: colors.textMuted },
++  linkBtn: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.primary, backgroundColor: "#fff" },
+   linkBtnText: { fontSize: 12, color: colors.primary, fontWeight: "600" },
+ });
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.web.js b/mobile-app/src/screens/LiveTrackingScreen.web.js
+index 25810e2..9c2ccf6 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.web.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.web.js
+@@ -1,5 +1,5 @@
+-import React, { useCallback, useEffect, useRef, useState } from "react";
+-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Share, Linking } from "react-native";
++import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
++import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Share, Linking, Modal } from "react-native";
+ import AsyncStorage from "@react-native-async-storage/async-storage";
+ import { Ionicons } from "@expo/vector-icons";
+ import { colors, spacing, radius } from "../theme/colors";
+@@ -18,6 +18,7 @@ import { registerForPushNotifications, refreshWebPushToken, scheduleLocalAlarm,
+ import { formatDelayDuration } from "../utils/formatDelay";
+ import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
+ import OfflineTrackingCard from "../components/OfflineTrackingCard";
++import { applyGpsOverlay } from "../utils/gpsOverlay";
+ import {
+   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
+ } from "../services/backgroundTracking";
+@@ -35,6 +36,51 @@ import {
+ const PUSH_TOKEN_KEY = "moreTools.pushToken";
+ const ALERTS_KEY = "moreTools.delayAlerts";
+ 
++// FEATURE ("Start tracking should show the live tracking INSTANTLY, and
++// coming back to the app it should be back on the live position within a
++// second"): the last live payload per train is kept on the device and
++// painted immediately on Start / app resume, while the live connection
++// catches up in the background (the server also pushes its own latest
++// snapshot the moment the socket opens — see ws_track_train).
++const LAST_PAYLOAD_PREFIX = "liveTracking.lastPayload.";
++const LAST_PAYLOAD_MAX_AGE_MS = 6 * 3600 * 1000;
++const LAST_PAYLOAD_SAVE_EVERY_MS = 15000;
++function lastPayloadKey(trainNumber, date) {
++  return `${LAST_PAYLOAD_PREFIX}${String(trainNumber || "").trim()}|${effectiveTrackDate(date)}`;
++}
++async function loadLastPayload(trainNumber, date) {
++  try {
++    const raw = await AsyncStorage.getItem(lastPayloadKey(trainNumber, date));
++    if (!raw) return null;
++    const v = JSON.parse(raw);
++    if (!v || !v.payload || Date.now() - (v.savedAt || 0) > LAST_PAYLOAD_MAX_AGE_MS) return null;
++    return v.payload;
++  } catch (e) {
++    return null;
++  }
++}
++async function saveLastPayload(trainNumber, date, payload) {
++  try {
++    await AsyncStorage.setItem(lastPayloadKey(trainNumber, date), JSON.stringify({ savedAt: Date.now(), payload }));
++  } catch (e) { /* storage full / private mode — the live feed still works */ }
++}
++
++// FEATURE: "train about to arrive in the next 5–10 min, be alert" — for
++// an armed bell. The server pushes this too; the in-app banner (and, on
++// GPS with no internet, a local notification) covers the cases a server
++// push can't reach.
++const APPROACH_ALERT_MINUTES = 10;
++function showLocalNotice(title, body, tag) {
++  try {
++    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
++      // eslint-disable-next-line no-new
++      new Notification(title, { body, tag, renotify: true, vibrate: [200, 100, 200, 100, 200] });
++      return true;
++    }
++  } catch (e) { /* ignore */ }
++  return false;
++}
++
+ // Custom Smart Alarm lead time, per the exact UX requested: a quick-pick
+ // row of common values, or "Custom" for a free-typed value — plain
+ // minutes under an hour, "H:MM" (e.g. "1:30" = 1hr 30min) at or past an
+@@ -162,6 +208,28 @@ function pruneExpiredWatches(list) {
+   });
+ }
+ 
++// FEATURE: bell auto-off — drops local delay watches the server has
++// already switched off (station reached). `retired` rows come back from
++// POST /api/push/watches as { train_number, date, label }.
++function dropRetiredWatches(list, retired) {
++  if (!Array.isArray(retired) || !retired.length) return list;
++  const gone = new Set(retired.map((r) => `${String(r.train_number).trim()}|${r.date || ""}|${String(r.label || "").toUpperCase()}`));
++  return (list || []).filter((w) => !gone.has(`${String(w.trainNumber).trim()}|${w.date || ""}|${String(w.label || "").toUpperCase()}`));
++}
++
++// "Today" / "Yesterday" / "Tomorrow" / "24 Sep" for the header date switch.
++function trackDateLabel(ddmmyyyy) {
++  const m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(String(ddmmyyyy || ""));
++  if (!m) return "Today";
++  const d = new Date(+m[3], +m[2] - 1, +m[1]);
++  const today = new Date(); today.setHours(0, 0, 0, 0);
++  const diff = Math.round((d.getTime() - today.getTime()) / 86400000);
++  if (diff === 0) return "Today";
++  if (diff === -1) return "Yesterday";
++  if (diff === 1) return "Tomorrow";
++  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
++}
++
+ function effectiveTrackDate(trackDateInput) {
+   const v = (trackDateInput || "").trim();
+   if (v) return v;
+@@ -487,8 +555,51 @@ export default function LiveTrackingScreen({ navigation }) {
+   const [trackDate, setTrackDate] = useState("");
+   const [dayPickerVisible, setDayPickerVisible] = useState(false);
+   const [connection, setConnection] = useState("idle");
+-  const [payload, setPayload] = useState(null);
++  // The last payload from the live server feed (or its on-device copy).
++  const [rawPayload, setPayload] = useState(null);
+   const [lastUpdated, setLastUpdated] = useState(null);
++  const lastPayloadSavedAtRef = useRef(0);
++
++  // FEATURE: GPS mode (RailYatri-style "Are you inside the train?").
++  // GPS is used only when the user confirms they're ON this train (or
++  // there's no internet) — then the whole screen (timeline, train marker,
++  // ETAs, next station, map) is driven by the phone's own GPS position via
++  // applyGpsOverlay. If the GPS fix is far from this train's route the user
++  // isn't on it: an error is shown and tracking switches back to internet.
++  const [gpsOn, setGpsOn] = useState(false);
++  const [gpsAsk, setGpsAsk] = useState(null); // null | { reason }
++  const [gpsResult, setGpsResult] = useState(null);
++  const [modeNotice, setModeNotice] = useState(null); // red RailYatri-style banner text
++  const gpsHistoryRef = useRef([]); // [{ km, t }] recent GPS route positions, for a real speed
++  const onGpsResult = useCallback((r) => {
++    setGpsResult(r);
++    if (r && !r.error && r.currentKm != null && (r.source === "gps" || r.source === "cell")) {
++      const t = r.fixAt || Date.now();
++      const hist = gpsHistoryRef.current.filter((h) => t - h.t < 5 * 60000 && t >= h.t);
++      hist.push({ km: r.currentKm, t });
++      gpsHistoryRef.current = hist.slice(-30);
++    }
++  }, []);
++  const gpsSpeedKmph = useMemo(() => {
++    if (!gpsResult || gpsResult.error) return null;
++    if (gpsResult.speedKmph != null && gpsResult.speedKmph >= 10) return Math.min(gpsResult.speedKmph, 130);
++    const hist = gpsHistoryRef.current;
++    if (hist.length >= 2) {
++      const a = hist[0], b = hist[hist.length - 1];
++      const dtH = (b.t - a.t) / 3600000;
++      if (dtH > 45 / 3600) {
++        const v = (b.km - a.km) / dtH;
++        if (v >= 10) return Math.min(v, 130);
++      }
++    }
++    // Stopped at a signal/station: ETAs assume it resumes at its usual pace.
++    const avg = rawPayload && (rawPayload.avg_speed_kmph || rawPayload.display_speed_kmph);
++    return avg && avg > 10 ? avg : 50;
++  }, [gpsResult, rawPayload]);
++  const payload = useMemo(
++    () => (gpsOn && gpsResult && !gpsResult.error ? applyGpsOverlay(rawPayload, gpsResult, gpsSpeedKmph) : rawPayload),
++    [gpsOn, gpsResult, gpsSpeedKmph, rawPayload],
++  );
+ 
+   // REDESIGN (RailYatri-style live position marker): a real countdown to
+   // the next WebSocket message — the backend sends a message every 5s
+@@ -567,7 +678,7 @@ export default function LiveTrackingScreen({ navigation }) {
+   // real WS message actually arrived, independent of React state, so the
+   // watchdog can check it on its own timer without re-subscribing.
+   const lastMessageAtRef = useRef(0);
+-  const reconnectDelayRef = useRef(3000);
++  const reconnectDelayRef = useRef(1000);
+   // RailYatri-style collapsed "+N No-Halt stations" groups — which ones the
+   // user has tapped open, keyed by index within timelineGrouped below.
+   const [expandedGroups, setExpandedGroups] = useState({});
+@@ -654,6 +765,14 @@ export default function LiveTrackingScreen({ navigation }) {
+   const delayWatchBusy = !!delayModalKey && delayWatchBusyKey === delayModalKey;
+   const delayWatchStatus = delayWatchStatusState && delayWatchStatusState.key === delayModalKey ? delayWatchStatusState : null;
+   const reloadWatchesSeqRef = useRef(0);
++  // FEATURE: bell auto-off + "arriving in ~10 min" notices shown in-app.
++  const [bellNotice, setBellNotice] = useState(null);
++  const [approachNotice, setApproachNotice] = useState(null); // { code, name, minutes, eta }
++  const approachFiredRef = useRef({});
++  // Collapses the "Track a train" form into a compact RailYatri-style
++  // header once a train is being tracked (tap "Change" to edit).
++  const [formOpen, setFormOpen] = useState(true);
++  const datePickForHeaderRef = useRef(false);
+ 
+   // FEATURE: Smart Alarm — same station-arrival wake-up as
+   // MoreToolsScreen.js's SmartAlarmTool / the native TrackedTrainCard.js,
+@@ -690,6 +809,8 @@ export default function LiveTrackingScreen({ navigation }) {
+     setStationWatchesState({ key, map });
+   }, [activeTrack]);
+   useEffect(() => { reloadStationWatches(); }, [reloadStationWatches]);
++  const reloadStationWatchesRef = useRef(null);
++  useEffect(() => { reloadStationWatchesRef.current = reloadStationWatches; }, [reloadStationWatches]);
+ 
+   // Switching to a different tracked train closes any alert sheet still
+   // open for the previous one.
+@@ -729,7 +850,14 @@ export default function LiveTrackingScreen({ navigation }) {
+         const raw = await AsyncStorage.getItem(ALERTS_KEY);
+         const list = pruneExpiredWatches(raw ? JSON.parse(raw) : []);
+         await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(list));
+-        if (list.length || (cached && cached !== token)) await syncPushWatches(apiBaseUrl, token, list);
++        if (list.length || (cached && cached !== token)) {
++          const res = await syncPushWatches(apiBaseUrl, token, list);
++          const kept = dropRetiredWatches(list, res && res.retired);
++          if (kept.length !== list.length) {
++            await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(kept));
++            if (!cancelled) reloadStationWatchesRef.current && reloadStationWatchesRef.current();
++          }
++        }
+       } catch (e) { /* best-effort — arming a bell still syncs on its own */ }
+     })();
+     return () => { cancelled = true; };
+@@ -779,7 +907,12 @@ export default function LiveTrackingScreen({ navigation }) {
+         if (settings) setStatus(false, reason || "Saved, but background push isn't available on this device/browser.");
+         return { ok: true };
+       }
+-      await syncPushWatches(apiBaseUrl, token, merged);
++      const syncRes = await syncPushWatches(apiBaseUrl, token, merged);
++      const kept = dropRetiredWatches(merged, syncRes && syncRes.retired);
++      if (kept.length !== merged.length) {
++        await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(kept));
++        await reloadStationWatches();
++      }
+       if (settings) {
+         setStatus(true, `Alert set for ${station.name}: a push every ${settings.repeatMinutes} min while it's predicted ≥ ${settings.threshold} min late.`);
+       }
+@@ -1073,8 +1206,10 @@ export default function LiveTrackingScreen({ navigation }) {
+     if (wsRef.current?.readyState === WebSocket.OPEN) {
+       setRefreshing(true);
+       wsRef.current.send(JSON.stringify({ type: "refresh" }));
++    } else if (activeParamsRef.current && !manualStopRef.current) {
++      openSocket(activeParamsRef.current, true); // eslint-disable-line no-use-before-define
+     }
+-  }, []);
++  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+ 
+   useEffect(() => {
+     return () => {
+@@ -1111,38 +1246,55 @@ export default function LiveTrackingScreen({ navigation }) {
+   //      foregrounded) — the single most common real moment a mobile
+   //      browser's suspended socket needs replacing — checked immediately
+   //      instead of waiting out the watchdog's own poll interval.
++  // FEATURE ("if I exit the app or jump into another app and come back, it
++  // should NOT lag to reconnect — within 1 sec it should be back on the
++  // live position"): the moment the page is visible / focused / back from
++  // the bfcache / back online, a socket that isn't OPEN, or is nominally
++  // open but silent for more than ~2 server pushes, is replaced
++  // IMMEDIATELY (no backoff); a healthy one is just asked for a fresh push
++  // right now. The screen keeps showing the last live position meanwhile
++  // (never a "Connecting…" blank), and the server replies to a new socket
++  // with its latest snapshot instantly.
+   useEffect(() => {
+-    const STALE_MS = 25000; // ~5x the backend's real 5s push cadence
++    const STALE_MS = 12000; // > 2x the backend's real 5s push cadence
+     const watchdog = setInterval(() => {
+       if (manualStopRef.current || !wsRef.current) return;
+       if (wsRef.current.readyState !== WebSocket.OPEN) return;
+       if (Date.now() - lastMessageAtRef.current > STALE_MS) {
+-        wsRef.current.close(); // -> existing onclose handler auto-reconnects
++        openSocket(activeParamsRef.current, true);
+       }
+-    }, 8000);
++    }, 4000);
+ 
+-    function onVisibilityChange() {
+-      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
++    function resumeNow() {
++      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+       if (manualStopRef.current || !activeParamsRef.current) return;
+-      const stale = Date.now() - lastMessageAtRef.current > STALE_MS;
+-      const dead = !wsRef.current
+-        || wsRef.current.readyState === WebSocket.CLOSED
+-        || wsRef.current.readyState === WebSocket.CLOSING;
+-      if (stale || dead) {
++      const ws = wsRef.current;
++      const quietFor = Date.now() - lastMessageAtRef.current;
++      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING || quietFor > 7000) {
++        if (reconnectTimeoutRef.current) { clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
++        reconnectDelayRef.current = 1000;
+         openSocket(activeParamsRef.current, true);
++      } else if (ws.readyState === WebSocket.OPEN) {
++        try { ws.send(JSON.stringify({ type: "refresh" })); } catch (e) { /* ignore */ }
+       }
+     }
+-    if (typeof document !== "undefined") {
+-      document.addEventListener("visibilitychange", onVisibilityChange);
++    if (typeof document !== "undefined") document.addEventListener("visibilitychange", resumeNow);
++    if (typeof window !== "undefined") {
++      window.addEventListener("focus", resumeNow);
++      window.addEventListener("pageshow", resumeNow);
++      window.addEventListener("online", resumeNow);
+     }
+ 
+     return () => {
+       clearInterval(watchdog);
+-      if (typeof document !== "undefined") {
+-        document.removeEventListener("visibilitychange", onVisibilityChange);
++      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", resumeNow);
++      if (typeof window !== "undefined") {
++        window.removeEventListener("focus", resumeNow);
++        window.removeEventListener("pageshow", resumeNow);
++        window.removeEventListener("online", resumeNow);
+       }
+     };
+-  }, []);
++  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+ 
+   // Does the actual work of opening the WebSocket for a fixed set of
+   // params (captured once in activeParamsRef when the user presses "Start
+@@ -1159,16 +1311,32 @@ export default function LiveTrackingScreen({ navigation }) {
+     // wiping the marker/route/fitBounds state here made the map visibly
+     // jump/re-fit to a new pan+zoom on every reconnect instead of just
+     // letting the marker glide onto its next real position on a static map.
+-    const isSameTrainReconnect = params.trainNumber === lastConnectedTrainRef.current;
+-    wsRef.current?.close();
++    const connectKey = `${params.trainNumber}|${effectiveTrackDate(params.date)}`;
++    const isSameTrainReconnect = connectKey === lastConnectedTrainRef.current;
++    const old = wsRef.current;
+     wsRef.current = null;
++    if (old) {
++      // Detach first so the old socket's late onclose can't schedule a
++      // second, competing reconnect.
++      old.onclose = null; old.onmessage = null; old.onerror = null;
++      try { old.close(); } catch (e) { /* ignore */ }
++    }
+     setConnection("connecting");
+-    if (!isRetry) {
++    if (!isRetry && !isSameTrainReconnect) {
++      // Switching trains: drop the old train's screen, then paint this
++      // train's last known live status from the device INSTANTLY (no blank
++      // "connecting" screen) while the live feed catches up.
+       setPayload(null);
+       setDelaySparkline([]);
+       tripSummaryShownKeyRef.current = null;
+       setTripSummary(null);
+       setTripSummaryShareStatus(null);
++      const wantTrain = params.trainNumber;
++      loadLastPayload(wantTrain, params.date).then((cached) => {
++        if (!cached || String(cached.train_number || wantTrain) !== String(wantTrain)) return;
++        if (!activeParamsRef.current || activeParamsRef.current.trainNumber !== wantTrain) return;
++        setPayload((prev) => prev || { ...cached, from_device_cache: true });
++      });
+     }
+ 
+     if (!isSameTrainReconnect) {
+@@ -1186,7 +1354,7 @@ export default function LiveTrackingScreen({ navigation }) {
+       routeBoundsFitRef.current = false;
+       autoScrolledRef.current = false;
+     }
+-    lastConnectedTrainRef.current = params.trainNumber;
++    lastConnectedTrainRef.current = connectKey;
+ 
+     const url = buildTrackingWsUrl(wsBaseUrl, params.trainNumber, {
+       date: params.date || undefined,
+@@ -1207,14 +1375,25 @@ export default function LiveTrackingScreen({ navigation }) {
+       // A successful connection means whatever went wrong last time is
+       // over — back off from scratch next time, instead of the delay
+       // staying stretched out from an earlier stretch of bad connectivity.
+-      reconnectDelayRef.current = 3000;
++      reconnectDelayRef.current = 1000;
+       lastMessageAtRef.current = Date.now();
+     };
+     socket.onmessage = (event) => {
+       try {
+         const data = JSON.parse(event.data);
+         lastMessageAtRef.current = Date.now();
++        if (data.snapshot) {
++          // Server's own last-known payload, sent the instant the socket
++          // opens — shown only if nothing fresher is already on screen.
++          setPayload((prev) => (!prev || prev.from_device_cache || prev.snapshot ? data : prev));
++          return;
++        }
+         setPayload(data);
++        if (data.timeline && data.timeline.length && !data.error
++            && Date.now() - lastPayloadSavedAtRef.current > LAST_PAYLOAD_SAVE_EVERY_MS) {
++          lastPayloadSavedAtRef.current = Date.now();
++          saveLastPayload(params.trainNumber, params.date, data);
++        }
+ 
+         // FEATURE: Live delay-trend sparkline.
+         const sparkValue = data.predicted_delay_minutes != null ? data.predicted_delay_minutes : data.delay_minutes;
+@@ -1278,7 +1457,7 @@ export default function LiveTrackingScreen({ navigation }) {
+       if (manualStopRef.current) return;
+       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+       const delay = reconnectDelayRef.current;
+-      reconnectDelayRef.current = Math.min(delay * 1.5, 20000);
++      reconnectDelayRef.current = Math.min(delay * 1.6, 15000);
+       reconnectTimeoutRef.current = setTimeout(() => {
+         reconnectTimeoutRef.current = null;
+         openSocket(activeParamsRef.current, true);
+@@ -1312,12 +1491,20 @@ export default function LiveTrackingScreen({ navigation }) {
+       clearTimeout(reconnectTimeoutRef.current);
+       reconnectTimeoutRef.current = null;
+     }
+-    reconnectDelayRef.current = 3000;
++    reconnectDelayRef.current = 1000;
+     manualStopRef.current = false;
++    if (activeParamsRef.current && activeParamsRef.current.trainNumber !== params.trainNumber) {
++      // GPS mode belongs to the train the user said they're on — a
++      // different train starts back on internet.
++      setGpsOn(false);
++      setModeNotice(null);
++      gpsHistoryRef.current = [];
++    }
+     activeParamsRef.current = params;
+     // Pin the bells / delay alerts to THIS train + run date (blank = today,
+     // pinned now so it can't drift past midnight) — see activeTrack above.
+     const trackedDate = effectiveTrackDate(params.date);
++    setFormOpen(false);
+     setActiveTrack((prev) => (prev && prev.trainNumber === params.trainNumber && prev.date === trackedDate
+       ? prev
+       : { trainNumber: params.trainNumber, date: trackedDate }));
+@@ -1338,6 +1525,9 @@ export default function LiveTrackingScreen({ navigation }) {
+   // screen or closing the app keeps it going in the background.
+   function stopTracking() {
+     const params = activeParamsRef.current;
++    setGpsOn(false);
++    setModeNotice(null);
++    setFormOpen(true);
+     disconnect();
+     clearActiveTrack();
+     setBgTracking(null);
+@@ -1480,6 +1670,96 @@ export default function LiveTrackingScreen({ navigation }) {
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [payload?.current_station]);
+ 
++  // FEATURE: bell auto-off. Once the train (live feed OR the phone's own
++  // GPS) has really reached a station whose bell is armed, that bell turns
++  // itself off: removed from this device's list, re-synced so the server
++  // stops too (the server independently retires it as well), and a short
++  // "reached — alert switched off" note is shown. No further notifications
++  // are sent for that station.
++  const armedCodesKey = Object.keys(stationWatches).sort().join(",");
++  const reachedCodesKey = [...reallyReachedCodes].sort().join(",");
++  useEffect(() => {
++    if (!activeTrack || !bellsEnabledForPayload || !armedCodesKey) return;
++    const hit = armedCodesKey.split(",").filter((c) => c && (ltJourneyLikelyComplete || reallyReachedCodes.has(c)));
++    if (!hit.length) return;
++    const track = activeTrack;
++    const names = hit.map((c) => {
++      const st = timeline.find((x) => String(x.code || "").toUpperCase() === c);
++      return st ? toDisplayCase(st.name) : c;
++    });
++    (async () => {
++      try {
++        const raw = await AsyncStorage.getItem(ALERTS_KEY);
++        const list = raw ? JSON.parse(raw) : [];
++        const kept = list.filter((w) => !(String(w.trainNumber) === track.trainNumber
++          && (w.date || null) === track.date && hit.includes(String(w.label || "").toUpperCase())));
++        if (kept.length === list.length) return;
++        await AsyncStorage.setItem(ALERTS_KEY, JSON.stringify(kept));
++        await reloadStationWatches();
++        const msg = `${names.join(", ")} reached — ${hit.length > 1 ? "those alerts are" : "its alert is"} switched off now.`;
++        setBellNotice(msg);
++        if (gpsOn) showLocalNotice(`🔕 Train ${track.trainNumber}`, msg, `bell-off-${track.trainNumber}`);
++        const token = await AsyncStorage.getItem(PUSH_TOKEN_KEY);
++        if (token) { try { await syncPushWatches(apiBaseUrl, token, kept); } catch (e) { /* server retires it on its own too */ } }
++      } catch (e) { /* best-effort */ }
++    })();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [armedCodesKey, reachedCodesKey, activeTrackKey, ltJourneyLikelyComplete]);
++
++  // FEATURE: "before 10 min, tell me the train is about to arrive — be
++  // alert". For every armed bell, the live (or GPS) ETA to that station is
++  // watched; once it's within APPROACH_ALERT_MINUTES a banner is shown
++  // once. On GPS (often no internet on the train, so no server push can
++  // arrive) a local system notification is raised too.
++  useEffect(() => {
++    if (!activeTrack || !payload || !armedCodesKey) return;
++    armedCodesKey.split(",").forEach((code) => {
++      if (!code) return;
++      const st = timeline.find((x) => String(x.code || "").toUpperCase() === code && x.status === "upcoming");
++      if (!st) return;
++      const minutes = st.minutes_away != null ? st.minutes_away : minutesFromNowClockTime(st.predicted_eta);
++      if (minutes == null || minutes < 0 || minutes > APPROACH_ALERT_MINUTES) return;
++      const key = `${activeTrackKey}|${code}`;
++      if (approachFiredRef.current[key]) return;
++      approachFiredRef.current[key] = true;
++      const name = toDisplayCase(st.name);
++      setApproachNotice({ code, name, minutes, eta: st.predicted_eta || null });
++      if (gpsOn || (typeof navigator !== "undefined" && navigator.onLine === false)) {
++        showLocalNotice(
++          `🚆 ${activeTrack.trainNumber} arriving at ${name} ${minutes < 1 ? "now" : `in ~${minutes} min`}`,
++          `Please be alert — the train reaches ${name} in the next 5–10 minutes${st.predicted_eta ? ` (ETA ${st.predicted_eta})` : ""}.`,
++          `approach-${activeTrack.trainNumber}-${code}`,
++        );
++      }
++    });
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [payload, armedCodesKey]);
++
++  // GPS mode switching (RailYatri's "Are you inside the train?").
++  const askGps = useCallback((reason) => { setGpsAsk({ reason: reason || "manual" }); }, []);
++  const answerInTrain = useCallback((yes) => {
++    const reason = gpsAsk ? gpsAsk.reason : "manual";
++    setGpsAsk(null);
++    if (yes) {
++      gpsHistoryRef.current = [];
++      setModeNotice(null);
++      setGpsOn(true);
++    } else {
++      setGpsOn(false);
++      setModeNotice(reason === "offline"
++        ? "No internet — live status needs internet when you're not on the train."
++        : null);
++    }
++  }, [gpsAsk]);
++  const onGpsOffRoute = useCallback((r) => {
++    const km = r && r.offRouteKm != null ? Math.round(r.offRouteKm) : null;
++    setGpsOn(false);
++    setApproachNotice(null);
++    setModeNotice(`You don't seem to be on train ${activeTrack ? activeTrack.trainNumber : ""}${km != null ? ` (${km} km away from its route)` : ""}. Use internet when you are not on the train — switching back to internet.`);
++    if (activeParamsRef.current && !manualStopRef.current) refreshNow();
++  }, [activeTrack, refreshNow]);
++  const stopGps = useCallback(() => { setGpsOn(false); setApproachNotice(null); refreshNow(); }, [refreshNow]);
++
+   // REDESIGN (RailYatri-style live position marker): "X km covered so
+   // far" — honestly derived, never invented, from two real payload
+   // values: the last reporting station's own real distance-from-origin
+@@ -1510,105 +1790,215 @@ export default function LiveTrackingScreen({ navigation }) {
+   // making the user re-type it.
+   const showBottomBar = !!payload && !ltJourneyLikelyComplete && !!payload.next_station;
+ 
++  // RailYatri-style status sentence for the status card.
++  const ltStatus = (() => {
++    if (!payload || !timeline.length) return { headline: "", sub: null };
++    const last = timeline[timeline.length - 1];
++    if (ltJourneyLikelyComplete || last.status === "passed" || (last.status === "current" && !ltNextEtaMinutes)) {
++      const t = (last.arrival && (last.arrival.actual || last.arrival.expected)) || null;
++      return { headline: "Train has reached destination.", sub: t ? `Arrived ${toDisplayCase(last.name)} at ${String(t).slice(0, 5)}` : null };
++    }
++    const curIdx = timeline.findIndex((x) => x.status === "current");
++    let lastReached = -1;
++    timeline.forEach((x, i) => { if (x.status === "passed" || x.status === "current") lastReached = i; });
++    const first = timeline[0];
++    const nextHalt = timeline.slice(Math.max(0, lastReached + 1)).find((x) => x.kind !== "intermediate");
++    let sub = null;
++    if (nextHalt) {
++      let eta = nextHalt.predicted_eta || (nextHalt.arrival && (nextHalt.arrival.expected || nextHalt.arrival.scheduled));
++      let mins = nextHalt.minutes_away != null ? nextHalt.minutes_away : minutesFromNowClockTime(nextHalt.predicted_eta);
++      // Never show a physically impossible ETA (e.g. "in 35 min" while
++      // 2 km away): beyond ~20 km/h + a halt, fall back to km / speed.
++      const kmAway = nextHalt.distance_ahead_km;
++      if (kmAway != null && mins != null && mins > (kmAway / 20) * 60 + 10) {
++        const v = payload.display_speed_kmph || payload.avg_speed_kmph || 50;
++        mins = Math.round((kmAway / Math.max(10, Math.min(v, 130))) * 60);
++        const d = new Date(Date.now() + mins * 60000);
++        eta = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
++      }
++      sub = `Next halt ${toDisplayCase(nextHalt.name)}${eta ? ` · ETA ${String(eta).slice(0, 5)}` : ""}${mins != null && mins >= 0 && mins <= 180 ? ` (in ${mins} min)` : ""}${nextHalt.predicted_eta_source === "gps" ? " · by GPS" : ""}`;
++    }
++    const departed = first.departure && first.departure.actual && first.departure.actual_is_predicted !== true;
++    if (lastReached === -1 || (curIdx === 0 && !departed)) {
++      const dep = first.departure && (first.departure.expected || first.departure.scheduled);
++      return {
++        headline: "Train hasn't started yet.",
++        sub: dep ? `Departs ${toDisplayCase(first.name)} at ${String(dep).slice(0, 5)}` : sub,
++      };
++    }
++    if (gpsOn && payload.gps_headline) return { headline: payload.gps_headline, sub };
++    const at = timeline[lastReached];
++    const timing = (at.departure && at.departure.actual) || (at.arrival && at.arrival.actual);
++    const verb = at.status === "current" && at.kind !== "intermediate" && !(at.departure && at.departure.actual) ? "At" : "Crossed";
++    const km = payload.distance_remaining_to_next_km;
++    const nxt = timeline[lastReached + 1];
++    const headline = `${verb} ${toDisplayCase(at.name)}${timing && verb === "Crossed" ? ` at ${String(timing).slice(0, 5)}` : ""}`
++      + (nxt ? (km != null ? ` · ${km} km to ${toDisplayCase(nxt.name)}` : ` · next ${toDisplayCase(nxt.name)}`) : "");
++    return { headline, sub };
++  })();
++
+   return (
+     <View style={styles.flex}>
+     <ScrollView style={styles.flex} contentContainerStyle={[styles.content, showBottomBar && styles.contentWithBar]}>
+-      <SectionCard title="Track a train" subtitle="Connects instantly and checks in every ~5s; the live position itself refreshes at least every 60s.">
+-        <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
+-        {/* BUGFIX: a plain (non-{}) JSX attribute string doesn't run JS's
+-            escape parsing, so "\u2014" rendered as the literal 6 characters
+-            backslash-u-2-0-1-4, not an em dash - only visible once this
+-            screen's bundle was actually rebuilt and looked at directly
+-            (see the mobile_web rebuild note elsewhere in this diff).
+-            Wrapping the same text in a {} expression container makes it a
+-            real JS string literal, where \u2014 IS a real escape. */}
+-        <Text style={styles.fieldLabel}>{"Date (optional \u2014 defaults to today)"}</Text>
+-        <TouchableOpacity style={styles.dateField} onPress={() => setDayPickerVisible(true)} activeOpacity={0.7}>
+-          <Ionicons name="calendar-outline" size={16} color={colors.primary} />
+-          <Text style={styles.dateFieldText}>
+-            {trackDate.trim() ? (formatLongLabel(fromDdMmYyyy(trackDate)) || trackDate) : "Today"}
+-          </Text>
+-          <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
+-        </TouchableOpacity>
+-        <View style={styles.row}>
+-          <LabeledInput label="Source (optional)" placeholder="e.g. SC" value={source} onChangeText={setSource} style={styles.half} />
+-          <LabeledInput label="Dest (optional)" placeholder="e.g. BZA" value={dest} onChangeText={setDest} style={styles.half} />
+-        </View>
+-        <View style={styles.row}>
+-          <PrimaryButton title={connection === "open" ? "Reconnect" : "Start tracking"} onPress={connect} loading={connection === "connecting"} style={styles.half} />
+-          <PrimaryButton title="Stop" variant="secondary" onPress={stopTracking} style={styles.half} />
+-        </View>
+-        {bgTracking && (
+-          <View style={styles.bgTrackRow}>
+-            <Ionicons
+-              name={bgTracking.state === "on" ? "notifications" : bgTracking.state === "pending" ? "time-outline" : "notifications-off-outline"}
+-              size={14}
+-              color={bgTracking.state === "on" ? colors.success : colors.textMuted}
+-            />
+-            <Text style={styles.bgTrackText}>
+-              {bgTracking.state === "on"
+-                ? "Background tracking on — you'll keep getting live status notifications after you close the app. Tap Stop to end it."
+-                : bgTracking.state === "pending"
+-                  ? "Turning on background tracking…"
+-                  : bgTracking.reason || "Background tracking is off."}
++      {(!activeTrack || formOpen) ? (
++        <SectionCard title="Track a train" subtitle="Shows the live position instantly and keeps it updating every few seconds.">
++          <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
++          <Text style={styles.fieldLabel}>{"Date (optional \u2014 defaults to today)"}</Text>
++          <TouchableOpacity style={styles.dateField} onPress={() => { datePickForHeaderRef.current = false; setDayPickerVisible(true); }} activeOpacity={0.7}>
++            <Ionicons name="calendar-outline" size={16} color={colors.primary} />
++            <Text style={styles.dateFieldText}>
++              {trackDate.trim() ? (formatLongLabel(fromDdMmYyyy(trackDate)) || trackDate) : "Today"}
+             </Text>
++            <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
++          </TouchableOpacity>
++          <View style={styles.row}>
++            <LabeledInput label="Source (optional)" placeholder="e.g. SC" value={source} onChangeText={setSource} style={styles.half} />
++            <LabeledInput label="Dest (optional)" placeholder="e.g. BZA" value={dest} onChangeText={setDest} style={styles.half} />
+           </View>
+-        )}
+-        <View style={styles.row}>
+-          <ConnectionBadge connection={connection} />
+-          {connection === "open" && (
+-            <TouchableOpacity onPress={refreshNow} disabled={refreshing} style={styles.refreshRow}>
+-              <Ionicons name="refresh" size={14} color={colors.primary} />
+-              {/* BUGFIX: this used to show lastUpdated.toLocaleTimeString()
+-                  \u2014 the CLIENT's own receipt clock time for the last
+-                  WebSocket message, which advances every ~5s regardless of
+-                  whether the position data itself actually changed (most
+-                  messages just re-serve the same still-cached data). Now
+-                  shows the real data freshness via the same
+-                  payload.status_updated_at + formatAsOfAgo the position
+-                  callout below uses, so this line and that callout never
+-                  disagree about how fresh the data really is. */}
+-              <Text style={styles.refreshText}>
+-                {refreshing
+-                  ? "Refreshing\u2026"
+-                  : payload?.status_updated_at
+-                    ? `Position as of ${formatAsOfAgo(payload.status_updated_at)}`
+-                    : "Refresh now"}
++          <View style={styles.row}>
++            {/* No spinner / "Connecting…" state: tracking starts at once —
++                the last known position is shown instantly and the live
++                feed takes over the moment it answers. */}
++            <PrimaryButton title="Start tracking" onPress={connect} style={styles.half} />
++            {activeTrack ? (
++              <PrimaryButton title="Cancel" variant="secondary" onPress={() => setFormOpen(false)} style={styles.half} />
++            ) : null}
++          </View>
++        </SectionCard>
++      ) : (
++        <View style={styles.ryHeader}>
++          {/* REDESIGN (RailYatri-style header): "12728 - Godavari Sf Express",
++              route, and a Today/Yesterday date switch — the form itself is
++              tucked away behind "Change" once a train is being tracked. */}
++          <View style={styles.ryHeaderTop}>
++            <View style={{ flex: 1 }}>
++              <Text style={styles.ryTrainTitle} numberOfLines={1}>
++                {activeTrack.trainNumber}{payload?.train_name ? ` - ${toDisplayCase(payload.train_name)}` : ""}
+               </Text>
++              {timeline.length >= 2 ? (
++                <Text style={styles.ryTrainSub} numberOfLines={1}>
++                  {(timeline[0].code || timeline[0].name)}-{(timeline[timeline.length - 1].code || timeline[timeline.length - 1].name)}
++                  {payload?.train_name ? "" : ` · ${toDisplayCase(timeline[0].name)} → ${toDisplayCase(timeline[timeline.length - 1].name)}`}
++                </Text>
++              ) : null}
++            </View>
++            <TouchableOpacity style={styles.ryDateBtn} onPress={() => { datePickForHeaderRef.current = true; setDayPickerVisible(true); }}>
++              <Text style={styles.ryDateBtnText}>{trackDateLabel(activeTrack.date)}</Text>
++              <Ionicons name="caret-down" size={12} color="#fff" />
+             </TouchableOpacity>
+-          )}
+-          {/* FEATURE: Shareable read-only tracking link */}
+-          {trainNumber.trim() && (
+-            <TouchableOpacity onPress={shareTrackingLink} style={styles.refreshRow}>
+-              <Ionicons name="link-outline" size={14} color={colors.primary} />
+-              <Text style={styles.refreshText}>Share link</Text>
++          </View>
++          <View style={styles.ryHeaderRow}>
++            <LiveBadge connection={connection} hasPayload={!!payload} gpsOn={gpsOn} />
++            {payload?.status_updated_at ? (
++              <TouchableOpacity onPress={refreshNow} style={styles.refreshRow}>
++                <Ionicons name="refresh" size={13} color={colors.primary} />
++                <Text style={styles.refreshText}>{gpsOn ? "GPS fix" : "Position"} {formatAsOfAgo(payload.status_updated_at)}</Text>
++              </TouchableOpacity>
++            ) : null}
++            <View style={{ flex: 1 }} />
++            <TouchableOpacity onPress={shareTrackingLink} style={styles.ryIconBtn} accessibilityLabel="Share link">
++              <Ionicons name="share-social-outline" size={16} color={colors.primary} />
+             </TouchableOpacity>
+-          )}
++            <TouchableOpacity onPress={() => setFormOpen(true)} style={styles.ryIconBtn} accessibilityLabel="Change train">
++              <Ionicons name="create-outline" size={16} color={colors.primary} />
++            </TouchableOpacity>
++            <TouchableOpacity onPress={stopTracking} style={styles.ryStopBtn}>
++              <Text style={styles.ryStopBtnText}>Stop</Text>
++            </TouchableOpacity>
++          </View>
++
++          {/* Internet | GPS switch — GPS only after "Are you inside the train?" */}
++          <View style={styles.modeSwitch}>
++            <TouchableOpacity
++              style={[styles.modeBtn, !gpsOn && styles.modeBtnActive]}
++              onPress={() => { if (gpsOn) stopGps(); }}
++            >
++              <Ionicons name="globe-outline" size={14} color={!gpsOn ? "#fff" : colors.primary} />
++              <Text style={[styles.modeBtnText, !gpsOn && styles.modeBtnTextActive]}>Internet</Text>
++            </TouchableOpacity>
++            <TouchableOpacity
++              style={[styles.modeBtn, gpsOn && styles.modeBtnActive]}
++              onPress={() => { if (!gpsOn) askGps("manual"); }}
++            >
++              <Ionicons name="navigate-outline" size={14} color={gpsOn ? "#fff" : colors.primary} />
++              <Text style={[styles.modeBtnText, gpsOn && styles.modeBtnTextActive]}>GPS · I'm on this train</Text>
++            </TouchableOpacity>
++          </View>
++
++          {bgTracking && bgTracking.state !== "on" ? (
++            <Text style={styles.bgTrackText}>
++              {bgTracking.state === "pending" ? "Turning on background notifications…" : bgTracking.reason || "Background notifications are off."}
++            </Text>
++          ) : null}
++          {shareLinkNote && <Text style={styles.errorText}>{shareLinkNote}</Text>}
+         </View>
+-        {shareLinkNote && <Text style={styles.errorText}>{shareLinkNote}</Text>}
+-        {activeTrack && (
+-          <OfflineTrackingCard
+-            trainNumber={activeTrack.trainNumber}
+-            date={activeTrack.date}
+-            payload={payload}
+-            connection={connection}
+-            apiBaseUrl={apiBaseUrl}
+-          />
+-        )}
+-        <TouchableOpacity onPress={toggleMap} style={styles.mapToggleBtn}>
+-          <Ionicons name="map-outline" size={14} color={colors.primary} />
+-          <Text style={styles.mapToggleBtnText}>{showMap ? "Hide train on map" : "🗺️ Train on map"}</Text>
+-        </TouchableOpacity>
+-        {mapError && <Text style={styles.errorText}>{mapError}</Text>}
+-        <View style={[styles.mapBox, !showMap && styles.mapBoxHidden]}>
+-          <View ref={mapContainerRef} style={styles.mapInner} />
++      )}
++
++      {modeNotice ? (
++        <View style={styles.ryRedBanner}>
++          <Ionicons name="alert-circle-outline" size={18} color="#fff" />
++          <Text style={styles.ryRedBannerText}>{modeNotice}</Text>
++          <TouchableOpacity onPress={() => setModeNotice(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
++            <Ionicons name="close" size={16} color="#fff" />
++          </TouchableOpacity>
+         </View>
+-        {showMap && (
+-          <Text style={styles.webNoticeText}>
+-            {payload ? "Route + live position for this train." : "Start tracking above to plot this train's route and position."}
++      ) : null}
++      {approachNotice ? (
++        <View style={styles.ryAlertBanner}>
++          <Ionicons name="notifications" size={18} color="#fff" />
++          <Text style={styles.ryRedBannerText}>
++            Train arriving at {approachNotice.name} {approachNotice.minutes < 1 ? "now" : `in ~${approachNotice.minutes} min`}
++            {approachNotice.eta ? ` (ETA ${approachNotice.eta})` : ""} — please be alert.
+           </Text>
+-        )}
+-      </SectionCard>
++          <TouchableOpacity onPress={() => setApproachNotice(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
++            <Ionicons name="close" size={16} color="#fff" />
++          </TouchableOpacity>
++        </View>
++      ) : null}
++      {bellNotice ? (
++        <View style={styles.ryInfoBanner}>
++          <Ionicons name="notifications-off-outline" size={16} color={colors.primary} />
++          <Text style={styles.ryInfoBannerText}>{bellNotice}</Text>
++          <TouchableOpacity onPress={() => setBellNotice(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
++            <Ionicons name="close" size={14} color={colors.textMuted} />
++          </TouchableOpacity>
++        </View>
++      ) : null}
++
++      {activeTrack && (
++        <OfflineTrackingCard
++          trainNumber={activeTrack.trainNumber}
++          date={activeTrack.date}
++          payload={rawPayload}
++          connection={connection}
++          apiBaseUrl={apiBaseUrl}
++          gpsOn={gpsOn}
++          onNeedGps={askGps}
++          onResult={onGpsResult}
++          onOffRoute={onGpsOffRoute}
++          onStopGps={stopGps}
++        />
++      )}
++
++      {activeTrack && !payload ? (
++        <View style={styles.ryLoadingCard}>
++          <Ionicons name="train-outline" size={18} color={colors.primary} />
++          <Text style={styles.ryLoadingText}>Getting train {activeTrack.trainNumber}'s live position…</Text>
++        </View>
++      ) : null}
++
++      {activeTrack ? (
++        <>
++          <TouchableOpacity onPress={toggleMap} style={styles.mapToggleBtn}>
++            <Ionicons name="map-outline" size={14} color={colors.primary} />
++            <Text style={styles.mapToggleBtnText}>{showMap ? "Hide train on map" : "🗺️ Train on map"}</Text>
++          </TouchableOpacity>
++          {mapError && <Text style={styles.errorText}>{mapError}</Text>}
++        </>
++      ) : null}
++      <View style={[styles.mapBox, !(showMap && activeTrack) && styles.mapBoxHidden]}>
++        <View ref={mapContainerRef} style={styles.mapInner} />
++      </View>
+ 
+       {/* FEATURE: Delay Alert — moved off this inline card onto the bell
+           icon + DelayAlertModal sheet (see near the end of this component's
+@@ -1618,49 +2008,6 @@ export default function LiveTrackingScreen({ navigation }) {
+           inside the sheet (statusMessage) — it no longer renders as its
+           own standalone card. */}
+ 
+-      {/* FEATURE: Smart Alarm, right on Live Tracking (moved off the
+-          separate More Tools menu — see the top-of-file comment). Only
+-          shows once a train is actually being tracked; arming an alarm
+-          before that point doesn't mean anything. */}
+-      {payload && (
+-        <SectionCard title="⏰ Smart Alarm" subtitle="Wake-up alert as this train nears a station you pick — rings even if you close the app.">
+-          <LabeledInput label="Destination station code" value={alarmStation} onChangeText={setAlarmStation} autoCapitalize="characters" editable={!alarmArmed} />
+-          <Text style={styles.fieldLabel}>Alert me before arrival</Text>
+-          <View style={styles.chipRow}>
+-            {["15", "20", "30", "40", "45"].map((m) => (
+-              <TouchableOpacity
+-                key={m}
+-                disabled={alarmArmed}
+-                onPress={() => { setAlarmLeadMinutes(m); setAlarmCustomOpen(false); }}
+-                style={[styles.alarmChip, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipActive]}
+-              >
+-                <Text style={[styles.alarmChipText, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipTextActive]}>{m} min</Text>
+-              </TouchableOpacity>
+-            ))}
+-            <TouchableOpacity disabled={alarmArmed} onPress={() => setAlarmCustomOpen(true)} style={[styles.alarmChip, alarmCustomOpen && styles.alarmChipActive]}>
+-              <Text style={[styles.alarmChipText, alarmCustomOpen && styles.alarmChipTextActive]}>Custom</Text>
+-            </TouchableOpacity>
+-          </View>
+-          {alarmCustomOpen && (
+-            <LabeledInput
+-              label="Custom — minutes, or H:MM for 1hr+ (e.g. 1:30 = 1hr 30min)"
+-              value={alarmCustomText} onChangeText={setAlarmCustomText}
+-              keyboardType="numbers-and-punctuation" editable={!alarmArmed}
+-            />
+-          )}
+-          <PrimaryButton
+-            title={alarmArmed ? "Armed" : "Set Alarm"} onPress={setSmartAlarm} loading={alarmBusy}
+-            disabled={alarmArmed} style={{ marginTop: spacing.sm }}
+-          />
+-          {alarmArmed && (
+-            <TouchableOpacity onPress={cancelSmartAlarm} style={{ marginTop: spacing.sm }}>
+-              <Text style={styles.removeAlarmText}>Remove alarm for this station</Text>
+-            </TouchableOpacity>
+-          )}
+-          {alarmStatus && <Text style={styles.webNoticeText}>{alarmStatus}</Text>}
+-        </SectionCard>
+-      )}
+-
+       {/* FEATURE: End-of-Trip Summary Card (shareable) */}
+       {tripSummary && (
+         <SectionCard title="🏁 Trip complete">
+@@ -1752,24 +2099,19 @@ export default function LiveTrackingScreen({ navigation }) {
+               done, this reads "Train has reached destination." exactly
+               like RailYatri's own completed-run page; otherwise it's the
+               same "Next station · ETA" summary as before. */}
+-          {timeline.length >= 2 && (
+-            <Text style={styles.routeHeaderText}>
+-              Train {trainNumber.trim()} · {timeline[0].name || timeline[0].code} {"→"} {timeline[timeline.length - 1].name || timeline[timeline.length - 1].code}
+-            </Text>
+-          )}
+-          <View ref={quickBarRef} style={styles.quickBar}>
+-            <View style={styles.quickBarIconWrap}>
+-              <Ionicons name="train" size={16} color={colors.textInverse} />
++          {/* REDESIGN (RailYatri-style status card): one plain sentence for
++              where the train is — "Train hasn't started yet", "Crossed X at
++              HH:MM · 2 km to Y", "Train has reached destination." — and the
++              next halt's live ETA underneath. On GPS it's the phone's own
++              position on the route. */}
++          <View ref={quickBarRef} style={styles.ryStatusCard}>
++            <View style={[styles.ryStatusIcon, gpsOn && { backgroundColor: colors.accent }]}>
++              <Ionicons name={gpsOn ? "navigate" : "train"} size={20} color="#fff" />
++            </View>
++            <View style={{ flex: 1 }}>
++              <Text style={styles.ryStatusText}>{ltStatus.headline}</Text>
++              {ltStatus.sub ? <Text style={styles.ryStatusSub}>{ltStatus.sub}</Text> : null}
+             </View>
+-            {ltJourneyLikelyComplete ? (
+-              <Text style={styles.quickBarText}>Train has reached destination.</Text>
+-            ) : (
+-              <Text style={styles.quickBarText}>
+-                Next:{" "}
+-                <Text style={styles.quickBarStation}>{payload.next_station || "—"}</Text>
+-                <Text style={styles.quickBarEta}>  ETA {payload.next_station_live_eta || payload.next_station_expected_arrival || "—"}</Text>
+-              </Text>
+-            )}
+             <DelayPill minutes={ltEffectiveDelay} />
+           </View>
+ 
+@@ -1820,17 +2162,6 @@ export default function LiveTrackingScreen({ navigation }) {
+             </SectionCard>
+           )}
+ 
+-          <SectionCard title="Crowd prediction" subtitle={payload.crowd_disclaimer}>
+-            <InfoRow label="Level" value={payload.crowd_level || "—"} />
+-            <InfoRow label="Score" value={payload.crowd_score != null ? String(payload.crowd_score) : "—"} />
+-            {!!payload.crowd_basis?.length && (
+-              <View style={styles.basisList}>
+-                {payload.crowd_basis.map((b, i) => (
+-                  <Text key={i} style={styles.basisItem}>• {b}</Text>
+-                ))}
+-              </View>
+-            )}
+-          </SectionCard>
+ 
+           {/* REDESIGN (RailYatri-style running status): Arrival | Station |
+               Departure columns, a "DayN: <date>" pill at each real day
+@@ -1862,6 +2193,7 @@ export default function LiveTrackingScreen({ navigation }) {
+                       onReportInaccuracy={reportInaccuracy}
+                       nextStationName={payload?.next_station}
+                       segmentSpeedSignal={payload?.segment_speed_signal}
++                      gpsMode={gpsOn}
+                     />
+                   );
+                 }
+@@ -1902,6 +2234,7 @@ export default function LiveTrackingScreen({ navigation }) {
+                       onReportInaccuracy={reportInaccuracy}
+                       nextStationName={payload?.next_station}
+                       segmentSpeedSignal={payload?.segment_speed_signal}
++                      gpsMode={gpsOn}
+                       alertArmed={!!stationWatches[(entry.code || "").toUpperCase()]}
+                       alertBlocked={ltJourneyLikelyComplete || reallyReachedCodes.has((entry.code || "").toUpperCase())}
+                       onBellPress={bellsEnabledForPayload ? openStationAlert : undefined}
+@@ -1911,8 +2244,63 @@ export default function LiveTrackingScreen({ navigation }) {
+               });
+             })()}
+           </SectionCard>
++
++          <SectionCard title="Crowd prediction" subtitle={payload.crowd_disclaimer}>
++            <InfoRow label="Level" value={payload.crowd_level || "—"} />
++            <InfoRow label="Score" value={payload.crowd_score != null ? String(payload.crowd_score) : "—"} />
++            {!!payload.crowd_basis?.length && (
++              <View style={styles.basisList}>
++                {payload.crowd_basis.map((b, i) => (
++                  <Text key={i} style={styles.basisItem}>• {b}</Text>
++                ))}
++              </View>
++            )}
++          </SectionCard>
+         </>
+       )}
++
++      {/* FEATURE: Smart Alarm, right on Live Tracking (moved off the
++          separate More Tools menu — see the top-of-file comment). Only
++          shows once a train is actually being tracked; arming an alarm
++          before that point doesn't mean anything. */}
++      {payload && (
++        <SectionCard title="⏰ Smart Alarm" subtitle="Wake-up alert as this train nears a station you pick — rings even if you close the app.">
++          <LabeledInput label="Destination station code" value={alarmStation} onChangeText={setAlarmStation} autoCapitalize="characters" editable={!alarmArmed} />
++          <Text style={styles.fieldLabel}>Alert me before arrival</Text>
++          <View style={styles.chipRow}>
++            {["15", "20", "30", "40", "45"].map((m) => (
++              <TouchableOpacity
++                key={m}
++                disabled={alarmArmed}
++                onPress={() => { setAlarmLeadMinutes(m); setAlarmCustomOpen(false); }}
++                style={[styles.alarmChip, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipActive]}
++              >
++                <Text style={[styles.alarmChipText, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipTextActive]}>{m} min</Text>
++              </TouchableOpacity>
++            ))}
++            <TouchableOpacity disabled={alarmArmed} onPress={() => setAlarmCustomOpen(true)} style={[styles.alarmChip, alarmCustomOpen && styles.alarmChipActive]}>
++              <Text style={[styles.alarmChipText, alarmCustomOpen && styles.alarmChipTextActive]}>Custom</Text>
++            </TouchableOpacity>
++          </View>
++          {alarmCustomOpen && (
++            <LabeledInput
++              label="Custom — minutes, or H:MM for 1hr+ (e.g. 1:30 = 1hr 30min)"
++              value={alarmCustomText} onChangeText={setAlarmCustomText}
++              keyboardType="numbers-and-punctuation" editable={!alarmArmed}
++            />
++          )}
++          <PrimaryButton
++            title={alarmArmed ? "Armed" : "Set Alarm"} onPress={setSmartAlarm} loading={alarmBusy}
++            disabled={alarmArmed} style={{ marginTop: spacing.sm }}
++          />
++          {alarmArmed && (
++            <TouchableOpacity onPress={cancelSmartAlarm} style={{ marginTop: spacing.sm }}>
++              <Text style={styles.removeAlarmText}>Remove alarm for this station</Text>
++            </TouchableOpacity>
++          )}
++          {alarmStatus && <Text style={styles.webNoticeText}>{alarmStatus}</Text>}
++        </SectionCard>
++      )}
+     </ScrollView>
+     {showBottomBar && (
+       <View style={styles.bottomBar}>
+@@ -1952,10 +2340,47 @@ export default function LiveTrackingScreen({ navigation }) {
+     <DayPickerModal
+       visible={dayPickerVisible}
+       selected={trackDate}
+-      onSelect={setTrackDate}
++      onSelect={(v) => {
++        setTrackDate(v);
++        // Picked from the tracking header ("Today ▾"): switch the tracked
++        // run straight away, like RailYatri's Today/Yesterday switch.
++        if (datePickForHeaderRef.current && activeParamsRef.current) {
++          datePickForHeaderRef.current = false;
++          startTracking({ ...activeParamsRef.current, date: v }, false);
++        }
++      }}
+       onClose={() => setDayPickerVisible(false)}
+     />
+ 
++    {/* RailYatri-style "Are you inside the train?" — GPS mode is only
++        switched on when the user confirms they're ON this train. */}
++    <Modal visible={!!gpsAsk} transparent animationType="fade" onRequestClose={() => setGpsAsk(null)}>
++      <View style={styles.askBackdrop}>
++        <View style={styles.askCard}>
++          <TouchableOpacity style={styles.askClose} onPress={() => setGpsAsk(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
++            <Ionicons name="close" size={22} color={colors.textMuted} />
++          </TouchableOpacity>
++          <View style={styles.askIllustration}>
++            <Ionicons name="train" size={44} color="#fff" />
++          </View>
++          <Text style={styles.askTitle}>Are you inside the train?</Text>
++          <Text style={styles.askSub}>
++            {gpsAsk && gpsAsk.reason === "offline"
++              ? "No internet right now. If you're on this train, GPS can keep tracking it without internet."
++              : `If you're on train ${activeTrack ? activeTrack.trainNumber : ""}, your phone's GPS gives the most accurate position and ETAs.`}
++          </Text>
++          <View style={styles.askBtnRow}>
++            <TouchableOpacity style={[styles.askBtn, styles.askBtnYes]} onPress={() => answerInTrain(true)}>
++              <Text style={styles.askBtnYesText}>Yes</Text>
++            </TouchableOpacity>
++            <TouchableOpacity style={[styles.askBtn, styles.askBtnNo]} onPress={() => answerInTrain(false)}>
++              <Text style={styles.askBtnNoText}>No</Text>
++            </TouchableOpacity>
++          </View>
++        </View>
++      </View>
++    </Modal>
++
+     {/* FEATURE: per-station Delay Alert sheet — opened from the bell on
+         each reporting station row in "Running status" (openStationAlert). */}
+     <DelayAlertModal
+@@ -2008,7 +2433,7 @@ function TrainMarkerIcon() {
+ // "Report Inaccuracy" link wired to the real /api/feedback endpoint.
+ function LiveStatusCallout({
+   stop, statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm,
+-  totalCoveredKm, statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
++  totalCoveredKm, statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal, gpsMode,
+ }) {
+   return (
+     <View style={styles.liveCallout}>
+@@ -2019,9 +2444,10 @@ function LiveStatusCallout({
+           <Text style={styles.liveCalloutRefreshText}>{refreshCountdown}s</Text>
+         </View>
+       </View>
+-      <Text style={styles.liveCalloutMain}>
+-        🚆 Train is currently at {toDisplayCase(stop.name)}
+-        {stop.halt_minutes ? ` · halt ${stop.halt_minutes} min` : ""}
++      <Text style={[styles.liveCalloutMain, gpsMode && { color: colors.accent }]}>
++        {gpsMode
++          ? `📡 By your GPS: just past ${toDisplayCase(stop.name)}`
++          : `🚆 Train is currently at ${toDisplayCase(stop.name)}${stop.halt_minutes ? ` · halt ${stop.halt_minutes} min` : ""}`}
+       </Text>
+       {distanceRemainingToNextKm != null && (
+         // REDESIGN (RailYatri parity): names the real upcoming station
+@@ -2047,7 +2473,7 @@ function LiveStatusCallout({
+           ⚠ {segmentSpeedSignal.live_kmph} km/h vs. usual ~{segmentSpeedSignal.typical_kmph} km/h here
+         </Text>
+       )}
+-      <TouchableOpacity
++      {!gpsMode && <TouchableOpacity
+         style={styles.liveCalloutReportLink}
+         disabled={reportState !== "idle" || !statusResponseId}
+         onPress={() => onReportInaccuracy(statusResponseId)}
+@@ -2055,7 +2481,24 @@ function LiveStatusCallout({
+         <Text style={styles.liveCalloutReportText}>
+           {reportState === "sending" ? "Reporting…" : reportState === "sent" ? "Reported — thanks" : "Report Inaccuracy"}
+         </Text>
+-      </TouchableOpacity>
++      </TouchableOpacity>}
++    </View>
++  );
++}
++
++// No "Connecting…" / "Disconnected" flicker while tracking: the screen
++// always keeps the last live position on show and reconnects quietly in
++// the background — the "Position X ago" next to this says how fresh it is.
++function LiveBadge({ connection, hasPayload, gpsOn }) {
++  let s;
++  if (gpsOn) s = { color: colors.accent, label: "GPS", icon: "navigate" };
++  else if (hasPayload) s = { color: colors.success, label: "Live", icon: "radio-outline" };
++  else if (connection === "error") s = { color: colors.danger, label: "Can't reach server — check backend URL in Settings", icon: "warning-outline" };
++  else s = { color: colors.textMuted, label: "Loading…", icon: "time-outline" };
++  return (
++    <View style={styles.badgeRowInline}>
++      <Ionicons name={s.icon} size={14} color={s.color} />
++      <Text style={[styles.badgeText, { color: s.color }]}>{s.label}</Text>
+     </View>
+   );
+ }
+@@ -2092,17 +2535,25 @@ function InfoRow({ label, value }) {
+ // in the timeline below, same red-for-late/green-for-on-time convention
+ // the web frontend's .live-timeline__delay classes use.
+ // ============================================================
++function humanDelay(minutes) {
++  const abs = Math.round(Math.abs(minutes));
++  if (abs < 60) return `${abs} min`;
++  const h = Math.floor(abs / 60), m = abs % 60;
++  return m ? `${h} hr ${m} min` : `${h} hr`;
++}
++
+ function DelayPill({ minutes, small }) {
+   if (minutes == null) return null;
+   const late = minutes > 0;
+   const early = minutes < 0;
+-  const bg = late ? colors.danger : colors.success;
+-  // minutes === 0 reads as a plain "Ontime" pill, same one-word wording as
+-  // the RailYatri reference, rather than "0m on time".
+-  const label = minutes === 0 ? "Ontime" : `${late ? "+" : ""}${formatDelayDuration(minutes)}${late ? " late" : " early"}`;
++  // REDESIGN (RailYatri): light chip — "10 min late" red on pale red,
++  // "On time" green on pale green.
++  const bg = late ? "#fdecec" : "#e7f6ec";
++  const fg = late ? colors.danger : colors.success;
++  const label = minutes === 0 ? "On time" : `${humanDelay(minutes)} ${late ? "late" : "early"}`;
+   return (
+     <View style={[styles.delayPill, { backgroundColor: bg }, small && styles.delayPillSmall]}>
+-      <Text style={[styles.delayPillText, small && styles.delayPillTextSmall]}>{label}</Text>
++      <Text style={[styles.delayPillText, { color: fg }, small && styles.delayPillTextSmall]}>{label}</Text>
+     </View>
+   );
+ }
+@@ -2129,6 +2580,18 @@ function DayPill({ label }) {
+ // confidence threshold, OR once it's anchored to a nearby real-grounded
+ // point (predicted_delay_grounded_via) — this only reads that decision, it
+ // doesn't make one; nothing here recomputes or re-guesses anything.
++// ETA line for a no-halt (passing) point ahead — ETA + minutes away only.
++function IntermediateEtaLine({ stop }) {
++  if (!stop.predicted_eta) return null;
++  return (
++    <Text style={styles.tlPredictedMuted}>
++      Passing ~{stop.predicted_eta}
++      {stop.minutes_away != null && stop.minutes_away <= 180 ? ` · in ${stop.minutes_away} min` : ""}
++      {stop.predicted_eta_source === "gps" ? " · GPS" : ""}
++    </Text>
++  );
++}
++
+ function PredictedDelayLine({ stop }) {
+   if (stop.predicted_delay_minutes == null) return null;
+   const groundedVia = stop.predicted_delay_grounded_via || stop.predicted_delay_locked_via;
+@@ -2160,9 +2623,15 @@ function PredictedDelayLine({ stop }) {
+   return (
+     <View style={styles.tlPredictedRow}>
+       <Text style={styles.tlPredicted}>
+-        ~{formatDelayDuration(stop.predicted_delay_minutes)} late (predicted)
++        {stop.predicted_delay_minutes > 0 ? `~${humanDelay(stop.predicted_delay_minutes)} late` : "On time"} (predicted)
+         {stop.predicted_eta ? ` · ETA ~${stop.predicted_eta}` : ""}
++        {stop.minutes_away != null && stop.minutes_away <= 180 ? ` · in ${stop.minutes_away} min` : ""}
+       </Text>
++      {stop.predicted_eta_source === "gps" && (
++        <View style={[styles.tlInfoBadge, styles.tlGpsBadge]}>
++          <Text style={[styles.tlInfoBadgeText, { color: "#9a4d00" }]}>📡 GPS</Text>
++        </View>
++      )}
+       {badge && (
+         <View style={styles.tlVerifiedBadge}>
+           <Text style={styles.tlVerifiedBadgeText} numberOfLines={1}>{badge.text}</Text>
+@@ -2208,7 +2677,7 @@ function PredictedDelayLine({ stop }) {
+ function NoHaltGroupRow({
+   group, expanded, onToggle,
+   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
+-  statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
++  statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal, gpsMode,
+ }) {
+   const stations = group.stations || [];
+   const firstPassed = stations.length > 0 && stations[0].status === "passed";
+@@ -2283,9 +2752,10 @@ function NoHaltGroupRow({
+                   onReportInaccuracy={onReportInaccuracy}
+                   nextStationName={nextStationName}
+                   segmentSpeedSignal={segmentSpeedSignal}
++                  gpsMode={gpsMode}
+                 />
+               )}
+-              {!current && <PredictedDelayLine stop={s} />}
++              {!current && !passed && <IntermediateEtaLine stop={s} />}
+             </View>
+             <View style={styles.tlTimeCol} />
+           </View>
+@@ -2319,10 +2789,19 @@ function TimeStack({ timing, staleUnconfirmed, placeholder, align }) {
+     );
+   }
+   const hideActual = staleUnconfirmed && timing.actual_is_predicted;
++  // REDESIGN (RailYatri): scheduled time small/grey on top, the real time
++  // bold underneath — red when late, green when on time.
++  const late = timing.delay_minutes != null && timing.delay_minutes > 0;
++  const actColor = timing.delay_minutes == null ? colors.text : late ? colors.danger : colors.success;
+   return (
+     <View style={styles.tlTimeCol}>
+-      <Text style={[styles.tlTimeExp, textAlign]}>{timing.expected || timing.scheduled || "—"}</Text>
+-      {!hideActual && !!timing.actual && <Text style={[styles.tlTimeAct, textAlign]}>{timing.actual}</Text>}
++      <Text style={[styles.tlTimeExp, textAlign]}>{String(timing.scheduled || timing.expected || "—").slice(0, 5)}</Text>
++      {!hideActual && !!timing.actual && (
++        <Text style={[styles.tlTimeAct, { color: actColor }, textAlign]}>{String(timing.actual).slice(0, 5)}</Text>
++      )}
++      {!hideActual && !timing.actual && timing.expected && timing.expected !== timing.scheduled ? (
++        <Text style={[styles.tlTimeAct, { color: actColor }, textAlign]}>{String(timing.expected).slice(0, 5)}</Text>
++      ) : null}
+     </View>
+   );
+ }
+@@ -2347,7 +2826,7 @@ function TimelineStopRow({
+   stop, isFirst, isLast, rowRef, journeyLikelyComplete,
+   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
+   statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
+-  alertArmed, alertBlocked, onBellPress,
++  alertArmed, alertBlocked, onBellPress, gpsMode,
+ }) {
+   // BUGFIX: once the journey looks likely complete (see
+   // computeJourneyLikelyComplete near the top of this file), the train
+@@ -2425,6 +2904,7 @@ function TimelineStopRow({
+             onReportInaccuracy={onReportInaccuracy}
+             nextStationName={nextStationName}
+             segmentSpeedSignal={segmentSpeedSignal}
++            gpsMode={gpsMode}
+           />
+         )}
+         {/* BUGFIX: suppressed when staleUnconfirmed — see TimeStack's
+@@ -2693,4 +3173,82 @@ const styles = StyleSheet.create({
+     backgroundColor: "#eef4fb", alignItems: "center", justifyContent: "center",
+   },
+   tlBellArmed: { backgroundColor: colors.primary, borderColor: colors.primary },
++
++  // REDESIGN (RailYatri-style header / status / banners / GPS prompt).
++  ryHeader: {
++    backgroundColor: "#fff", borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
++    padding: spacing.md, marginBottom: spacing.sm,
++  },
++  ryHeaderTop: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
++  ryTrainTitle: { fontSize: 16, fontWeight: "700", color: colors.text },
++  ryTrainSub: { fontSize: 12.5, color: colors.textMuted, marginTop: 2 },
++  ryDateBtn: {
++    flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.primary,
++    borderRadius: 6, paddingVertical: 6, paddingHorizontal: 12,
++  },
++  ryDateBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
++  ryHeaderRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: spacing.sm, flexWrap: "wrap" },
++  ryIconBtn: {
++    width: 30, height: 30, borderRadius: 15, borderWidth: 1, borderColor: "#cfe0f3",
++    backgroundColor: "#eef4fb", alignItems: "center", justifyContent: "center",
++  },
++  ryStopBtn: { paddingVertical: 5, paddingHorizontal: 12, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.danger },
++  ryStopBtnText: { color: colors.danger, fontWeight: "700", fontSize: 12 },
++  badgeRowInline: { flexDirection: "row", alignItems: "center", gap: 5 },
++  modeSwitch: {
++    flexDirection: "row", marginTop: spacing.sm, borderRadius: radius.pill, borderWidth: 1,
++    borderColor: colors.primary, overflow: "hidden",
++  },
++  modeBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingVertical: 7, backgroundColor: "#fff" },
++  modeBtnActive: { backgroundColor: colors.primary },
++  modeBtnText: { fontSize: 12.5, fontWeight: "600", color: colors.primary },
++  modeBtnTextActive: { color: "#fff" },
++  ryRedBanner: {
++    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#F2453D",
++    borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: spacing.sm,
++  },
++  ryAlertBanner: {
++    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.primary,
++    borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: spacing.sm,
++  },
++  ryRedBannerText: { flex: 1, color: "#fff", fontSize: 13, fontWeight: "600", lineHeight: 18 },
++  ryInfoBanner: {
++    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#eef4fb", borderWidth: 1,
++    borderColor: "#cfe0f3", borderRadius: 8, paddingVertical: 8, paddingHorizontal: 10, marginBottom: spacing.sm,
++  },
++  ryInfoBannerText: { flex: 1, color: colors.text, fontSize: 12.5 },
++  ryLoadingCard: {
++    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#fff", borderRadius: 8,
++    borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm,
++  },
++  ryLoadingText: { fontSize: 13, color: colors.textMuted },
++  ryStatusCard: {
++    flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fff",
++    borderRadius: 10, borderWidth: 1, borderColor: "#dbe6f5", paddingVertical: 12, paddingHorizontal: 12,
++    marginTop: spacing.sm, marginBottom: spacing.sm,
++    shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 4, shadowOffset: { width: 0, height: 1 }, elevation: 1,
++  },
++  ryStatusIcon: {
++    width: 40, height: 40, borderRadius: 20, backgroundColor: colors.primary,
++    alignItems: "center", justifyContent: "center",
++  },
++  ryStatusText: { fontSize: 15, fontWeight: "700", color: colors.text, lineHeight: 20 },
++  ryStatusSub: { fontSize: 12.5, color: colors.textMuted, marginTop: 2 },
++  tlGpsBadge: { borderColor: colors.accent, backgroundColor: "#FFF4E5" },
++  tlPredictedMuted: { fontSize: 10.5, color: colors.textMuted, marginTop: 2 },
++  askBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center", padding: 24 },
++  askCard: { width: "100%", maxWidth: 340, backgroundColor: "#fff", borderRadius: 14, padding: 20, alignItems: "center" },
++  askClose: { position: "absolute", top: 10, right: 10 },
++  askIllustration: {
++    width: 110, height: 110, borderRadius: 55, backgroundColor: "#2F86E0",
++    alignItems: "center", justifyContent: "center", marginTop: 6, marginBottom: 14,
++  },
++  askTitle: { fontSize: 17, fontWeight: "700", color: colors.text, textAlign: "center" },
++  askSub: { fontSize: 12.5, color: colors.textMuted, textAlign: "center", marginTop: 6, lineHeight: 17 },
++  askBtnRow: { flexDirection: "row", gap: 12, marginTop: 18, alignSelf: "stretch" },
++  askBtn: { flex: 1, paddingVertical: 11, borderRadius: radius.pill, alignItems: "center" },
++  askBtnYes: { backgroundColor: "#0B2F5E" },
++  askBtnNo: { backgroundColor: "#E3EEFB" },
++  askBtnYesText: { color: "#fff", fontWeight: "700", fontSize: 15 },
++  askBtnNoText: { color: colors.primary, fontWeight: "700", fontSize: 15 },
+ });
+\ No newline at end of file
+diff --git a/mobile-app/src/utils/gpsOverlay.js b/mobile-app/src/utils/gpsOverlay.js
+new file mode 100644
+index 0000000..9b5d7ca
+--- /dev/null
++++ b/mobile-app/src/utils/gpsOverlay.js
+@@ -0,0 +1,133 @@
++// gpsOverlay.js
++// -------------
++// FEATURE (per request: "when the user uses GPS, the live tracker screen
++// should display the prediction BY GPS"): takes the last live payload the
++// screen has (from the server, or its on-device copy when offline) and the
++// phone's own GPS position on this train's route (utils/offlineTracker.js
++// locateOnRoute), and returns a payload of the SAME shape with:
++//   - every stop behind the phone marked passed, the last one "current"
++//     (so the train marker + callout sit where the phone really is),
++//   - every stop ahead given a GPS ETA = now + remaining km / speed, and a
++//     predicted delay re-derived from that ETA vs. the timetable,
++//   - next station / km to next / live ETA / map lat-lng from the GPS fix.
++// Pure JS, no network — works with no internet at all.
++
++import { gpsEtaFor } from "./offlineTracker";
++
++function num(v) {
++  if (v === null || v === undefined || v === "") return null;
++  const n = Number(v);
++  return Number.isFinite(n) ? n : null;
++}
++
++function clockMinutes(str) {
++  const m = /(\d{1,2}):(\d{2})/.exec(String(str || ""));
++  return m ? (+m[1]) * 60 + (+m[2]) : null;
++}
++
++// eta - scheduled, circular, in (-720, 720]
++function diffMinutes(etaDate, scheduledStr) {
++  const s = clockMinutes(scheduledStr);
++  if (s == null || !etaDate) return null;
++  const e = etaDate.getHours() * 60 + etaDate.getMinutes();
++  let d = ((e - s) % 1440 + 1440) % 1440;
++  if (d > 720) d -= 1440;
++  return d;
++}
++
++const DROP_LOCK_FIELDS = [
++  "predicted_delay_locked", "predicted_delay_locked_via", "predicted_delay_grounded_via",
++  "predicted_delay_low_minutes", "predicted_delay_high_minutes", "prediction_methods_compared",
++];
++
++export function applyGpsOverlay(raw, gps, speedKmph, now = new Date()) {
++  if (!raw || !gps || gps.error || gps.currentKm == null) return raw;
++  if (gps.source !== "gps" && gps.source !== "cell") return raw;
++  const tl = Array.isArray(raw.timeline) ? raw.timeline : [];
++  if (!tl.length) return raw;
++  const cur = gps.currentKm;
++
++  let lastIdx = -1;
++  tl.forEach((s, i) => {
++    const d = num(s.distance_km);
++    if (d != null && d <= cur + 0.3) lastIdx = i;
++  });
++
++  const mapped = tl.map((s, i) => {
++    if (i < lastIdx) return { ...s, status: "passed" };
++    if (i === lastIdx) return { ...s, status: "current" };
++    const out = { ...s, status: "upcoming" };
++    const d = num(s.distance_km);
++    if (d == null) return out;
++    const km = Math.max(0, d - cur);
++    const eta = gpsEtaFor(km, speedKmph, now);
++    out.distance_ahead_km = Math.round(km * 10) / 10;
++    if (!eta) return out;
++    out.predicted_eta = eta.hhmm;
++    out.predicted_eta_source = "gps";
++    out.minutes_away = Math.round(eta.minutes);
++    if (s.kind !== "intermediate") {
++      const arr = s.arrival || {};
++      const diff = diffMinutes(eta.eta, arr.scheduled || arr.expected);
++      if (diff != null && diff > -120) {
++        out.predicted_delay_minutes = Math.max(0, Math.round(diff));
++        out.predicted_delay_confidence = "GPS";
++        DROP_LOCK_FIELDS.forEach((k) => { delete out[k]; });
++      }
++    }
++    return out;
++  });
++
++  const byCode = {};
++  mapped.forEach((s) => { if (s.code) byCode[String(s.code).toUpperCase()] = s; });
++  const pick = (s) => (s && s.code ? byCode[String(s.code).toUpperCase()] : null);
++
++  const grouped = (Array.isArray(raw.timeline_grouped) && raw.timeline_grouped.length ? raw.timeline_grouped : null);
++  const groupedOut = grouped
++    ? grouped.map((e) => {
++      if (e.display_type === "no_halt_group") {
++        return {
++          ...e,
++          stations: (e.stations || []).map((st) => {
++            const m = pick(st);
++            return m ? {
++              ...st, status: m.status, predicted_eta: m.predicted_eta ?? st.predicted_eta,
++              distance_ahead_km: m.distance_ahead_km ?? st.distance_ahead_km, minutes_away: m.minutes_away,
++              predicted_eta_source: m.predicted_eta_source,
++            } : st;
++          }),
++        };
++      }
++      const m = pick(e);
++      return m ? { ...e, ...m, display_type: e.display_type } : e;
++    })
++    : null;
++
++  const current = lastIdx >= 0 ? mapped[lastIdx] : null;
++  const next = mapped[lastIdx + 1] || null;
++  const nextReporting = mapped.slice(lastIdx + 1).find((s) => s.kind !== "intermediate" && s.predicted_delay_minutes != null);
++  const curD = current ? num(current.distance_km) : null;
++
++  return {
++    ...raw,
++    gps_overlay: true,
++    gps_headline: gps.headline || null,
++    timeline: mapped,
++    timeline_grouped: groupedOut || raw.timeline_grouped,
++    current_station: current ? current.name : raw.current_station,
++    current_station_code: current ? current.code : raw.current_station_code,
++    next_station: next ? next.name : null,
++    next_station_code: next ? next.code : null,
++    next_station_live_eta: next ? next.predicted_eta || null : null,
++    distance_remaining_to_next_km: gps.kmToNext != null ? gps.kmToNext : (next ? next.distance_ahead_km : null),
++    distance_covered_since_last_stop_km: curD != null ? Math.max(0, Math.round((cur - curD) * 10) / 10) : null,
++    lat: gps.lat != null ? gps.lat : raw.lat,
++    lng: gps.lng != null ? gps.lng : raw.lng,
++    position_source: gps.source === "gps" ? "phone_gps" : "cell_tower",
++    status_updated_at: new Date(gps.fixAt || Date.now()).toISOString(),
++    display_speed_kmph: speedKmph != null ? Math.round(speedKmph) : raw.display_speed_kmph,
++    delay_minutes: nextReporting ? nextReporting.predicted_delay_minutes : raw.delay_minutes,
++    // The server's own "wrong run" / diversion notes are about ITS feed.
++    date_reliability_warning: null,
++  };
++}
+diff --git a/mobile-app/src/utils/offlineTracker.js b/mobile-app/src/utils/offlineTracker.js
+index 09156fb..64d36aa 100644
+--- a/mobile-app/src/utils/offlineTracker.js
++++ b/mobile-app/src/utils/offlineTracker.js
+@@ -245,7 +245,12 @@ export function locateOnRoute(cache, fix) {
+   const segKm = Math.max(0, b.routeKm - a.routeKm);
+   const kmToNext = segKm * (1 - best.t);
+   const atStation = best.t < 0.03 && a.kind !== "intermediate";
+-  return describe(cache, {
++  // FEATURE (GPS predictions on the live timeline): the phone's own
++  // position as a distance-from-origin on this train's route, so the
++  // Live Tracking screen can mark every stop behind it as passed and
++  // compute a real GPS-based ETA to every stop ahead.
++  const currentKm = a.routeKm + segKm * best.t;
++  const base = describe(cache, {
+     crossedIdx: a.idx,
+     nextIdx: b.idx,
+     kmToNext,
+@@ -255,6 +260,24 @@ export function locateOnRoute(cache, fix) {
+     speedKmph: fix.speed != null && fix.speed >= 0 ? fix.speed * 3.6 : null,
+     verb: atStation ? "At" : "Crossed",
+   });
++  return {
++    ...base,
++    currentKm: Math.round(currentKm * 100) / 100,
++    crossedCode: a.code || null,
++    nextCode: b.code || null,
++    atStation,
++    fixAt: fix.at || Date.now(),
++    lat: fix.lat,
++    lng: fix.lng,
++  };
++}
++
++/** Minutes-ahead arithmetic for GPS ETAs: remaining km / speed. */
++export function gpsEtaFor(kmAway, speedKmph, now = new Date()) {
++  if (kmAway == null || !speedKmph || speedKmph <= 0) return null;
++  const minutes = (Math.max(0, kmAway) / speedKmph) * 60;
++  const eta = new Date(now.getTime() + minutes * 60000);
++  return { minutes, eta, hhmm: fmtHHMM(eta) };
+ }
+ 
+ /** No location at all: timetable + last known delay. Always labelled "estimate". */

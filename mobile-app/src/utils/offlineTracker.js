@@ -245,7 +245,12 @@ export function locateOnRoute(cache, fix) {
   const segKm = Math.max(0, b.routeKm - a.routeKm);
   const kmToNext = segKm * (1 - best.t);
   const atStation = best.t < 0.03 && a.kind !== "intermediate";
-  return describe(cache, {
+  // FEATURE (GPS predictions on the live timeline): the phone's own
+  // position as a distance-from-origin on this train's route, so the
+  // Live Tracking screen can mark every stop behind it as passed and
+  // compute a real GPS-based ETA to every stop ahead.
+  const currentKm = a.routeKm + segKm * best.t;
+  const base = describe(cache, {
     crossedIdx: a.idx,
     nextIdx: b.idx,
     kmToNext,
@@ -255,6 +260,24 @@ export function locateOnRoute(cache, fix) {
     speedKmph: fix.speed != null && fix.speed >= 0 ? fix.speed * 3.6 : null,
     verb: atStation ? "At" : "Crossed",
   });
+  return {
+    ...base,
+    currentKm: Math.round(currentKm * 100) / 100,
+    crossedCode: a.code || null,
+    nextCode: b.code || null,
+    atStation,
+    fixAt: fix.at || Date.now(),
+    lat: fix.lat,
+    lng: fix.lng,
+  };
+}
+
+/** Minutes-ahead arithmetic for GPS ETAs: remaining km / speed. */
+export function gpsEtaFor(kmAway, speedKmph, now = new Date()) {
+  if (kmAway == null || !speedKmph || speedKmph <= 0) return null;
+  const minutes = (Math.max(0, kmAway) / speedKmph) * 60;
+  const eta = new Date(now.getTime() + minutes * 60000);
+  return { minutes, eta, hhmm: fmtHHMM(eta) };
 }
 
 /** No location at all: timetable + last known delay. Always labelled "estimate". */
