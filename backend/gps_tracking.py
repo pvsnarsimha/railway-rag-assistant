@@ -30,7 +30,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import railway_api
@@ -1414,7 +1414,9 @@ def compute_live_eta(distance_ahead_km: Optional[float], effective_speed_kmph: O
     """
     if distance_ahead_km is None or not effective_speed_kmph or effective_speed_kmph <= 0:
         return None
-    now = now or datetime.now()
+    # BUGFIX: RailKit times are IST, but Render's server clock is UTC — a
+    # bare datetime.now() there made every live ETA 5h30m behind.
+    now = now or (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).replace(tzinfo=None)
     minutes = distance_ahead_km / effective_speed_kmph * 60.0
     eta = now + timedelta(minutes=minutes)
     return eta.strftime("%H:%M")

@@ -24,54 +24,104 @@
 // — this is the public, non-secret client config (safe to ship), not
 // the backend's FIREBASE_SERVICE_ACCOUNT_JSON credential.
 
-importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js");
-importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js");
+// Guarded: if Firebase's scripts can't be fetched (first install on a flaky
+// network, a blocked CDN) the worker must STILL install, so the offline app
+// shell below keeps working. Push just stays off until the next update.
+var messaging = null;
+try {
+  importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js");
+  importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js");
+  firebase.initializeApp({
+    apiKey: "AIzaSyBTSGSVdsnZ0bqOwbdxrt2genJQtadRx5M",
+    authDomain: "railway-142a6.firebaseapp.com",
+    projectId: "railway-142a6",
+    storageBucket: "railway-142a6.firebasestorage.app",
+    messagingSenderId: "72786651974",
+    appId: "1:72786651974:web:67e9a8337aba65c86e9347",
+  });
+  messaging = firebase.messaging();
+} catch (e) {
+  messaging = null;
+}
 
-firebase.initializeApp({
-  apiKey: "AIzaSyBTSGSVdsnZ0bqOwbdxrt2genJQtadRx5M",
-  authDomain: "railway-142a6.firebaseapp.com",
-  projectId: "railway-142a6",
-  storageBucket: "railway-142a6.firebasestorage.app",
-  messagingSenderId: "72786651974",
-  appId: "1:72786651974:web:67e9a8337aba65c86e9347",
-});
+// One notification slot per TRAIN (RailYatri-style): delay alerts,
+// "station reached" notices and the background running-status update
+// ("Crossed X at HH:MM · N km to Y") all replace each other in place.
+// Smart Alarms keep their own slot so a wake-up alarm is never overwritten.
+function notificationTagFor(d) {
+  d = d || {};
+  var type = d.type || "railway-alert";
+  if (type === "smart_alarm") return "smart_alarm-" + (d.train_number || "") + "-" + (d.station || "");
+  if (type === "fare_alert") return "fare_alert-" + (d.train_number || "");
+  if (d.train_number) return "train-" + d.train_number;
+  return type;
+}
 
-const messaging = firebase.messaging();
-
-// Handles a push that arrives while no /mobile-app tab has focus. See the
-// CAVEAT in the legacy frontend/firebase-messaging-sw.js: Firebase's SDK
-// can auto-display a `notification`-payload push without ever calling
-// this handler — that's normal, not a sign this file isn't working.
-messaging.onBackgroundMessage((payload) => {
-  const title = payload.notification?.title || "Train delay alert";
-  const body = payload.notification?.body || "";
-  // No bundled icon path is guaranteed to survive the Expo web export
-  // unchanged, so this intentionally omits `icon` rather than risk a
-  // 404'd image — the browser falls back to a sane default. `vibrate` +
-  // `requireInteraction` make it behave more like a normal SMS/alert
-  // notification on Android (buzzes, and stays up instead of
-  // auto-dismissing after a couple seconds) — the actual sound itself is
-  // the phone's own default notification sound, which Android/Chrome
-  // plays automatically for a background push; there's no way for a
-  // web page to pick a custom sound the way a native app can.
+// BUGFIX (every alert showed up TWICE — one with the train icon, one with
+// a plain "R" letter icon): the backend's push carries a `notification`
+// block, which the Firebase SDK ALREADY displays by itself (with the
+// backend's own icon/tag/vibrate settings) — and then it still calls this
+// handler, which showed a second copy. Now this handler only displays
+// data-only pushes; notification pushes are left to the SDK's own display.
+if (messaging) messaging.onBackgroundMessage((payload) => {
+  if (payload && payload.notification) return;
+  const d = (payload && payload.data) || {};
+  const title = d.title || "Train update";
+  const body = d.body || "";
+  const silent = d.type === "running_status" && d.completed !== "1";
   self.registration.showNotification(title, {
     body,
-    data: payload.data || {},
-    vibrate: [200, 100, 200],
+    data: d,
+    icon: "/assets/icons/train-marker.png",
+    vibrate: silent ? undefined : [200, 100, 200],
     requireInteraction: true,
-    // One notification slot per train (+ station for station-specific
-    // alerts) — a shared per-type tag made each train's alert REPLACE the
-    // previous train's alert on the device.
-    tag: (function (d) {
-      d = d || {};
-      var type = d.type || "railway-alert";
-      var train = d.train_number ? "-" + d.train_number : "";
-      var st = (type === "smart_alarm" || type === "station_reached") && (d.station || d.predicted_for_station)
-        ? "-" + (d.station || d.predicted_for_station) : "";
-      return type + train + st;
-    })(payload.data),
-    renotify: true,
+    silent: silent,
+    tag: notificationTagFor(d),
+    renotify: !silent,
   });
+});
+
+// FEATURE: offline app shell. Once /mobile-app has been opened online, the
+// app itself (HTML + JS bundle + icon fonts + Leaflet + icons) is served
+// from this cache when there's no internet — so the offline GPS tracker on
+// Live Tracking can still open on a train with no mobile data. Network-
+// first: online you always get the latest deploy; the cache is only the
+// fallback. API calls (/api, /ws) are never cached.
+var SHELL_CACHE = "railway-shell-v1";
+self.addEventListener("install", function (event) {
+  self.skipWaiting();
+  event.waitUntil(
+    caches.open(SHELL_CACHE).then(function (c) { return c.addAll(["/mobile-app/"]).catch(function () {}); })
+  );
+});
+self.addEventListener("activate", function (event) {
+  event.waitUntil(self.clients.claim());
+});
+self.addEventListener("fetch", function (event) {
+  var req = event.request;
+  if (req.method !== "GET") return;
+  var url;
+  try { url = new URL(req.url); } catch (e) { return; }
+  if (url.origin !== self.location.origin) return;
+  var p = url.pathname;
+  var cacheable = p.indexOf("/mobile-app/") === 0 || p.indexOf("/assets/") === 0;
+  if (!cacheable || p.indexOf("/api/") === 0 || p.indexOf("/ws/") === 0) return;
+  event.respondWith(
+    fetch(req).then(function (res) {
+      if (res && res.ok) {
+        var copy = res.clone();
+        caches.open(SHELL_CACHE).then(function (c) { c.put(req, copy); });
+      }
+      return res;
+    }).catch(function () {
+      return caches.match(req).then(function (hit) {
+        if (hit) return hit;
+        // Navigations to any /mobile-app/ route fall back to the shell page.
+        if (req.mode === "navigate") return caches.match("/mobile-app/");
+        return Response.error();
+      });
+    })
+  );
 });
 
 self.addEventListener("notificationclick", (event) => {

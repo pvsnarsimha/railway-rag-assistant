@@ -187,6 +187,9 @@ async function registerForWebPushNotifications({ prompt = true } = {}) {
     if (!webForegroundHandlerAttached) {
     webForegroundHandlerAttached = true;
     onMessage(messaging, (payload) => {
+      // The silent background running-status update is for when the app is
+      // CLOSED — while it's open the Live Tracking screen already shows it.
+      if (payload?.data?.type === "running_status") return;
       const title = payload.notification?.title || "Train delay alert";
       const body = payload.notification?.body || "";
       playDelayAlertChime();
@@ -268,10 +271,19 @@ export function configureForegroundNotificationHandler() {
 export function notificationTag(data) {
   const d = data || {};
   const type = d.type || "railway-alert";
-  const train = d.train_number ? `-${d.train_number}` : "";
-  const station = (type === "smart_alarm" || type === "station_reached") && (d.station || d.predicted_for_station)
-    ? `-${d.station || d.predicted_for_station}` : "";
-  return `${type}${train}${station}`;
+  // One slot per TRAIN (RailYatri-style) — delay alerts, station-reached
+  // and running-status updates replace each other; Smart Alarm keeps its own.
+  if (type === "smart_alarm") return `smart_alarm-${d.train_number || ""}-${d.station || ""}`;
+  if (type === "fare_alert") return `fare_alert-${d.train_number || ""}`;
+  return d.train_number ? `train-${d.train_number}` : type;
+}
+
+// FEATURE: offline app shell — registers the service worker on every web
+// page load (no notification prompt), so its fetch cache can serve the app
+// when the phone has no internet. See public/firebase-messaging-sw.js.
+export function registerOfflineShell() {
+  if (Platform.OS !== "web" || typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  try { navigator.serviceWorker.register(WEB_SW_PATH).catch(() => {}); } catch (e) { /* ignore */ }
 }
 
 // Silent, no-prompt refresh for a device that already granted permission:

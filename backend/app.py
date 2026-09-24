@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
@@ -85,6 +85,8 @@ import web_search
 import push_store
 import push_notifications
 import alert_scheduler
+import running_status
+import cell_tower_store
 import smart_features
 
 app = FastAPI(title="Indian Railways RAG Assistant")
@@ -157,6 +159,9 @@ def _startup_diagnostics():
         _predict_delay_for_watch, interval_minutes=_interval,
         fare_check_fn=_fare_check_for_watch, fare_check_interval_minutes=_fare_interval,
         alarm_check_fn=_alarm_check_for_watch, alarm_check_interval_minutes=_alarm_interval,
+        # FEATURE: background Live Tracking — same live pipeline, no label.
+        tracking_status_fn=lambda train_number, date: _predict_for_watch_station(train_number, date, None),
+        tracking_interval_minutes=_interval,
     )
 
 
@@ -901,6 +906,21 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
         return {"status": "unavailable", "delay_minutes": None, "station": None,
                 "message": f"No live timeline available yet for train {train_number}."}
 
+    # FEATURE (RailYatri-style notifications): a compact "where is the
+    # train right now" snapshot — crossed station + time, km to the next
+    # point, next halt + ETA — attached to EVERY outcome below so a push can
+    # say "Crossed Aluva at 17:54 · 26 km to Thrissur", not only a delay.
+    def _running(speed=None):
+        try:
+            return running_status.build(
+                timeline_json,
+                delay_minutes=position.delay_minutes if position else None,
+                train_name=position.train_name if position else None,
+                speed_kmph=speed, is_really_reached=_stop_really_reached,
+            )
+        except Exception:  # noqa: BLE001 - a snapshot failure must never block an alert
+            return None
+
     matched = _match_station_in_timeline(timeline_json, label) if label else None
     if label and matched is None:
         return {"status": "not_on_route", "delay_minutes": None, "station": None,
@@ -911,7 +931,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
         actual_time = timing.get("actual") or timing.get("expected") or timing.get("scheduled")
         return {
             "status": "already_reached", "delay_minutes": timing.get("delay_minutes"),
-            "station": matched.get("name"), "actual_time": actual_time,
+            "station": matched.get("name"), "actual_time": actual_time, "running": _running(),
             "message": (
                 f"{matched.get('name')} is already reached"
                 + (f" (at {actual_time})" if actual_time else "") + "."
@@ -971,7 +991,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
             actual_time = timing.get("actual") or timing.get("expected") or timing.get("scheduled")
             return {
                 "status": "already_reached", "delay_minutes": timing.get("delay_minutes"),
-                "station": matched.get("name"), "actual_time": actual_time,
+                "station": matched.get("name"), "actual_time": actual_time, "running": _running(avg_speed_kmph),
                 "message": (
                     f"{matched.get('name')} is already reached"
                     + (f" (at {actual_time})" if actual_time else "") + "."
@@ -987,7 +1007,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
             actual_time = timing.get("actual") or timing.get("expected")
             return {
                 "status": "journey_completed", "delay_minutes": None,
-                "station": dest.get("name"), "actual_time": actual_time,
+                "station": dest.get("name"), "actual_time": actual_time, "running": _running(avg_speed_kmph),
                 "message": (
                     f"Train {train_number} has completed its journey at {dest.get('name')}"
                     + (f" ({actual_time})" if actual_time else "") + " — nothing left to predict."
@@ -996,6 +1016,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
         target = next((s for s in remaining if s.get("status") == "upcoming"), None) or (remaining[0] if remaining else None)
     if target is None or target.get("predicted_delay_minutes") is None:
         return {"status": "unavailable", "delay_minutes": None, "station": target.get("name") if target else None,
+                "running": _running(avg_speed_kmph),
                 "message": f"No upcoming reporting station left to predict for train {train_number}."}
 
     return {
@@ -1005,6 +1026,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
         "station": target.get("name"),
         "predicted_eta": target.get("predicted_eta"),
         "current_station": position.current_station_name if position else None,
+        "running": _running(avg_speed_kmph),
         "message": f"{target.get('name')} is predicted ~{target.get('predicted_delay_minutes')} min late.",
     }
 
@@ -5198,6 +5220,98 @@ def api_push_sync_alarms(req: SyncAlarmWatchesRequest):
 @app.get("/api/push/alarms")
 def api_push_list_alarms(token: str):
     return {"watches": push_store.list_alarm_watches_for_token(token.strip())}
+
+
+# =============================================================================
+# FEATURE: background Live Tracking (RailYatri-style). The Live Tracking
+# screen registers the train it's tracking here on "Start tracking" (and
+# again on every auto-resume), and removes it on "Stop" — so after the app
+# is closed the server keeps pushing a silent, in-place "Crossed X at HH:MM
+# · N km to Y" update (alert_scheduler.run_tracking_check_once) until the
+# train reaches its destination.
+# =============================================================================
+class TrackingWatchRequest(BaseModel):
+    token: str
+    train_number: str
+    date: Optional[str] = None
+    source: Optional[str] = None
+    dest: Optional[str] = None
+
+
+class TrackingWatchDeleteRequest(BaseModel):
+    token: str
+    train_number: Optional[str] = None
+    date: Optional[str] = None
+
+
+@app.post("/api/push/tracking")
+def api_push_start_tracking(req: TrackingWatchRequest):
+    token = req.token.strip()
+    if not token or not req.train_number.strip():
+        raise HTTPException(status_code=400, detail="token and train_number are required")
+    push_store.register_token(token)
+    push_store.upsert_tracking_watch(token, req.train_number.strip(), (req.date or "").strip() or None,
+                                     req.source, req.dest)
+    return {"ok": True, "tracking": push_store.list_tracking_watches_for_token(token)}
+
+
+@app.post("/api/push/tracking/stop")
+def api_push_stop_tracking(req: TrackingWatchDeleteRequest):
+    removed = push_store.delete_tracking_watch(
+        req.token.strip(), (req.train_number or "").strip() or None, (req.date or "").strip() or None,
+    )
+    return {"ok": True, "removed": removed}
+
+
+@app.get("/api/push/tracking")
+def api_push_list_tracking(token: str):
+    return {"tracking": push_store.list_tracking_watches_for_token(token.strip())}
+
+
+# =============================================================================
+# FEATURE: cell-tower offline tracking — crowdsourced tower map (see
+# cell_tower_store.py and docs/CELL_TOWER_OFFLINE_PLAN.md).
+# =============================================================================
+class CellObservation(BaseModel):
+    radio: Optional[str] = None
+    mcc: int
+    mnc: int
+    area: int
+    cid: int
+    lat: float
+    lng: float
+    accuracy: Optional[float] = None
+
+
+class CellObservationsRequest(BaseModel):
+    observations: List[CellObservation]
+
+
+class CellMapRequest(BaseModel):
+    points: List[List[float]]
+    radius_km: Optional[float] = 5.0
+
+
+@app.post("/api/offline/cell-observations")
+def api_cell_observations(req: CellObservationsRequest):
+    accepted = cell_tower_store.add_observations([o.dict() for o in req.observations[:200]])
+    return {"ok": True, "accepted": accepted}
+
+
+@app.post("/api/offline/cell-map")
+def api_cell_map(req: CellMapRequest):
+    radius = max(1.0, min(10.0, req.radius_km or 5.0))
+    cells = cell_tower_store.cells_near_route(req.points[:2000], radius_km=radius)
+    return {"cells": cells, "count": len(cells), **{"db": cell_tower_store.stats()}}
+
+
+@app.get("/api/train/running-status/{train_number}")
+def api_train_running_status(train_number: str, date: Optional[str] = None):
+    """The same compact snapshot the background push uses — handy for a
+    quick check / debugging what a notification would say right now."""
+    result = _predict_for_watch_station(train_number.strip(), date, None)
+    return {"status": result.get("status"), "running": result.get("running"),
+            "predicted_delay_minutes": result.get("delay_minutes"), "message": result.get("message")}
 
 
 # =============================================================================

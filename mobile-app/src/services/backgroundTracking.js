@@ -1,0 +1,108 @@
+// backgroundTracking.js
+// ---------------------
+// FEATURE: "keep tracking after I close the app" (RailYatri-style).
+//
+// Two halves:
+//   1. Remember on the device which train(s) were being tracked, so the
+//      Live Tracking screen reconnects to them BY ITSELF the next time the
+//      app is opened — no re-typing, no pressing Start again.
+//   2. Tell the server to keep watching that train for this device's push
+//      token (POST /api/push/tracking), so a silent, in-place notification
+//      ("Crossed Aluva at 17:54 · 26 km to Thrissur") keeps updating while
+//      the app is closed — until the train reaches its destination or the
+//      user presses Stop.
+
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { registerPushToken, startBackgroundTracking, stopBackgroundTracking } from "../api/railwayApi";
+import { registerForPushNotifications, refreshWebPushToken } from "./pushNotifications";
+
+const PUSH_TOKEN_KEY = "moreTools.pushToken"; // shared with the rest of the app
+export const ACTIVE_TRACK_KEY = "liveTracking.active"; // web screen: one train
+export const NATIVE_TRACKED_KEY = "liveTracking.nativeTracked"; // native screen: list
+const MAX_AGE_MS = 3 * 24 * 3600 * 1000; // a multi-day run still fits
+
+export async function saveActiveTrack(params) {
+  try { await AsyncStorage.setItem(ACTIVE_TRACK_KEY, JSON.stringify({ ...params, startedAt: Date.now() })); } catch (e) { /* ignore */ }
+}
+
+export async function loadActiveTrack() {
+  try {
+    const raw = await AsyncStorage.getItem(ACTIVE_TRACK_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    if (!v || !v.trainNumber || Date.now() - (v.startedAt || 0) > MAX_AGE_MS) {
+      await AsyncStorage.removeItem(ACTIVE_TRACK_KEY);
+      return null;
+    }
+    return v;
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function clearActiveTrack() {
+  try { await AsyncStorage.removeItem(ACTIVE_TRACK_KEY); } catch (e) { /* ignore */ }
+}
+
+export async function saveNativeTracked(list) {
+  try {
+    await AsyncStorage.setItem(NATIVE_TRACKED_KEY, JSON.stringify((list || []).map((t) => ({ ...t, startedAt: t.startedAt || Date.now() }))));
+  } catch (e) { /* ignore */ }
+}
+
+export async function loadNativeTracked() {
+  try {
+    const raw = await AsyncStorage.getItem(NATIVE_TRACKED_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return (Array.isArray(list) ? list : []).filter((t) => t && t.trainNumber && Date.now() - (t.startedAt || 0) < MAX_AGE_MS);
+  } catch (e) {
+    return [];
+  }
+}
+
+/** Returns a push token without prompting unless `prompt` is true. */
+async function getToken(apiBaseUrl, prompt) {
+  let token = null;
+  let platform = null;
+  let reason = null;
+  try {
+    const fresh = await refreshWebPushToken(); // web: current (possibly rotated) token, no prompt
+    if (fresh && fresh.token) { token = fresh.token; platform = fresh.platform; }
+  } catch (e) { /* ignore */ }
+  if (!token) {
+    try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
+  }
+  if (!token && prompt) {
+    const r = await registerForPushNotifications();
+    token = r.token || null;
+    platform = r.platform || null;
+    reason = r.reason || null;
+  }
+  if (token) {
+    try { await AsyncStorage.setItem(PUSH_TOKEN_KEY, token); } catch (e) { /* ignore */ }
+    try { await registerPushToken(apiBaseUrl, token, platform); } catch (e) { /* the tracking call self-registers too */ }
+  }
+  return { token, reason };
+}
+
+/**
+ * Registers the tracked train for background push. Never throws.
+ * Returns { ok: true } or { ok: false, reason }.
+ */
+export async function enableBackgroundTracking(apiBaseUrl, { trainNumber, date, source, dest }, { prompt = true } = {}) {
+  const { token, reason } = await getToken(apiBaseUrl, prompt);
+  if (!token) return { ok: false, reason: reason || "Notifications are off — allow notifications to keep tracking after you close the app." };
+  try {
+    await startBackgroundTracking(apiBaseUrl, token, { trainNumber, date, source, dest });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: "Couldn't reach the server to start background tracking — it'll retry next time the app opens." };
+  }
+}
+
+export async function disableBackgroundTracking(apiBaseUrl, { trainNumber, date } = {}) {
+  let token = null;
+  try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
+  if (!token) return;
+  try { await stopBackgroundTracking(apiBaseUrl, token, { trainNumber, date }); } catch (e) { /* best-effort */ }
+}

@@ -47,6 +47,10 @@ const messaging = firebase.messaging();
 // notification appeared anyway via the SDK's internal auto-display first.
 messaging.onBackgroundMessage((payload) => {
   console.log("[push-sw] onBackgroundMessage fired:", payload);
+  // BUGFIX (duplicate notifications): a push with a `notification` block is
+  // ALREADY displayed by the Firebase SDK itself — showing it again here
+  // produced two copies of every alert. Only data-only pushes are shown here.
+  if (payload && payload.notification) return;
   const title = payload.notification?.title || "Train delay alert";
   const body = payload.notification?.body || "";
   // SMS-style presentation, matching mobile-app/public/firebase-messaging-sw.js:
@@ -72,10 +76,9 @@ messaging.onBackgroundMessage((payload) => {
     tag: (function (d) {
       d = d || {};
       var type = d.type || "railway-alert";
-      var train = d.train_number ? "-" + d.train_number : "";
-      var st = (type === "smart_alarm" || type === "station_reached") && (d.station || d.predicted_for_station)
-        ? "-" + (d.station || d.predicted_for_station) : "";
-      return type + train + st;
+      if (type === "smart_alarm") return "smart_alarm-" + (d.train_number || "") + "-" + (d.station || "");
+      if (type === "fare_alert") return "fare_alert-" + (d.train_number || "");
+      return d.train_number ? "train-" + d.train_number : type;
     })(payload.data),
     renotify: true,
   }).then(() => {

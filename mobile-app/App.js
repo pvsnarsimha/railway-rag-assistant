@@ -8,7 +8,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { SettingsProvider } from "./src/context/SettingsContext";
 import { colors } from "./src/theme/colors";
-import { configureForegroundNotificationHandler, addNotificationResponseListener } from "./src/services/pushNotifications";
+import { configureForegroundNotificationHandler, addNotificationResponseListener, registerOfflineShell } from "./src/services/pushNotifications";
 
 import ChatScreen from "./src/screens/ChatScreen";
 import LiveTrackingScreen from "./src/screens/LiveTrackingScreen";
@@ -79,9 +79,10 @@ export default function App() {
   // tracking screen from it.
   useEffect(() => {
     configureForegroundNotificationHandler();
+    registerOfflineShell();
     const unsubscribe = addNotificationResponseListener((response) => {
       const data = response?.notification?.request?.content?.data;
-      if (data?.type === "delay_alert" || data?.type === "station_reached") {
+      if (data?.type === "delay_alert" || data?.type === "station_reached" || data?.type === "running_status") {
         console.log("[push] notification tapped:", data);
       }
     });

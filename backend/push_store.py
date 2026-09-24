@@ -142,6 +142,31 @@ def _init_db():
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alarm_watches_token ON alarm_watches(token)")
+        # FEATURE: background Live Tracking (RailYatri-style). One row per
+        # (device, train, date) the user was tracking when they closed the
+        # app — alert_scheduler.run_tracking_check_once keeps pushing a
+        # silent, in-place running-status update for it ("Crossed X at
+        # HH:MM · N km to Y") until the journey completes, the user taps
+        # Stop, or the row expires. last_signature dedupes: a push only
+        # goes out when the train has really moved on (new crossed point /
+        # next halt / delay moved 5+ min) or on a slow refresh cadence.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tracking_watches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL,
+                train_number TEXT NOT NULL,
+                date TEXT,
+                source TEXT,
+                dest TEXT,
+                last_signature TEXT,
+                last_pushed_at REAL,
+                created_at REAL NOT NULL,
+                UNIQUE(token, train_number, date)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tracking_watches_token ON tracking_watches(token)")
 
 
 @contextmanager
@@ -179,6 +204,7 @@ def unregister_token(token: str) -> None:
         conn.execute("DELETE FROM watches WHERE token = ?", (token,))
         conn.execute("DELETE FROM fare_watches WHERE token = ?", (token,))
         conn.execute("DELETE FROM alarm_watches WHERE token = ?", (token,))
+        conn.execute("DELETE FROM tracking_watches WHERE token = ?", (token,))
         conn.execute("DELETE FROM device_tokens WHERE token = ?", (token,))
 
 
@@ -449,3 +475,85 @@ def mark_alarm_fired(watch_id: int) -> None:
 
 
 _init_db()
+
+
+# =============================================================================
+# FEATURE: background Live Tracking watches (see tracking_watches above).
+# A device tracks at most a few trains at once; starting to track a train
+# upserts its row (keeping dedupe state if it already existed), Stop deletes it.
+# =============================================================================
+MAX_TRACKING_PER_DEVICE = 3
+TRACKING_WATCH_MAX_AGE_SECONDS = 3 * 24 * 3600  # a multi-day run still fits
+
+
+def upsert_tracking_watch(token: str, train_number: str, date: Optional[str],
+                          source: Optional[str] = None, dest: Optional[str] = None) -> None:
+    train_number = str(train_number or "").strip()
+    if not token or not train_number:
+        return
+    now = time.time()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tracking_watches (token, train_number, date, source, dest, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(token, train_number, date) DO UPDATE SET
+                source = excluded.source, dest = excluded.dest
+            """,
+            (token, train_number, date or None, source or None, dest or None, now),
+        )
+        # Keep only the most recent few per device.
+        rows = conn.execute(
+            "SELECT id FROM tracking_watches WHERE token = ? ORDER BY created_at DESC", (token,)
+        ).fetchall()
+        for r in rows[MAX_TRACKING_PER_DEVICE:]:
+            conn.execute("DELETE FROM tracking_watches WHERE id = ?", (r["id"],))
+
+
+def delete_tracking_watch(token: str, train_number: Optional[str] = None, date: Optional[str] = None) -> int:
+    with _connect() as conn:
+        if train_number is None:
+            cur = conn.execute("DELETE FROM tracking_watches WHERE token = ?", (token,))
+        elif date is None:
+            cur = conn.execute("DELETE FROM tracking_watches WHERE token = ? AND train_number = ?",
+                               (token, str(train_number).strip()))
+        else:
+            cur = conn.execute(
+                "DELETE FROM tracking_watches WHERE token = ? AND train_number = ? AND (date = ? OR date IS NULL)",
+                (token, str(train_number).strip(), date),
+            )
+        return cur.rowcount
+
+
+def delete_tracking_watch_by_id(watch_id: int) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM tracking_watches WHERE id = ?", (watch_id,))
+
+
+def list_tracking_watches_for_token(token: str) -> List[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM tracking_watches WHERE token = ?", (token,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_all_tracking_watches() -> List[dict]:
+    """Used by alert_scheduler.run_tracking_check_once. Expired rows are
+    pruned here so a forgotten watch can't push forever."""
+    cutoff = time.time() - TRACKING_WATCH_MAX_AGE_SECONDS
+    with _connect() as conn:
+        conn.execute("DELETE FROM tracking_watches WHERE created_at < ?", (cutoff,))
+        rows = conn.execute("SELECT * FROM tracking_watches").fetchall()
+        return [dict(r) for r in rows]
+
+
+def count_tracking_watches() -> int:
+    with _connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM tracking_watches").fetchone()[0]
+
+
+def mark_tracking_pushed(watch_id: int, signature: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE tracking_watches SET last_signature = ?, last_pushed_at = ? WHERE id = ?",
+            (signature, time.time(), watch_id),
+        )

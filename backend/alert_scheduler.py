@@ -122,7 +122,8 @@ def _push_one(w: dict, delay: int, predicted_station: Optional[str]) -> dict:
     return result
 
 
-def _push_station_status(w: dict, station: Optional[str], message: str, actual_time: Optional[str]) -> dict:
+def _push_station_status(w: dict, station: Optional[str], message: str, actual_time: Optional[str],
+                         running: Optional[dict] = None) -> dict:
     """
     Send-and-record step for the "already reached" station-status message
     (see _predict_for_watch_station in app.py) — separate from _push_one
@@ -133,7 +134,7 @@ def _push_station_status(w: dict, station: Optional[str], message: str, actual_t
     """
     result = push_notifications.send_station_status_alert(
         token=w["token"], train_number=w["train_number"], label=w.get("label"),
-        station=station, message=message, actual_time=actual_time,
+        station=station, message=message, actual_time=actual_time, running=running,
     )
     if result["sent"]:
         push_store.mark_notified(w["id"], _ALREADY_REACHED_SENTINEL)
@@ -170,11 +171,12 @@ def _resolve_prediction(predict_fn, w: dict):
     result = predict_fn(w["train_number"], w.get("date"), w.get("label"))
     if isinstance(result, dict):
         return (result.get("status", "predicted"), result.get("delay_minutes"),
-                result.get("station"), result.get("message"), result.get("actual_time"))
+                result.get("station"), result.get("message"), result.get("actual_time"),
+                result.get("running"))
     if isinstance(result, tuple):
         delay, station = result
-        return ("predicted" if delay is not None else "unavailable", delay, station, None, None)
-    return ("predicted" if result is not None else "unavailable", result, None, None, None)
+        return ("predicted" if delay is not None else "unavailable", delay, station, None, None, None)
+    return ("predicted" if result is not None else "unavailable", result, None, None, None, None)
 
 
 def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[int], Optional[str]]"]) -> dict:
@@ -190,6 +192,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
     # + station — look each (train, date, station) up once per pass and
     # share the result, instead of one live-status fetch per watch.
     prediction_cache = {}
+    running_by_train = {}
 
     for w in watches:
         checked += 1
@@ -197,7 +200,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
             cache_key = (str(w["train_number"]), w.get("date"), (w.get("label") or "").strip().upper())
             if cache_key not in prediction_cache:
                 prediction_cache[cache_key] = _resolve_prediction(predict_fn, w)
-            status, delay, predicted_station, message, actual_time = prediction_cache[cache_key]
+            status, delay, predicted_station, message, actual_time, running = prediction_cache[cache_key]
         except Exception as e:  # noqa: BLE001 - one bad watch shouldn't kill the pass
             logger.warning("Prediction failed for watch id=%s train=%s: %s", w["id"], w["train_number"], e)
             continue
@@ -230,7 +233,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
             last_notified = w.get("last_notified_delay")
             if last_notified == _ALREADY_REACHED_SENTINEL:
                 continue  # already told this device this station was reached
-            result = _push_station_status(w, predicted_station, message or "", actual_time)
+            result = _push_station_status(w, predicted_station, message or "", actual_time, running)
             if result["sent"]:
                 logger.info("PUSH sent (already reached, one-time) watch id=%s train=%s station=%s",
                             w["id"], w["train_number"], predicted_station)
@@ -244,6 +247,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
         breached += 1
         # Collected, not pushed yet — see the grouping pass below.
         groups.setdefault((w["token"], w["train_number"], w.get("date")), []).append((w, delay, predicted_station))
+        running_by_train[(str(w["train_number"]), w.get("date"))] = running
 
     # BUGFIX ("notification every 2 minutes after I closed the app"): each
     # per-station bell is its own watch with its own repeat clock. Several
@@ -272,6 +276,7 @@ def run_check_once(predict_fn: Callable[[str, Optional[str]], "tuple[Optional[in
             token=head_w["token"], train_number=train_number, label=head_w.get("label"),
             predicted_delay_minutes=head_delay, predicted_for_station=head_station,
             stations_summary=summary_text,
+            running=running_by_train.get((str(train_number), _date)),
         )
         if result["sent"]:
             pushed += 1
@@ -558,12 +563,110 @@ def check_and_push_alarm_for_train(train_number: str, date: Optional[str],
     return {"checked": checked, "due": due, "pushed": pushed, "push_failed": push_failed}
 
 
+# =============================================================================
+# FEATURE: background Live Tracking (RailYatri-style) — keeps tracking the
+# train the user had open even after they close/exit the app. Each device's
+# tracking_watches row (registered by the Live Tracking screen on "Start
+# tracking", removed on "Stop") gets a SILENT running-status push that
+# replaces the same per-train notification in place:
+#     "12625 Kerala Exp · 15 min late"
+#     "Crossed Aluva at 17:54 · 26 km to Thrissur"
+#     "Next halt Thrissur exp. 17:43 (15 min late)"
+# A push only goes out when the train has really moved on (see
+# running_status.signature) or every TRACKING_REFRESH_MINUTES as a slow
+# heartbeat on web (Expo/native only on real change — Expo can't replace a
+# notification in place, so a heartbeat there would stack duplicates).
+# The watch retires itself with one final "Reached <destination>" push.
+# =============================================================================
+DEFAULT_TRACKING_CHECK_INTERVAL_MINUTES = 2
+TRACKING_REFRESH_MINUTES = 10
+
+
+def run_tracking_check_once(status_fn: Callable[[str, Optional[str]], dict]) -> dict:
+    """`status_fn(train_number, date) -> dict` with a "running" snapshot —
+    app.py passes a wrapper around _predict_for_watch_station (the SAME
+    live pipeline delay alerts use), so this never diverges from them."""
+    import running_status  # local import: keeps this module importable in isolation
+
+    watches = push_store.list_all_tracking_watches()
+    checked, pushed, push_failed, retired = 0, 0, 0, 0
+    cache = {}
+    now = time.time()
+    for w in watches:
+        checked += 1
+        key = (str(w["train_number"]), w.get("date"))
+        try:
+            if key not in cache:
+                cache[key] = status_fn(w["train_number"], w.get("date")) or {}
+            result = cache[key]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Tracking status failed for train=%s: %s", w["train_number"], e)
+            continue
+        rs = result.get("running")
+        if not rs:
+            continue
+        sig = running_status.signature(rs)
+        final = bool(rs.get("completed")) or result.get("status") == "journey_completed"
+        changed = sig != (w.get("last_signature") or "")
+        is_expo = push_notifications._is_expo_token(w["token"])
+        heartbeat_due = (not is_expo) and (
+            w.get("last_pushed_at") is None
+            or now - w["last_pushed_at"] >= TRACKING_REFRESH_MINUTES * 60 - _REPEAT_SLACK_SECONDS
+        )
+        if not (changed or heartbeat_due or final):
+            continue
+        res = push_notifications.send_running_status(w["token"], w["train_number"], rs, final=final)
+        if res["sent"]:
+            pushed += 1
+            if final:
+                push_store.delete_tracking_watch_by_id(w["id"])
+                retired += 1
+            else:
+                push_store.mark_tracking_pushed(w["id"], sig)
+        else:
+            push_failed += 1
+            logger.warning("Tracking push failed id=%s: %s", w["id"], res["error"])
+            error_text = (res["error"] or "").lower().replace(" ", "").replace("-", "")
+            if "notregistered" in error_text or "notfound" in error_text or "invalidregistration" in error_text:
+                push_store.unregister_token(w["token"])
+    summary = {"checked": checked, "pushed": pushed, "push_failed": push_failed, "retired": retired}
+    if checked:
+        logger.info("Tracking scheduler pass: %s", summary)
+    return summary
+
+
+def keep_alive_ping() -> None:
+    """Render's free plan puts a web service to sleep after ~15 min with no
+    INBOUND request — and a sleeping process runs no scheduler, so a closed
+    app would stop getting updates. While at least one background tracking
+    watch (or alarm) is active, ping our own public URL so the service stays
+    awake exactly as long as someone is being tracked, and no longer."""
+    import os
+    import requests
+
+    url = (os.environ.get("KEEP_ALIVE_URL") or os.environ.get("PUBLIC_APP_URL") or "").strip().rstrip("/")
+    if not url.startswith("https://"):
+        return
+    try:
+        active = push_store.count_tracking_watches() + len(push_store.list_all_alarm_watches_with_tokens())
+    except Exception:  # noqa: BLE001
+        active = 0
+    if not active:
+        return
+    try:
+        requests.get(f"{url}/api/health", timeout=20)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("keep-alive ping failed: %s", e)
+
+
 def start(
     predict_fn: Callable[[str, Optional[str]], Optional[int]], interval_minutes: int = DEFAULT_INTERVAL_MINUTES,
     fare_check_fn: Optional[Callable[[str, str, str, Optional[str], str, str], dict]] = None,
     fare_check_interval_minutes: int = DEFAULT_FARE_CHECK_INTERVAL_MINUTES,
     alarm_check_fn: Optional[Callable[[str, str, Optional[str], float], dict]] = None,
     alarm_check_interval_minutes: int = DEFAULT_ALARM_CHECK_INTERVAL_MINUTES,
+    tracking_status_fn: Optional[Callable[[str, Optional[str]], dict]] = None,
+    tracking_interval_minutes: int = DEFAULT_TRACKING_CHECK_INTERVAL_MINUTES,
 ):
     """
     Starts the background job(s). Safe to call even if firebase-admin/
@@ -623,6 +726,21 @@ def start(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=300,
+        )
+    if tracking_status_fn is not None:
+        _scheduler.add_job(
+            run_tracking_check_once,
+            args=[tracking_status_fn],
+            trigger="interval",
+            minutes=tracking_interval_minutes,
+            id="background_tracking_push",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300,
+        )
+        _scheduler.add_job(
+            keep_alive_ping, trigger="interval", minutes=10, id="keep_alive_ping",
+            max_instances=1, coalesce=True, misfire_grace_time=300,
         )
     _scheduler.start()
     logger.info(

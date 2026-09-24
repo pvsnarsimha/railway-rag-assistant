@@ -55,13 +55,14 @@ def _is_expo_token(token: str) -> bool:
     return token.startswith("ExponentPushToken[") or token.startswith("ExpoPushToken[")
 
 
-def _send_via_expo(token: str, title: str, body: str, data: dict) -> dict:
+def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optional[str] = "default") -> dict:
     """Never raises — same never-raises contract as the FCM senders below,
     so alert_scheduler.py can keep going on a per-token failure."""
     try:
         resp = requests.post(
             _EXPO_PUSH_URL,
-            json={"to": token, "title": title, "body": body, "data": data, "sound": "default"},
+            json={k: v for k, v in {"to": token, "title": title, "body": body, "data": data,
+                                    "sound": sound}.items() if v is not None},
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=10,
         )
@@ -147,7 +148,14 @@ def _notification_icon_url() -> Optional[str]:
     return None
 
 
-def _webpush_config(title: str, body: str, tag: str):
+def _train_tag(train_number) -> str:
+    """ONE notification slot per train (RailYatri-style): delay alerts,
+    station-reached notices and the background running-status update all
+    replace each other in place instead of stacking up as separate cards."""
+    return f"train-{train_number}"
+
+
+def _webpush_config(title: str, body: str, tag: str, renotify: bool = True, silent: bool = False):
     """
     FEATURE: SMS-style push presentation. A bare WebpushNotification(title,
     body) — what every send_* below used before this — renders as a thin,
@@ -174,9 +182,10 @@ def _webpush_config(title: str, body: str, tag: str):
         icon=icon_url,
         badge=icon_url,
         tag=tag,
-        renotify=True,
+        renotify=renotify,
+        silent=silent or None,
         require_interaction=True,
-        vibrate=[200, 100, 200, 100, 200],
+        vibrate=None if silent else [200, 100, 200, 100, 200],
     )
     webpush_kwargs = {"notification": webpush_notification}
     public_url = os.environ.get("PUBLIC_APP_URL", "").strip()
@@ -189,6 +198,7 @@ def send_delay_alert(
     token: str, train_number: str, label: Optional[str], predicted_delay_minutes: int,
     predicted_for_station: Optional[str] = None,
     stations_summary: Optional[str] = None,
+    running: Optional[dict] = None,
 ) -> dict:
     """
     Send one push notification for a breached delay-alert watch.
@@ -226,12 +236,21 @@ def send_delay_alert(
             f"{display_name} is now predicted ~{predicted_delay_minutes} min late{station_phrase} "
             f"(as of {checked_at.strftime('%H:%M')})."
         )
+    # FEATURE (RailYatri-style): lead with WHERE the train is right now —
+    # "Crossed Aluva at 17:54 · 26 km to Thrissur" — then the prediction.
+    position_line = (running or {}).get("headline")
+    if position_line:
+        title = f"{train_number}" + (f" {running['train_name']}" if running.get("train_name") else "") \
+            + f" · ~{predicted_delay_minutes} min late"
+        body = f"{position_line}\n" + body
     data = {
         "type": "delay_alert",
         "train_number": str(train_number),
         "predicted_delay_minutes": str(predicted_delay_minutes),
         "predicted_for_station": predicted_for_station or "",
         "checked_at": checked_at.strftime("%H:%M"),
+        "crossed_station": (running or {}).get("crossed_station") or "",
+        "next_station": (running or {}).get("next_station") or "",
     }
 
     if _is_expo_token(token):
@@ -250,7 +269,7 @@ def send_delay_alert(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=_webpush_config(title, body, tag=f"delay_alert-{train_number}"),
+        webpush=_webpush_config(title, body, tag=_train_tag(train_number)),
     )
     try:
         messaging.send(message)
@@ -362,7 +381,7 @@ def send_alarm_alert(
 
 def send_station_status_alert(
     token: str, train_number: str, label: Optional[str], station: Optional[str],
-    message: str, actual_time: Optional[str] = None,
+    message: str, actual_time: Optional[str] = None, running: Optional[dict] = None,
 ) -> dict:
     """
     FEATURE: label-aware delay alerts — the "already reached" notice.
@@ -376,6 +395,8 @@ def send_station_status_alert(
     title = f"Train {train_number} update"
     display_name = f"{train_number}" + (f" — {label}" if label else "")
     body = f"{display_name}: {message}"
+    if (running or {}).get("headline"):
+        body = f"{running['headline']}\n{body}"
     data = {
         "type": "station_reached",
         "train_number": str(train_number),
@@ -395,7 +416,67 @@ def send_station_status_alert(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=_webpush_config(title, body, tag=f"station_reached-{train_number}-{station or ''}"),
+        webpush=_webpush_config(title, body, tag=_train_tag(train_number)),
+    )
+    try:
+        messaging.send(fcm_message)
+        return {"sent": True, "error": None}
+    except Exception as e:  # noqa: BLE001
+        return {"sent": False, "error": str(e)}
+
+
+def send_running_status(token: str, train_number: str, running: dict, final: bool = False) -> dict:
+    """
+    FEATURE: background Live Tracking (RailYatri-style ongoing status).
+    Sent by alert_scheduler.run_tracking_check_once for every train a
+    device was tracking when the app was closed. Uses the SAME per-train
+    tag as delay alerts, and is SILENT (no buzz, no re-alert) — it quietly
+    updates the one notification card in place as the train moves, the
+    way RailYatri's live-status notification does. Only the final
+    "Reached <destination>" update is allowed to alert.
+    Same never-raises contract as the other send_* functions.
+    """
+    checked_at = _ist_now()
+    name = running.get("train_name")
+    dp = running.get("delay_minutes")
+    if dp is None:
+        late = ""
+    elif dp <= 0:
+        late = " · On time"
+    else:
+        late = f" · {dp} min late"
+    title = f"{train_number}" + (f" {name}" if name else "") + late
+    lines = [running.get("headline") or "Live status updating…"]
+    if running.get("detail"):
+        lines.append(running["detail"])
+    lines.append(f"Updated {checked_at.strftime('%H:%M')}")
+    body = "\n".join(lines)
+    data = {
+        "type": "running_status",
+        "train_number": str(train_number),
+        "crossed_station": running.get("crossed_station") or "",
+        "next_station": running.get("next_station") or "",
+        "km_to_next": "" if running.get("km_to_next") is None else str(running["km_to_next"]),
+        "next_halt": running.get("next_halt") or "",
+        "next_halt_eta": running.get("next_halt_eta") or "",
+        "delay_minutes": "" if dp is None else str(dp),
+        "completed": "1" if running.get("completed") else "0",
+        "checked_at": checked_at.strftime("%H:%M"),
+    }
+
+    if _is_expo_token(token):
+        return _send_via_expo(token, title, body, data, sound="default" if final else None)
+
+    if not _ensure_initialized():
+        return {"sent": False, "error": _init_error}
+
+    from firebase_admin import messaging
+
+    fcm_message = messaging.Message(
+        token=token,
+        notification=messaging.Notification(title=title, body=body),
+        data=data,
+        webpush=_webpush_config(title, body, tag=_train_tag(train_number), renotify=final, silent=not final),
     )
     try:
         messaging.send(fcm_message)

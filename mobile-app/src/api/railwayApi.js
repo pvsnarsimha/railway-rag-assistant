@@ -808,3 +808,38 @@ export function buildTrackShareUrl(apiBaseUrl, trainNumber, date) {
 export function buildTripShareUrl(apiBaseUrl, shareId) {
   return `${apiBaseUrl.replace(/\/+$/, "")}/trip/${encodeURIComponent(shareId)}`;
 }
+/**
+ * FEATURE: background Live Tracking (RailYatri-style). Registers the train
+ * this device is tracking so the server keeps pushing a silent, in-place
+ * "Crossed X at HH:MM · N km to Y" notification after the app is closed.
+ * See backend/alert_scheduler.py's run_tracking_check_once.
+ */
+export async function startBackgroundTracking(baseUrl, token, { trainNumber, date, source, dest }) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.post("/api/push/tracking", {
+    token, train_number: trainNumber, date: date || null, source: source || null, dest: dest || null,
+  });
+  return data;
+}
+
+export async function stopBackgroundTracking(baseUrl, token, { trainNumber, date } = {}) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.post("/api/push/tracking/stop", {
+    token, train_number: trainNumber || null, date: date || null,
+  });
+  return data;
+}
+
+/** Compact running-status snapshot (same text the background push uses). */
+export async function fetchRunningStatus(baseUrl, trainNumber, date) {
+  const client = makeClient(baseUrl);
+  const q = date ? `?date=${encodeURIComponent(date)}` : "";
+  const { data } = await client.get(`/api/train/running-status/${encodeURIComponent(trainNumber)}${q}`);
+  return data;
+}
+
+/** Generic POST returning response data — used by utils/cellTower.js. */
+export function makePoster(baseUrl) {
+  const client = makeClient(baseUrl, { timeoutMs: 15000 });
+  return (path, body) => client.post(path, body).then((r) => r.data);
+}

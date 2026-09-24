@@ -17,6 +17,10 @@ import { describeApiError } from "../api/client";
 import { registerForPushNotifications, refreshWebPushToken, scheduleLocalAlarm, cancelLocalAlarm } from "../services/pushNotifications";
 import { formatDelayDuration } from "../utils/formatDelay";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
+import OfflineTrackingCard from "../components/OfflineTrackingCard";
+import {
+  saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
+} from "../services/backgroundTracking";
 
 // FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
 // instead of living only inside the separate "More Tools" menu (per
@@ -538,6 +542,8 @@ export default function LiveTrackingScreen({ navigation }) {
   }, [payload?.current_station]);
   const [refreshing, setRefreshing] = useState(false);
   const wsRef = useRef(null);
+  // Background-tracking status line under the Start/Stop buttons.
+  const [bgTracking, setBgTracking] = useState(null); // null | {state:"pending"|"on"|"off", reason?}
 
   // BUGFIX: auto-reconnect so the timeline/marker keep updating on their
   // own once tracking has started, instead of going stale the moment the
@@ -1286,18 +1292,28 @@ export default function LiveTrackingScreen({ navigation }) {
   // auto-reconnect (manualStopRef = false), even after a prior "Stop".
   function connect() {
     if (!trainNumber.trim()) return;
+    startTracking({
+      trainNumber: trainNumber.trim(),
+      date: trackDate.trim(),
+      source: source.trim(),
+      dest: dest.trim(),
+    }, false);
+  }
+
+  // FEATURE (RailYatri-style "keeps tracking after you close the app"):
+  // shared by the Start button AND the automatic resume on app open.
+  //   - remembers the train on the device (auto-resume next launch),
+  //   - registers it with the server so a silent running-status push keeps
+  //     updating after the app is closed (see services/backgroundTracking.js).
+  // fromResume = true never pops a notification-permission prompt.
+  function startTracking(params, fromResume) {
+    if (!params || !params.trainNumber) return;
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
     reconnectDelayRef.current = 3000;
     manualStopRef.current = false;
-    const params = {
-      trainNumber: trainNumber.trim(),
-      date: trackDate.trim(),
-      source: source.trim(),
-      dest: dest.trim(),
-    };
     activeParamsRef.current = params;
     // Pin the bells / delay alerts to THIS train + run date (blank = today,
     // pinned now so it can't drift past midnight) — see activeTrack above.
@@ -1306,7 +1322,47 @@ export default function LiveTrackingScreen({ navigation }) {
       ? prev
       : { trainNumber: params.trainNumber, date: trackedDate }));
     openSocket(params, false);
+
+    // Pin the run date (a blank "today" must not drift to tomorrow's run
+    // when the app is reopened after midnight on an overnight journey).
+    saveActiveTrack({ ...params, date: params.date || trackedDate });
+    setBgTracking({ state: "pending" });
+    enableBackgroundTracking(
+      apiBaseUrl,
+      { trainNumber: params.trainNumber, date: trackedDate, source: params.source, dest: params.dest },
+      { prompt: !fromResume },
+    ).then((r) => setBgTracking(r.ok ? { state: "on" } : { state: "off", reason: r.reason }));
   }
+
+  // "Stop" is the ONLY thing that ends tracking for good — leaving the
+  // screen or closing the app keeps it going in the background.
+  function stopTracking() {
+    const params = activeParamsRef.current;
+    disconnect();
+    clearActiveTrack();
+    setBgTracking(null);
+    if (params && params.trainNumber) {
+      disableBackgroundTracking(apiBaseUrl, { trainNumber: params.trainNumber, date: effectiveTrackDate(params.date) });
+    }
+  }
+
+  // Auto-resume on app open: reconnect to whatever was being tracked
+  // before the app was closed — no re-typing, no pressing Start again.
+  useEffect(() => {
+    let cancelled = false;
+    loadActiveTrack().then((saved) => {
+      if (cancelled || !saved || activeParamsRef.current) return;
+      const params = {
+        trainNumber: saved.trainNumber, date: saved.date || "", source: saved.source || "", dest: saved.dest || "",
+      };
+      setTrainNumber(params.trainNumber);
+      setTrackDate(params.date);
+      setSource(params.source);
+      setDest(params.dest);
+      startTracking(params, true);
+    });
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const timeline = payload?.timeline || [];
   // FEATURE: "no current station" fallback — same reasoning as the web
@@ -1480,8 +1536,24 @@ export default function LiveTrackingScreen({ navigation }) {
         </View>
         <View style={styles.row}>
           <PrimaryButton title={connection === "open" ? "Reconnect" : "Start tracking"} onPress={connect} loading={connection === "connecting"} style={styles.half} />
-          <PrimaryButton title="Stop" variant="secondary" onPress={disconnect} style={styles.half} />
+          <PrimaryButton title="Stop" variant="secondary" onPress={stopTracking} style={styles.half} />
         </View>
+        {bgTracking && (
+          <View style={styles.bgTrackRow}>
+            <Ionicons
+              name={bgTracking.state === "on" ? "notifications" : bgTracking.state === "pending" ? "time-outline" : "notifications-off-outline"}
+              size={14}
+              color={bgTracking.state === "on" ? colors.success : colors.textMuted}
+            />
+            <Text style={styles.bgTrackText}>
+              {bgTracking.state === "on"
+                ? "Background tracking on — you'll keep getting live status notifications after you close the app. Tap Stop to end it."
+                : bgTracking.state === "pending"
+                  ? "Turning on background tracking…"
+                  : bgTracking.reason || "Background tracking is off."}
+            </Text>
+          </View>
+        )}
         <View style={styles.row}>
           <ConnectionBadge connection={connection} />
           {connection === "open" && (
@@ -1514,6 +1586,15 @@ export default function LiveTrackingScreen({ navigation }) {
           )}
         </View>
         {shareLinkNote && <Text style={styles.errorText}>{shareLinkNote}</Text>}
+        {activeTrack && (
+          <OfflineTrackingCard
+            trainNumber={activeTrack.trainNumber}
+            date={activeTrack.date}
+            payload={payload}
+            connection={connection}
+            apiBaseUrl={apiBaseUrl}
+          />
+        )}
         <TouchableOpacity onPress={toggleMap} style={styles.mapToggleBtn}>
           <Ionicons name="map-outline" size={14} color={colors.primary} />
           <Text style={styles.mapToggleBtnText}>{showMap ? "Hide train on map" : "🗺️ Train on map"}</Text>
@@ -2359,6 +2440,8 @@ function TimelineStopRow({
 }
 
 const styles = StyleSheet.create({
+  bgTrackRow: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginTop: spacing.sm },
+  bgTrackText: { flex: 1, fontSize: 12, color: colors.textMuted },
   flex: { flex: 1, backgroundColor: colors.bg },
   content: { padding: spacing.lg },
   row: { flexDirection: "row", gap: spacing.md, alignItems: "center" },
