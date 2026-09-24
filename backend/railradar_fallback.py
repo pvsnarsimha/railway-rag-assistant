@@ -85,7 +85,10 @@ def _api_key() -> Optional[str]:
     return os.environ.get("RAILRADAR_API_KEY") or None
 
 
-@cached(ttl_seconds=60, prefix="railradar_fallback_live")
+# RailRadar is now the PRIMARY live source for Live Tracking and alerts
+# (see quick_live.railradar_primary) — a 30s cache keeps the live position
+# fresh while still sharing one request per train across every viewer.
+@cached(ttl_seconds=30, prefix="railradar_fallback_live")
 def _fetch_raw(train_number: str, date_iso: Optional[str] = None) -> dict:
     """GET RailRadar's live-status endpoint.
 
@@ -688,13 +691,20 @@ def get_route_delay_history(train_number: str, lookback_days: int = _ROUTE_HISTO
     today = datetime.now()
 
     per_station_delays: dict = {}
-    for i in range(1, lookback_days + 1):
-        day = today - timedelta(days=i)
-        date_ddmmyyyy = day.strftime("%d-%m-%Y")
+    # SPEED: the past days are independent requests — fetch them in
+    # parallel instead of one after another (14 serial RailRadar calls used
+    # to add many seconds to the first Live Tracking load of a train).
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(i):
         try:
-            stops = fetch_railradar_timeline(train_number, date_ddmmyyyy)
+            return fetch_railradar_timeline(train_number, (today - timedelta(days=i)).strftime("%d-%m-%Y"))
         except Exception:
-            stops = []
+            return []
+
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        all_stops = list(pool.map(_one, range(1, lookback_days + 1)))
+    for stops in all_stops:
         for stop in stops:
             if stop.status != "passed":
                 continue
@@ -717,6 +727,31 @@ def get_route_delay_history(train_number: str, lookback_days: int = _ROUTE_HISTO
             "max_delay_minutes": max(delays),
         }
     return result
+
+
+_route_history_inflight: dict = {}
+
+
+def get_route_delay_history_nonblocking(train_number: str) -> dict:
+    """Route history for the live pipeline WITHOUT ever blocking it: the
+    cached result if there is one, otherwise {} right away while ONE
+    background thread builds it (ready on a later poll)."""
+    import threading
+    from api_cache import peek
+    val = peek("railradar_route_history", (train_number,), {})
+    if val is not None:
+        return val
+    t = _route_history_inflight.get(train_number)
+    if t is None or not t.is_alive():
+        def _bg():
+            try:
+                get_route_delay_history(train_number)
+            except Exception:
+                pass
+        t = threading.Thread(target=_bg, daemon=True)
+        _route_history_inflight[train_number] = t
+        t.start()
+    return {}
 
 
 def get_route_delay_history_diagnostics(train_number: str, lookback_days: int = _ROUTE_HISTORY_DEFAULT_LOOKBACK_DAYS) -> dict:

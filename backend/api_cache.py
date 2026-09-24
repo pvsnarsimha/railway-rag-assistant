@@ -95,6 +95,18 @@ def entry_fetched_at(prefix: str, args=(), kwargs=None) -> float | None:
         return entry.get("fetched_at") if entry else None
 
 
+def peek(prefix: str, args=(), kwargs=None):
+    """The cached value for this key if present and not expired, else None.
+    Never fetches, never raises."""
+    kwargs = {k: v for k, v in (kwargs or {}).items() if k != "_force_refresh"}
+    key = _make_key(prefix, args, kwargs)
+    with _lock:
+        entry = _cache.get(key)
+        if entry and entry["expires_at"] > time.time():
+            return entry["value"]
+    return None
+
+
 def cache_stats() -> dict:
     """For a diagnostic endpoint - how many entries are cached right now."""
     with _lock:

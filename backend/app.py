@@ -720,18 +720,23 @@ def _fetch_timeline_with_predictions(train_number: str, date: Optional[str], tra
     otherwise so a caller can still show what IS known (e.g. current position)
     even with an empty/short timeline.
     """
-    try:
-        live_data = railway_api.get_live_train_status(train_number, date)
-    except railway_api.RailwayAPIError:
-        return None, None
-    train_info_data = None
-    try:
-        train_info_data = railway_api.get_train_info(train_number)
-    except railway_api.RailwayAPIError:
-        pass
+    rr = quick_live.railradar_primary(train_number, date)  # "99% RailRadar"
+    if rr is not None:
+        timeline_stops, position, _rr_start, _rr_fetched = rr
+        train_info_data = quick_live.train_info_nonblocking(train_number)
+    else:
+        try:
+            live_data = railway_api.get_live_train_status(train_number, date)
+        except railway_api.RailwayAPIError:
+            return None, None
+        train_info_data = None
+        try:
+            train_info_data = railway_api.get_train_info(train_number)
+        except railway_api.RailwayAPIError:
+            pass
 
-    position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
-    timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
+        position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
+        timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
     timeline_json = gps_tracking.timeline_to_json(timeline_stops)
     if not timeline_json:
         return timeline_json, position
@@ -957,20 +962,28 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
     labels became station-aware, so existing watches with a non-station
     free-text label keep working unchanged.
     """
-    try:
-        live_data = railway_api.get_live_train_status(train_number, date)
-    except railway_api.RailwayAPIError as e:
-        return {"status": "unavailable", "delay_minutes": None, "station": None,
-                "message": f"Live status unavailable for train {train_number}: {e}"}
+    # "99% RailRadar, 1% RailKit" — same primary/fallback order as Live
+    # Tracking (see quick_live.railradar_primary), so alerts and the
+    # background running-status notification read the same fast source.
+    rr = quick_live.railradar_primary(train_number, date)
+    if rr is not None:
+        timeline_stops, position, _rr_start, _rr_fetched = rr
+        train_info_data = quick_live.train_info_nonblocking(train_number)
+    else:
+        try:
+            live_data = railway_api.get_live_train_status(train_number, date)
+        except railway_api.RailwayAPIError as e:
+            return {"status": "unavailable", "delay_minutes": None, "station": None,
+                    "message": f"Live status unavailable for train {train_number}: {e}"}
 
-    train_info_data = None
-    try:
-        train_info_data = railway_api.get_train_info(train_number)
-    except railway_api.RailwayAPIError:
-        pass
+        train_info_data = None
+        try:
+            train_info_data = railway_api.get_train_info(train_number)
+        except railway_api.RailwayAPIError:
+            pass
 
-    position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
-    timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
+        position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
+        timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
     timeline_json = gps_tracking.timeline_to_json(timeline_stops)
     if not timeline_json:
         return {"status": "unavailable", "delay_minutes": None, "station": None,
@@ -1688,7 +1701,7 @@ def _predict_delay_per_reporting_station(
                 # internet access (the sandbox that built this could not
                 # reach api.railradar.in to test it directly).
                 try:
-                    rr_history = railradar_fallback.get_route_delay_history(train_number)
+                    rr_history = railradar_fallback.get_route_delay_history_nonblocking(train_number)  # never blocks a live poll
                 except Exception:
                     rr_history = {}
                 rr_entry = rr_history.get(station_code_for_history)
@@ -5348,15 +5361,21 @@ def _warm_live_sources(train_number: Optional[str]) -> None:
     pre-fill the RailRadar / RailKit caches for this train, so "Start
     tracking" answers instantly."""
     import requests as _rq
-    try:
-        _rq.get(f"{railway_api.SERVICE_URL}/health", timeout=60)
-    except Exception:  # noqa: BLE001
-        pass
+    import threading as _th
+
+    def _wake_railkit():
+        try:
+            _rq.get(f"{railway_api.SERVICE_URL}/health", timeout=60)
+        except Exception:  # noqa: BLE001
+            pass
+    _th.Thread(target=_wake_railkit, daemon=True).start()
     if not train_number:
         return
-    for fn, args in ((railradar_fallback.fetch_railradar_timeline, (train_number,)),
-                     (railway_api.get_train_info, (train_number,)),
-                     (railway_api.get_live_train_status, (train_number, None))):
+    calls = [(railradar_fallback.fetch_railradar_timeline, (train_number,)),
+             (railway_api.get_train_info, (train_number,))]
+    if not quick_live.RAILRADAR_PRIMARY:
+        calls.append((railway_api.get_live_train_status, (train_number, None)))
+    for fn, args in calls:
         try:
             fn(*args)
         except Exception:  # noqa: BLE001
@@ -6259,10 +6278,17 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     # which the backend calls directly — see quick_live.py. The first full
     # poll below then reuses the warmed RailKit result instead of starting
     # its own fetch from scratch.
-    prewarm_tasks = [
-        asyncio.create_task(asyncio.to_thread(railway_api.get_live_train_status, train_number, requested_date_ddmmyyyy)),
-        asyncio.create_task(asyncio.to_thread(railway_api.get_train_info, train_number)),
-    ]
+    if quick_live.RAILRADAR_PRIMARY:
+        # RailRadar is the primary live source ("99% RailRadar"): nothing to
+        # pre-warm on RailKit except its once-a-day route info, fetched in the
+        # background and never waited on.
+        prewarm_tasks = None
+        quick_live.train_info_nonblocking(train_number)
+    else:
+        prewarm_tasks = [
+            asyncio.create_task(asyncio.to_thread(railway_api.get_live_train_status, train_number, requested_date_ddmmyyyy)),
+            asyncio.create_task(asyncio.to_thread(railway_api.get_train_info, train_number)),
+        ]
     prewarm_live_error = None
     if not (cached_snapshot and snapshot_age < 30):
         try:
@@ -6346,37 +6372,63 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 )
                 this_poll_force_refresh = force_refresh_next_poll or stale_past_60s
                 force_refresh_next_poll = False
-                if prewarm_tasks:
-                    # First poll: wait for the background RailKit fetch that
-                    # started when the socket opened (fills the cache), and
-                    # don't pay RailKit's timeout a second time if it failed.
-                    warm = await asyncio.gather(*prewarm_tasks, return_exceptions=True)
-                    prewarm_tasks = None
-                    if isinstance(warm[0], BaseException):
-                        prewarm_live_error = warm[0]
-                if prewarm_live_error is not None:
-                    _err, prewarm_live_error = prewarm_live_error, None
-                    raise _err
-                live_data, train_info_result = await asyncio.gather(
-                    asyncio.to_thread(railway_api.get_live_train_status, train_number, date_ddmmyyyy, _force_refresh=this_poll_force_refresh),
-                    asyncio.to_thread(railway_api.get_train_info, train_number),
-                    return_exceptions=True,
-                )
-                if isinstance(live_data, BaseException):
-                    raise live_data
-                train_info_data = None if isinstance(train_info_result, BaseException) else train_info_result
-                # The real wall-clock moment get_live_train_status's cache
-                # entry for THIS (train_number, date_ddmmyyyy) was actually
-                # last populated - whether that happened on this exact poll
-                # (a forced or naturally-expired refresh) or several polls
-                # ago (a cache hit just now). This, not datetime.now(), is
-                # what status_updated_at below reports - so "As of X ago" on
-                # the client reflects genuine data age, not poll cadence.
-                real_fetch_epoch = entry_fetched_at("live_status", (train_number, date_ddmmyyyy), {})
-                if real_fetch_epoch is not None:
-                    last_real_fetch_epoch = real_fetch_epoch
-                position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
-                timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
+                # FEATURE ("99% RailRadar, 1% RailKit"): RailRadar — called
+                # directly, answers in well under a second — is the primary
+                # live source. RailKit (only reachable through railkit-service,
+                # which sleeps on Render's free plan and then takes 30-60s) is
+                # used ONLY when RailRadar has nothing for this train. Both
+                # produce the same TimelineStop/LivePosition shapes, so the
+                # whole pipeline below runs unchanged either way.
+                rr_primary = None
+                if quick_live.RAILRADAR_PRIMARY:
+                    rr_primary = await asyncio.to_thread(
+                        quick_live.railradar_primary, train_number, date_ddmmyyyy, this_poll_force_refresh,
+                    )
+                if rr_primary is not None:
+                    live_source = "railradar"
+                    timeline_stops, position, rr_run_start, rr_fetched_epoch = rr_primary
+                    live_data = None
+                    train_info_data = quick_live.train_info_nonblocking(train_number)
+                    if rr_fetched_epoch is not None:
+                        last_real_fetch_epoch = rr_fetched_epoch
+                    if date_ddmmyyyy is None and rr_run_start:
+                        # Label the run RailRadar actually returned; the
+                        # verification pass below then checks it against
+                        # the day the user asked for.
+                        date_ddmmyyyy = rr_run_start
+                else:
+                    live_source = "railkit"
+                    if prewarm_tasks:
+                        # First poll: wait for the background RailKit fetch that
+                        # started when the socket opened (fills the cache), and
+                        # don't pay RailKit's timeout a second time if it failed.
+                        warm = await asyncio.gather(*prewarm_tasks, return_exceptions=True)
+                        prewarm_tasks = None
+                        if isinstance(warm[0], BaseException):
+                            prewarm_live_error = warm[0]
+                    if prewarm_live_error is not None:
+                        _err, prewarm_live_error = prewarm_live_error, None
+                        raise _err
+                    live_data, train_info_result = await asyncio.gather(
+                        asyncio.to_thread(railway_api.get_live_train_status, train_number, date_ddmmyyyy, _force_refresh=this_poll_force_refresh),
+                        asyncio.to_thread(railway_api.get_train_info, train_number),
+                        return_exceptions=True,
+                    )
+                    if isinstance(live_data, BaseException):
+                        raise live_data
+                    train_info_data = None if isinstance(train_info_result, BaseException) else train_info_result
+                    # The real wall-clock moment get_live_train_status's cache
+                    # entry for THIS (train_number, date_ddmmyyyy) was actually
+                    # last populated - whether that happened on this exact poll
+                    # (a forced or naturally-expired refresh) or several polls
+                    # ago (a cache hit just now). This, not datetime.now(), is
+                    # what status_updated_at below reports - so "As of X ago" on
+                    # the client reflects genuine data age, not poll cadence.
+                    real_fetch_epoch = entry_fetched_at("live_status", (train_number, date_ddmmyyyy), {})
+                    if real_fetch_epoch is not None:
+                        last_real_fetch_epoch = real_fetch_epoch
+                    position = gps_tracking.parse_live_position(train_number, live_data, train_info_data)
+                    timeline_stops = gps_tracking.parse_full_timeline(live_data, train_info_data)
 
                 # BUGFIX: self-correcting day-1 anchor. Rounds 18-23 all
                 # tried to guess, AHEAD OF TIME, which of a daily train's
@@ -6448,7 +6500,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 )
                 effective_requested_date_str = original_requested_date_str or today_str
                 current_stop_for_anchor = next((s for s in timeline_stops if s.status == "current"), None)
-                if current_stop_for_anchor is not None:
+                if current_stop_for_anchor is not None and live_source == "railkit":
                     try:
                         current_day_number = int(current_stop_for_anchor.day)
                     except (TypeError, ValueError):
@@ -7761,6 +7813,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "current_station_source": current_station_source,
                     "delay_minutes": position.delay_minutes,
                     "train_name": getattr(position, "train_name", None),
+                    "live_source": live_source,
                     "position_source": (
                         "railradar_segment_progress" if interp_lat is not None
                         else gps_tracking.position_source_label(current_timeline_entry.get("coordinates_from"))

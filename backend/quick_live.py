@@ -131,11 +131,10 @@ def build_quick_payload(train_number: str, date_ddmmyyyy: Optional[str] = None) 
     if not stops:
         return None
 
-    for fn in ("_interpolate_missing_coordinates", "_interpolate_missing_distance_km", "_annotate_distance_since_last_stoppage"):
-        try:
-            getattr(gps_tracking, fn)(stops)
-        except Exception:  # noqa: BLE001
-            pass
+    try:
+        gps_tracking.finalize_timeline_stops(stops)
+    except Exception:  # noqa: BLE001
+        pass
     timeline = gps_tracking.timeline_to_json(stops)
 
     seg = {}
@@ -221,3 +220,70 @@ def build_quick_payload(train_number: str, date_ddmmyyyy: Optional[str] = None) 
         "status_updated_at": datetime.now(timezone.utc).isoformat(),
         "error": None,
     }
+
+
+# ===========================================================================
+# RailRadar as the PRIMARY live source ("99% RailRadar, 1% RailKit").
+# RailKit is only reached through railkit-service — a separate Render
+# free-tier service that sleeps and then takes 30-60s to answer — so every
+# live read now comes from RailRadar (called directly), and RailKit is used
+# only when RailRadar has no data for the train (or no key is configured).
+# Set LIVE_PRIMARY_PROVIDER=railkit in the environment to go back.
+# ===========================================================================
+import os  # noqa: E402
+import threading  # noqa: E402
+
+import api_cache  # noqa: E402
+import railway_api  # noqa: E402
+
+RAILRADAR_PRIMARY = (os.environ.get("LIVE_PRIMARY_PROVIDER", "railradar").strip().lower() != "railkit")
+
+
+def _iso_to_ddmmyyyy(iso: Optional[str]) -> Optional[str]:
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", str(iso or ""))
+    return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+
+def railradar_primary(train_number: str, date_ddmmyyyy: Optional[str] = None, force_refresh: bool = False):
+    """Live stops + position from RailRadar, in the SAME TimelineStop /
+    LivePosition shapes the RailKit path produces, so everything downstream
+    (predictions, ETAs, alerts, grouping) runs unchanged.
+    Returns (stops, position, run_start_ddmmyyyy, fetched_epoch) or None."""
+    if not RAILRADAR_PRIMARY:
+        return None
+    iso = railradar_fallback._ddmmyyyy_to_iso(date_ddmmyyyy)
+    try:
+        data = railradar_fallback._fetch_raw(train_number, iso, _force_refresh=force_refresh)
+    except Exception:  # noqa: BLE001 - RailRadar unavailable -> caller falls back to RailKit
+        return None
+    stops = railradar_fallback.fetch_railradar_timeline(train_number, date_ddmmyyyy)  # same cache entry
+    if not stops:
+        return None
+    gps_tracking.finalize_timeline_stops(stops)
+    name = _first(data, "trainName", "train_name", "name") or _first(data.get("train") or {}, "name", "trainName")
+    position = gps_tracking.position_from_stops(train_number, stops, train_name=name)
+    fetched = api_cache.entry_fetched_at("railradar_fallback_live", (train_number, iso), {})
+    return stops, position, _iso_to_ddmmyyyy(data.get("startDate")), fetched
+
+
+_train_info_inflight: dict = {}
+
+
+def train_info_nonblocking(train_number: str):
+    """RailKit route info (station coordinates) only if already cached;
+    otherwise starts ONE background fetch and returns None right away, so a
+    sleeping railkit-service never delays live tracking."""
+    val = api_cache.peek("train_info", (train_number,), {})
+    if val is not None:
+        return val
+    t = _train_info_inflight.get(train_number)
+    if t is None or not t.is_alive():
+        def _bg():
+            try:
+                railway_api.get_train_info(train_number)
+            except Exception:  # noqa: BLE001
+                pass
+        t = threading.Thread(target=_bg, daemon=True)
+        _train_info_inflight[train_number] = t
+        t.start()
+    return None
