@@ -843,3 +843,16 @@ export function makePoster(baseUrl) {
   const client = makeClient(baseUrl, { timeoutMs: 15000 });
   return (path, body) => client.post(path, body).then((r) => r.data);
 }
+
+/**
+ * FEATURE (fast Live Tracking): fire-and-forget wake-up of the live data
+ * sources for a train (railkit-service cold start + RailRadar/RailKit
+ * caches) — called when Live Tracking opens / a train number is typed, so
+ * "Start tracking" answers instantly. Never throws.
+ */
+export function warmupLive(baseUrl, trainNumber) {
+  try {
+    const qs = trainNumber ? `?train_number=${encodeURIComponent(String(trainNumber).trim())}` : "";
+    fetch(`${String(baseUrl || "").replace(/\/$/, "")}/api/live/warmup${qs}`).catch(() => {});
+  } catch (e) { /* ignore */ }
+}

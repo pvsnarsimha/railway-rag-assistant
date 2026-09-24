@@ -1,0 +1,223 @@
+"""
+quick_live.py
+-------------
+FEATURE ("on internet it takes a lot of time to show live tracking the first
+time — use RailRadar / RapidAPI"): a FAST first frame for /ws/track.
+
+Why the first frame was slow: the full live-tracking poll goes backend ->
+railkit-service (a SEPARATE Render free-tier service that falls asleep and
+needs ~30-60s to wake) -> RailKit, and only then runs the whole prediction
+pipeline (weather, speed, RailRadar cross-checks, ML delay, ...) before the
+first message is sent. So the screen sat on "loading" for a long time.
+
+This module builds a complete, lighter payload (same shape the screen
+already renders: timeline, timeline_grouped, current/next station, lat/lng,
+km to next, ETA) straight from providers the backend calls DIRECTLY, with
+no railkit-service hop:
+  1. RailRadar live   (api.railradar.in — real crowdsourced GPS position,
+                       segment progress between stations, live speed)
+  2. RapidAPI IRCTC1  (liveTrainStatus) — used only if RailRadar has nothing.
+It is sent the moment the socket opens; the full RailKit-based poll then
+replaces it seamlessly. The same builder is the fallback whenever RailKit /
+railkit-service fails mid-session, so the screen keeps moving on RailRadar
+instead of going blank.
+
+Nothing here is invented: every station, time and position comes from the
+provider response; anything missing stays None.
+"""
+
+import re
+from datetime import datetime, timezone
+from typing import List, Optional
+
+import gps_tracking
+import railradar_fallback
+import rapidapi_provider
+import running_status
+from gps_tracking import StopTiming, TimelineStop
+
+_HHMM = re.compile(r"(\d{1,2}):(\d{2})")
+
+
+def _hhmm(v) -> Optional[str]:
+    m = _HHMM.search(str(v or ""))
+    return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
+
+
+def _int(v) -> Optional[int]:
+    try:
+        return int(round(float(v)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _first(d: dict, *keys):
+    for k in keys:
+        if isinstance(d, dict) and d.get(k) not in (None, ""):
+            return d.get(k)
+    return None
+
+
+# --------------------------------------------------------------- RapidAPI
+def _rapidapi_stops(train_number: str) -> "tuple[List[TimelineStop], Optional[str]]":
+    """IRCTC1 liveTrainStatus -> TimelineStop list. Field names follow the
+    listing's commonly documented shape (previous_stations /
+    upcoming_stations / current_station_code, station_code, station_name,
+    sta/std/eta/etd, distance_from_source, arrival_delay, stoppage flags),
+    read tolerantly; returns [] if the response doesn't look like that."""
+    try:
+        body = rapidapi_provider.get_live_train_status(train_number)
+    except Exception:  # noqa: BLE001 - quick path must never raise
+        return [], None
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        return [], None
+    prev = data.get("previous_stations") or []
+    upcoming = data.get("upcoming_stations") or []
+    cur_code = _first(data, "current_station_code", "currentStationCode")
+    train_name = _first(data, "train_name", "trainName")
+    rows = [(r, "passed") for r in prev if isinstance(r, dict)] + [(r, "upcoming") for r in upcoming if isinstance(r, dict)]
+    stops: List[TimelineStop] = []
+    for r, st in rows:
+        code = _first(r, "station_code", "stationCode")
+        name = _first(r, "station_name", "stationName") or code
+        if not code and not name:
+            continue
+        status = "current" if cur_code and code == cur_code else st
+        is_halt = not (r.get("non_stops") is True or r.get("is_non_stop") is True or r.get("isHalt") is False)
+        delay = _int(_first(r, "arrival_delay", "delay"))
+        arr = StopTiming(scheduled=_hhmm(_first(r, "sta", "scheduled_arrival")),
+                         expected=_hhmm(_first(r, "eta", "expected_arrival")),
+                         actual=_hhmm(_first(r, "eta")) if st == "passed" else None,
+                         delay_minutes=delay)
+        dep = StopTiming(scheduled=_hhmm(_first(r, "std", "scheduled_departure")),
+                         expected=_hhmm(_first(r, "etd", "expected_departure")),
+                         actual=_hhmm(_first(r, "etd")) if st == "passed" else None,
+                         delay_minutes=_int(_first(r, "departure_delay", "delay")))
+        fb = gps_tracking._lookup_station(code) if code else None
+        stops.append(TimelineStop(
+            code=code, name=name, kind="stoppage" if is_halt else "intermediate", status=status,
+            lat=(fb or {}).get("lat"), lng=(fb or {}).get("lng"),
+            coordinates_from="fallback_table" if fb else "none",
+            distance_km=_first(r, "distance_from_source", "distance"), halt_minutes=_first(r, "halt"),
+            day=_first(r, "day", "a_day"), arrival=arr, departure=dep,
+        ))
+    return stops, train_name
+
+
+def _railradar_train_name(train_number: str) -> Optional[str]:
+    try:
+        data = railradar_fallback._fetch_raw(train_number)
+    except Exception:  # noqa: BLE001
+        return None
+    return _first(data, "trainName", "train_name", "name") or _first(data.get("train") or {}, "name", "trainName")
+
+
+def build_quick_payload(train_number: str, date_ddmmyyyy: Optional[str] = None) -> Optional[dict]:
+    """Fast live payload from RailRadar (else RapidAPI). None if neither has data."""
+    source = "railradar"
+    try:
+        # Blank date = RailRadar's own "current run" auto-detect (same call,
+        # same cache entry the full poll's RailRadar reads use).
+        stops = railradar_fallback.fetch_railradar_timeline(train_number, date_ddmmyyyy)
+    except Exception:  # noqa: BLE001
+        stops = []
+    train_name = None
+    if stops:
+        train_name = _railradar_train_name(train_number)
+    else:
+        source = "rapidapi"
+        stops, train_name = _rapidapi_stops(train_number)
+    if not stops:
+        return None
+
+    for fn in ("_interpolate_missing_coordinates", "_interpolate_missing_distance_km", "_annotate_distance_since_last_stoppage"):
+        try:
+            getattr(gps_tracking, fn)(stops)
+        except Exception:  # noqa: BLE001
+            pass
+    timeline = gps_tracking.timeline_to_json(stops)
+
+    seg = {}
+    speed = None
+    if source == "railradar":
+        try:
+            seg = railradar_fallback.get_segment_progress(train_number) or {}
+        except Exception:  # noqa: BLE001
+            seg = {}
+        try:
+            speed, _note = railradar_fallback.get_live_speed_kmph(train_number)
+        except Exception:  # noqa: BLE001
+            speed = None
+    try:
+        interp_km, lat, lng = gps_tracking.interpolate_live_position(timeline, seg.get("segment_progress"))
+    except Exception:  # noqa: BLE001
+        interp_km, lat, lng = None, None, None
+    cur_km = interp_km if interp_km is not None else gps_tracking.current_position_distance_km(timeline)
+
+    cur_idx = -1
+    for i, s in enumerate(timeline):
+        if s.get("status") in ("current", "passed"):
+            cur_idx = i
+    cur = timeline[cur_idx] if cur_idx >= 0 else None
+    nxt = timeline[cur_idx + 1] if cur_idx + 1 < len(timeline) else None
+    if lat is None and cur is not None:
+        lat, lng = cur.get("lat"), cur.get("lng")
+
+    eta_speed = speed if speed and speed > 10 else None
+    try:
+        # Physics-checked ETAs for every upcoming stop (see app.py's
+        # _sanitize_upcoming_etas — same rule, inlined to avoid importing app).
+        now = running_status.ist_now()
+        for s in timeline:
+            if s.get("status") != "upcoming" or cur_km is None:
+                continue
+            d = gps_tracking._distance_km_value(s.get("distance_km"))
+            if d is None or d < cur_km - 0.5:
+                continue
+            km = max(0.0, d - cur_km)
+            arr = s.get("arrival") or {}
+            info = running_status.sane_eta(arr.get("expected") or arr.get("scheduled"), km, eta_speed, now)
+            s["distance_ahead_km"] = round(km, 1)
+            s["minutes_away"] = round(info["minutes"]) if info["minutes"] is not None else None
+            if info["eta"]:
+                s["predicted_eta"] = info["eta"]
+                if info["source"] == "distance":
+                    s["predicted_eta_source"] = "distance"
+    except Exception:  # noqa: BLE001
+        pass
+
+    km_to_next = None
+    if nxt is not None and cur_km is not None:
+        d = gps_tracking._distance_km_value(nxt.get("distance_km"))
+        if d is not None:
+            km_to_next = round(max(0.0, d - cur_km), 1)
+    delay = None
+    if cur is not None:
+        delay = ((cur.get("departure") or {}).get("delay_minutes")
+                 if (cur.get("departure") or {}).get("delay_minutes") is not None
+                 else (cur.get("arrival") or {}).get("delay_minutes"))
+
+    return {
+        "type": "position_update",
+        "train_number": train_number,
+        "train_name": train_name,
+        "date": date_ddmmyyyy,
+        "quick_frame": True,
+        "quick_source": source,
+        "timeline": timeline,
+        "timeline_grouped": gps_tracking.group_timeline_for_display(timeline),
+        "current_station": cur.get("name") if cur else None,
+        "current_station_code": cur.get("code") if cur else None,
+        "next_station": nxt.get("name") if nxt else None,
+        "next_station_code": nxt.get("code") if nxt else None,
+        "lat": lat, "lng": lng,
+        "position_source": "railradar_segment_progress" if interp_km is not None else f"{source}_station",
+        "delay_minutes": delay,
+        "display_speed_kmph": speed,
+        "display_speed_source": "railradar_live_gps" if speed else None,
+        "distance_remaining_to_next_km": km_to_next,
+        "next_station_live_eta": (nxt or {}).get("predicted_eta"),
+        "status_updated_at": datetime.now(timezone.utc).isoformat(),
+        "error": None,
+    }

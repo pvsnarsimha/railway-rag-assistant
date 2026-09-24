@@ -723,18 +723,26 @@ def keep_alive_ping() -> None:
     import requests
 
     url = (os.environ.get("KEEP_ALIVE_URL") or os.environ.get("PUBLIC_APP_URL") or "").strip().rstrip("/")
-    if not url.startswith("https://"):
-        return
     try:
         active = push_store.count_tracking_watches() + len(push_store.list_all_alarm_watches_with_tokens())
     except Exception:  # noqa: BLE001
         active = 0
     if not active:
         return
-    try:
-        requests.get(f"{url}/api/health", timeout=20)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("keep-alive ping failed: %s", e)
+    if url.startswith("https://"):
+        try:
+            requests.get(f"{url}/api/health", timeout=20)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("keep-alive ping failed: %s", e)
+    # railkit-service is a separate Render free service that also sleeps —
+    # keep it awake too while someone is tracking, so live polls never have
+    # to wait for it to cold-start.
+    railkit = (os.environ.get("RAILKIT_SERVICE_URL") or "").strip().rstrip("/")
+    if railkit.startswith("http"):
+        try:
+            requests.get(f"{railkit}/health", timeout=60)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("railkit-service keep-alive ping failed: %s", e)
 
 
 def start(

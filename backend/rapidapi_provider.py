@@ -161,3 +161,16 @@ def get_seat_availability(train_number: str, source_code: str, dest_code: str,
     }
     params = {k: v for k, v in params.items() if v is not None}
     return _get("/api/v1/checkSeatAvailability", params)
+
+
+# FEATURE: fast live-status source for Live Tracking's first frame (see
+# quick_live.py) — IRCTC1's liveTrainStatus. Only used when RailRadar has
+# nothing for the train. Cached 45s like RailKit's own live status. Same
+# honesty note as the rest of this file: the response shape is the
+# listing's commonly documented one, parsed tolerantly by quick_live.py.
+from api_cache import cached  # noqa: E402
+
+
+@cached(ttl_seconds=45, prefix="rapidapi_live_status")
+def get_live_train_status(train_number: str, start_day: int = 0) -> dict:
+    return _get("/api/v1/liveTrainStatus", {"trainNo": str(train_number).strip(), "startDay": str(start_day)})

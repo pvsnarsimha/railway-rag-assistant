@@ -86,6 +86,7 @@ import push_store
 import push_notifications
 import alert_scheduler
 import running_status
+import quick_live
 import cell_tower_store
 import smart_features
 
@@ -5339,6 +5340,46 @@ class TrackingWatchDeleteRequest(BaseModel):
     date: Optional[str] = None
 
 
+_warmup_last: dict = {}
+
+
+def _warm_live_sources(train_number: Optional[str]) -> None:
+    """Background: wake railkit-service (Render free plan sleeps it) and
+    pre-fill the RailRadar / RailKit caches for this train, so "Start
+    tracking" answers instantly."""
+    import requests as _rq
+    try:
+        _rq.get(f"{railway_api.SERVICE_URL}/health", timeout=60)
+    except Exception:  # noqa: BLE001
+        pass
+    if not train_number:
+        return
+    for fn, args in ((railradar_fallback.fetch_railradar_timeline, (train_number,)),
+                     (railway_api.get_train_info, (train_number,)),
+                     (railway_api.get_live_train_status, (train_number, None))):
+        try:
+            fn(*args)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.get("/api/live/warmup")
+def api_live_warmup(train_number: Optional[str] = None):
+    """FEATURE (fast Live Tracking on internet): the app calls this as soon
+    as the Live Tracking screen opens / a 5-digit train number is typed.
+    Returns immediately; the warm-up runs in the background (at most once
+    per train per 30s)."""
+    tn = (train_number or "").strip()
+    if tn and not (tn.isdigit() and len(tn) == 5):
+        tn = ""
+    key = tn or "_"
+    if time.time() - _warmup_last.get(key, 0) > 30:
+        _warmup_last[key] = time.time()
+        import threading
+        threading.Thread(target=_warm_live_sources, args=(tn or None,), daemon=True).start()
+    return {"ok": True}
+
+
 @app.post("/api/push/tracking")
 def api_push_start_tracking(req: TrackingWatchRequest):
     token = req.token.strip()
@@ -6201,14 +6242,40 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
 
     snapshot_key = (train_number, requested_date_ddmmyyyy or "")
     cached_snapshot = _last_ws_payload_cache.get(snapshot_key)
-    if cached_snapshot and time.time() - cached_snapshot[0] < _WS_SNAPSHOT_MAX_AGE_SECONDS:
+    snapshot_age = time.time() - cached_snapshot[0] if cached_snapshot else None
+    if cached_snapshot and snapshot_age < _WS_SNAPSHOT_MAX_AGE_SECONDS:
         try:
             await websocket.send_json({
                 **cached_snapshot[1], "snapshot": True,
-                "snapshot_age_seconds": int(time.time() - cached_snapshot[0]),
+                "snapshot_age_seconds": int(snapshot_age),
             })
         except Exception:  # noqa: BLE001 - the live poll below still runs
             pass
+
+    # FEATURE (fast first frame on internet): start the slow RailKit fetch
+    # (backend -> railkit-service -> RailKit; railkit-service can take
+    # 30-60s to wake on Render's free plan) in the background RIGHT NOW,
+    # and meanwhile send a live frame built from RailRadar (else RapidAPI),
+    # which the backend calls directly — see quick_live.py. The first full
+    # poll below then reuses the warmed RailKit result instead of starting
+    # its own fetch from scratch.
+    prewarm_tasks = [
+        asyncio.create_task(asyncio.to_thread(railway_api.get_live_train_status, train_number, requested_date_ddmmyyyy)),
+        asyncio.create_task(asyncio.to_thread(railway_api.get_train_info, train_number)),
+    ]
+    prewarm_live_error = None
+    if not (cached_snapshot and snapshot_age < 30):
+        try:
+            quick_payload = await asyncio.wait_for(
+                asyncio.to_thread(quick_live.build_quick_payload, train_number, requested_date_ddmmyyyy), timeout=12,
+            )
+        except Exception:  # noqa: BLE001 - the full poll still follows
+            quick_payload = None
+        if quick_payload:
+            try:
+                await websocket.send_json(quick_payload)
+            except Exception:  # noqa: BLE001
+                pass
 
     try:
         while True:
@@ -6279,6 +6346,17 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 )
                 this_poll_force_refresh = force_refresh_next_poll or stale_past_60s
                 force_refresh_next_poll = False
+                if prewarm_tasks:
+                    # First poll: wait for the background RailKit fetch that
+                    # started when the socket opened (fills the cache), and
+                    # don't pay RailKit's timeout a second time if it failed.
+                    warm = await asyncio.gather(*prewarm_tasks, return_exceptions=True)
+                    prewarm_tasks = None
+                    if isinstance(warm[0], BaseException):
+                        prewarm_live_error = warm[0]
+                if prewarm_live_error is not None:
+                    _err, prewarm_live_error = prewarm_live_error, None
+                    raise _err
                 live_data, train_info_result = await asyncio.gather(
                     asyncio.to_thread(railway_api.get_live_train_status, train_number, date_ddmmyyyy, _force_refresh=this_poll_force_refresh),
                     asyncio.to_thread(railway_api.get_train_info, train_number),
@@ -7899,6 +7977,18 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     pass
             except railway_api.RailwayAPIError as e:
                 payload["error"] = str(e)
+                # RailKit / railkit-service unavailable: keep the screen live
+                # on RailRadar (else RapidAPI) instead of sending a frame
+                # with no timeline.
+                try:
+                    fallback = await asyncio.wait_for(
+                        asyncio.to_thread(quick_live.build_quick_payload, train_number, requested_date_ddmmyyyy), timeout=12,
+                    )
+                except Exception:  # noqa: BLE001
+                    fallback = None
+                if fallback:
+                    payload.update(fallback)
+                    payload["provider_note"] = f"RailKit unavailable right now — showing {fallback.get('quick_source')} live data."
                 try:
                     analytics.record_event(intent="live_tracking", train_number=train_number, live_error=True)
                 except Exception:
@@ -7946,11 +8036,19 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 traceback.print_exc()
                 payload["error"] = f"Temporary tracking error, retrying: {e}"
                 try:
+                    fallback = await asyncio.wait_for(
+                        asyncio.to_thread(quick_live.build_quick_payload, train_number, requested_date_ddmmyyyy), timeout=12,
+                    )
+                except Exception:  # noqa: BLE001
+                    fallback = None
+                if fallback:
+                    payload.update(fallback)
+                try:
                     analytics.record_event(intent="live_tracking", train_number=train_number, live_error=True)
                 except Exception:
                     pass
             await websocket.send_json(payload)
-            if payload.get("timeline") and not payload.get("error"):
+            if payload.get("timeline") and (not payload.get("error") or payload.get("quick_frame")):
                 _last_ws_payload_cache[snapshot_key] = (time.time(), payload)
 
             # Auto-refresh every _TRACK_POLL_INTERVAL_SECONDS (5s) — but if the

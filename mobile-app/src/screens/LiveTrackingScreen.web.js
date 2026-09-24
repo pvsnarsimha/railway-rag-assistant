@@ -12,6 +12,7 @@ import { useSettings } from "../context/SettingsContext";
 import {
   buildTrackingWsUrl, saveTripSummary, buildTrackShareUrl, buildTripShareUrl, sendFeedback,
   checkDelayAlerts, checkSmartAlarm, registerPushToken, syncPushWatches, syncAlarmWatches, getAlarmWatches,
+  warmupLive,
 } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
 import { registerForPushNotifications, refreshWebPushToken, scheduleLocalAlarm, cancelLocalAlarm } from "../services/pushNotifications";
@@ -1388,6 +1389,25 @@ export default function LiveTrackingScreen({ navigation }) {
           setPayload((prev) => (!prev || prev.from_device_cache || prev.snapshot ? data : prev));
           return;
         }
+        if (!data.timeline || !data.timeline.length) {
+          // A frame without a timeline (provider hiccup) must never blank a
+          // screen that's already showing this train's live position.
+          setPayload((prev) => (prev && prev.timeline && prev.timeline.length
+            && String(prev.train_number) === String(data.train_number) ? { ...prev, error: data.error } : data));
+          setRefreshing(false);
+          return;
+        }
+        if (data.quick_frame && !data.provider_note) {
+          // Fast RailRadar/RapidAPI first frame: fills an empty/cached screen
+          // at once, but never replaces a fuller live frame that's recent.
+          setPayload((prev) => {
+            if (!prev || prev.from_device_cache || prev.snapshot || prev.quick_frame) return data;
+            const age = prev.status_updated_at ? Date.now() - new Date(prev.status_updated_at).getTime() : Infinity;
+            return age > 90000 ? data : prev;
+          });
+          setLastUpdated(new Date());
+          return;
+        }
         setPayload(data);
         if (data.timeline && data.timeline.length && !data.error
             && Date.now() - lastPayloadSavedAtRef.current > LAST_PAYLOAD_SAVE_EVERY_MS) {
@@ -1535,6 +1555,16 @@ export default function LiveTrackingScreen({ navigation }) {
       disableBackgroundTracking(apiBaseUrl, { trainNumber: params.trainNumber, date: effectiveTrackDate(params.date) });
     }
   }
+
+  // FEATURE (fast first display on internet): wake the live data sources
+  // as soon as the screen opens, and again for the exact train as soon as
+  // a full 5-digit number is typed — by the time "Start tracking" is
+  // tapped, RailRadar/RailKit are already answering.
+  useEffect(() => { warmupLive(apiBaseUrl); }, [apiBaseUrl]);
+  useEffect(() => {
+    const t = trainNumber.trim();
+    if (/^\d{5}$/.test(t)) warmupLive(apiBaseUrl, t);
+  }, [trainNumber, apiBaseUrl]);
 
   // Auto-resume on app open: reconnect to whatever was being tracked
   // before the app was closed — no re-typing, no pressing Start again.
@@ -1931,6 +1961,11 @@ export default function LiveTrackingScreen({ navigation }) {
             </Text>
           ) : null}
           {shareLinkNote && <Text style={styles.errorText}>{shareLinkNote}</Text>}
+          {!gpsOn && payload && (payload.provider_note || payload.quick_frame) ? (
+            <Text style={styles.bgTrackText}>
+              {payload.provider_note || `Live position from ${payload.quick_source === "rapidapi" ? "RapidAPI" : "RailRadar"} — full details loading…`}
+            </Text>
+          ) : null}
         </View>
       )}
 
