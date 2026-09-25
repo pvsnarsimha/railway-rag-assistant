@@ -32,7 +32,7 @@ response it's backing up.
 
 import os
 import re
-from datetime import date as date_cls, datetime, timedelta
+from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import List, Optional
 
 import requests
@@ -409,6 +409,27 @@ def get_live_speed_kmph(train_number: str) -> "tuple[Optional[float], Optional[s
     return speed, "RailRadar live GPS speed reading (currentLocation.speedKmh), not a distance/time calculation"
 
 
+def _position_reported_epoch(loc: dict, data: dict) -> Optional[float]:
+    for src in (loc or {}, data or {}):
+        for k in ("lastUpdatedAt", "updatedAt", "lastUpdated", "reportedAt", "lastReportedAt", "timestamp", "lastUpdateTime"):
+            v = src.get(k) if isinstance(src, dict) else None
+            if v in (None, ""):
+                continue
+            try:
+                f = float(v)
+                return f / 1000.0 if f > 1e12 else f
+            except (TypeError, ValueError):
+                pass
+            try:
+                dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+                if dt.tzinfo is None:  # RailRadar times are IST
+                    dt = dt.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))
+                return dt.timestamp()
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 def get_segment_progress(train_number: str, date_ddmmyyyy: Optional[str] = None) -> dict:
     """
     FEATURE: smooth position/ETA between real station-crossing updates.
@@ -445,7 +466,7 @@ def get_segment_progress(train_number: str, date_ddmmyyyy: Optional[str] = None)
     """
     empty = {
         "segment_progress": None, "station_code": None, "sequence": None,
-        "is_actual_position": None, "bearing_degrees": None, "note": None,
+        "is_actual_position": None, "bearing_degrees": None, "reported_at_epoch": None, "note": None,
     }
     try:
         data = _fetch_raw(train_number, _ddmmyyyy_to_iso(date_ddmmyyyy))
@@ -465,6 +486,10 @@ def get_segment_progress(train_number: str, date_ddmmyyyy: Optional[str] = None)
         "sequence": loc.get("sequence"),
         "is_actual_position": loc.get("isActualPosition"),
         "bearing_degrees": loc.get("bearingDegrees"),
+        # When RailRadar last got a real report for this position, if its
+        # response says so (field name read tolerantly; None otherwise) —
+        # used to dead-reckon a stale position forward (quick_live.dead_reckon).
+        "reported_at_epoch": _position_reported_epoch(loc, data),
         "note": "RailRadar live segment progress (currentLocation.segmentProgress) — crowdsourced GPS, real progress between the previous and next station" if progress is not None else None,
     }
 

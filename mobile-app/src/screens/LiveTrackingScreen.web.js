@@ -1998,7 +1998,11 @@ export default function LiveTrackingScreen({ navigation }) {
                   ? payload.provider_note
                   : payload.quick_frame
                     ? "Live data: RailRadar — loading full details…"
-                    : payload.live_source === "railradar" ? "Live data: RailRadar" : null}
+                    : payload.live_source === "railradar"
+                      ? `Live data: RailRadar${payload.position_estimated && payload.position_age_seconds
+                        ? ` · position moved on by speed since the last report ${Math.max(1, Math.round(payload.position_age_seconds / 60))} min ago`
+                        : ""}`
+                      : null}
             </Text>
           ) : null}
         </View>

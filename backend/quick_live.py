@@ -272,3 +272,128 @@ def railradar_status(train_number: str, date_ddmmyyyy: Optional[str] = None) -> 
                     "current_station": pos.current_station_name if pos else None,
                     "train_name": pos.train_name if pos else None})
     return out
+
+
+# ===========================================================================
+# FEATURE ("RailRadar doesn't update the train's live location instantly" —
+# 20833 predicted 22:12 at Samalkot, really arrived 21:58):
+# RailRadar's position is crowdsourced and only moves when a new report
+# comes in; between reports it sits still, often for several minutes. While
+# it sits still, "now + remaining km / speed" keeps sliding LATER (the clock
+# moves, the train on screen doesn't) — so the ETA drifts late by roughly
+# however stale the position is.
+#
+# Two fixes, both plain arithmetic on real data:
+#   1. dead_reckon(): once the reported position hasn't moved for 45s+, move
+#      it forward by speed x time since it was last reported — never past the
+#      next scheduled halt (the train must stop there), and never more than
+#      20 minutes' worth (a feed silent that long is stale, not moving).
+#   2. eta_speed_with_recovery(): a late train runs at least its timetable
+#      pace to the next halt (drivers make up time), so the ETA speed is
+#      never below the scheduled section speed while the train is late.
+# ===========================================================================
+import time as _time  # noqa: E402
+
+_position_seen: dict = {}
+DR_MIN_AGE_SECONDS = 45
+DR_MAX_AGE_SECONDS = 20 * 60
+
+
+def _clock_min(v) -> Optional[int]:
+    m = _HHMM.search(str(v or ""))
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+def scheduled_section_speed(timeline_json: list, current_km: Optional[float]) -> Optional[float]:
+    """Timetable speed (km/h) between the last halt behind the train and the
+    next halt ahead — from the stations' own scheduled times and distances."""
+    if current_km is None:
+        return None
+    prev = nxt = None
+    for s in timeline_json:
+        if s.get("kind") == "intermediate":
+            continue
+        d = gps_tracking._distance_km_value(s.get("distance_km"))
+        if d is None:
+            continue
+        if d <= current_km + 0.2:
+            prev = (d, s)
+        elif nxt is None:
+            nxt = (d, s)
+    if not prev or not nxt:
+        return None
+    dep = _clock_min((prev[1].get("departure") or {}).get("scheduled") or (prev[1].get("arrival") or {}).get("scheduled"))
+    arr = _clock_min((nxt[1].get("arrival") or {}).get("scheduled"))
+    if dep is None or arr is None:
+        return None
+    mins = (arr - dep) % 1440
+    if mins <= 0 or mins > 720:
+        return None
+    v = (nxt[0] - prev[0]) / (mins / 60.0)
+    return v if 10 <= v <= 160 else None
+
+
+def _next_halt_km(timeline_json: list, km: float) -> Optional[float]:
+    for s in timeline_json:
+        if s.get("kind") == "intermediate" or s.get("status") in ("passed", "current"):
+            continue
+        d = gps_tracking._distance_km_value(s.get("distance_km"))
+        if d is not None and d > km + 0.05:
+            return d
+    return None
+
+
+def dead_reckon(train_number: str, timeline_json: list, base_km: Optional[float], seg: Optional[dict],
+                speed_kmph: Optional[float], now: Optional[float] = None, key: Optional[str] = None) -> dict:
+    """{"km", "age_seconds", "estimated"} — base_km moved forward when the
+    reported position is stale (see block comment above)."""
+    now = now or _time.time()
+    if base_km is None:
+        return {"km": None, "age_seconds": None, "estimated": False}
+    seg = seg or {}
+    sig = (seg.get("station_code"), None if seg.get("segment_progress") is None else round(float(seg["segment_progress"]), 3),
+           round(float(base_km), 2))
+    k = key or str(train_number)
+    rec = _position_seen.get(k)
+    if not rec or rec["sig"] != sig:
+        rec = {"sig": sig, "since": now}
+        _position_seen[k] = rec
+    reported_at = seg.get("reported_at_epoch")
+    age = now - (reported_at if reported_at and reported_at <= now else rec["since"])
+    if age < DR_MIN_AGE_SECONDS:
+        return {"km": base_km, "age_seconds": int(age), "estimated": False}
+    v = speed_kmph if speed_kmph and speed_kmph >= 15 else scheduled_section_speed(timeline_json, base_km)
+    if not v:
+        return {"km": base_km, "age_seconds": int(age), "estimated": False}
+    v = min(v, 130.0)
+    moved = v * min(age, DR_MAX_AGE_SECONDS) / 3600.0
+    cap = _next_halt_km(timeline_json, base_km)
+    est = base_km + moved
+    if cap is not None:
+        est = min(est, cap)
+    return {"km": round(est, 2), "age_seconds": int(age), "estimated": est > base_km + 0.05}
+
+
+def eta_speed_with_recovery(timeline_json: list, current_km: Optional[float], speed_kmph: Optional[float],
+                            delay_minutes: Optional[int]) -> Optional[float]:
+    sched = scheduled_section_speed(timeline_json, current_km)
+    if speed_kmph is None:
+        return sched
+    if sched and delay_minutes is not None and delay_minutes > 5 and sched > speed_kmph:
+        return sched
+    return speed_kmph
+
+
+def latlng_at_km(timeline_json: list, km: float):
+    """Point on the route at `km` from origin, interpolated between the two
+    surrounding stations that have coordinates."""
+    pts = []
+    for s in timeline_json:
+        d = gps_tracking._distance_km_value(s.get("distance_km"))
+        if d is not None and s.get("lat") is not None and s.get("lng") is not None:
+            pts.append((d, s["lat"], s["lng"]))
+    for (d1, la1, ln1), (d2, la2, ln2) in zip(pts, pts[1:]):
+        if d1 <= km <= d2 and d2 > d1:
+            t = (km - d1) / (d2 - d1)
+            return la1 + (la2 - la1) * t, ln1 + (ln2 - ln1) * t
+    return None, None

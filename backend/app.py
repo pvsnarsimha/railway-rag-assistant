@@ -926,9 +926,15 @@ def _estimate_live_distance_km(train_number: str, date: Optional[str], timeline_
         interp_km, _lat, _lng = gps_tracking.interpolate_live_position(timeline_json, seg.get("segment_progress"))
     except Exception:  # noqa: BLE001
         interp_km = None
-    if interp_km is not None:
-        return interp_km
-    return gps_tracking.current_position_distance_km(timeline_json)
+    km = interp_km if interp_km is not None else gps_tracking.current_position_distance_km(timeline_json)
+    # Same stale-position correction as Live Tracking (quick_live.dead_reckon)
+    # so notification ETAs don't drift late while RailRadar's report is old.
+    try:
+        speed, _n = railradar_fallback.get_live_speed_kmph(train_number)
+        km = quick_live.dead_reckon(train_number, timeline_json, km, seg, speed, key=f"{train_number}|notify")["km"]
+    except Exception:  # noqa: BLE001
+        pass
+    return km
 
 
 def _predict_for_watch_station(train_number: str, date: Optional[str], label: Optional[str] = None,
@@ -7490,6 +7496,32 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # yet this session).
                 eta_speed_kmph = recency_weighted_speed_kmph if recency_weighted_speed_kmph is not None else avg_speed_kmph
 
+                # FEATURE: RailRadar's crowdsourced position only moves when a
+                # new report arrives — between reports it sits still and every
+                # ETA slides later with the clock (20833 at Samalkot: shown
+                # 22:12, really 21:58). Move a stale position forward by
+                # speed x time since it was last reported (never past the next
+                # halt), and let a late train's ETA assume at least its
+                # timetable pace. Runs AFTER the speed samples above so the
+                # estimate never feeds back into the measured speed.
+                position_age_seconds = None
+                position_estimated = False
+                if current_position_distance_km is not None and live_source == "railradar":
+                    dr = quick_live.dead_reckon(
+                        train_number, timeline_json, current_position_distance_km, segment_info,
+                        live_gps_speed if live_gps_speed is not None else eta_speed_kmph,
+                    )
+                    position_age_seconds = dr["age_seconds"]
+                    if dr["estimated"]:
+                        position_estimated = True
+                        current_position_distance_km = dr["km"]
+                        dr_lat, dr_lng = quick_live.latlng_at_km(timeline_json, dr["km"])
+                        if dr_lat is not None:
+                            interp_lat, interp_lng = dr_lat, dr_lng
+                eta_speed_kmph = quick_live.eta_speed_with_recovery(
+                    timeline_json, current_position_distance_km, eta_speed_kmph, position.delay_minutes,
+                )
+
                 # FEATURE: per-station predicted delay for every upcoming
                 # reporting halt (RailYatri-style), computed from the SAME
                 # real trend + avg-speed signals as the single-figure
@@ -7825,6 +7857,8 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "delay_minutes": position.delay_minutes,
                     "train_name": getattr(position, "train_name", None),
                     "live_source": live_source,
+                    "position_age_seconds": position_age_seconds,
+                    "position_estimated": position_estimated,
                     # Why RailRadar wasn't used for this frame (key missing,
                     # 401/404/429, no route...) — shown on the screen so a
                     # RailKit frame is never a silent mystery.

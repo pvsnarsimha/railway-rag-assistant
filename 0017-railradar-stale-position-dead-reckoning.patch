@@ -1,0 +1,276 @@
+diff --git a/backend/app.py b/backend/app.py
+index 72b302f..d4f00f5 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -926,9 +926,15 @@ def _estimate_live_distance_km(train_number: str, date: Optional[str], timeline_
+         interp_km, _lat, _lng = gps_tracking.interpolate_live_position(timeline_json, seg.get("segment_progress"))
+     except Exception:  # noqa: BLE001
+         interp_km = None
+-    if interp_km is not None:
+-        return interp_km
+-    return gps_tracking.current_position_distance_km(timeline_json)
++    km = interp_km if interp_km is not None else gps_tracking.current_position_distance_km(timeline_json)
++    # Same stale-position correction as Live Tracking (quick_live.dead_reckon)
++    # so notification ETAs don't drift late while RailRadar's report is old.
++    try:
++        speed, _n = railradar_fallback.get_live_speed_kmph(train_number)
++        km = quick_live.dead_reckon(train_number, timeline_json, km, seg, speed, key=f"{train_number}|notify")["km"]
++    except Exception:  # noqa: BLE001
++        pass
++    return km
+ 
+ 
+ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Optional[str] = None,
+@@ -7490,6 +7496,32 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
+                 # yet this session).
+                 eta_speed_kmph = recency_weighted_speed_kmph if recency_weighted_speed_kmph is not None else avg_speed_kmph
+ 
++                # FEATURE: RailRadar's crowdsourced position only moves when a
++                # new report arrives — between reports it sits still and every
++                # ETA slides later with the clock (20833 at Samalkot: shown
++                # 22:12, really 21:58). Move a stale position forward by
++                # speed x time since it was last reported (never past the next
++                # halt), and let a late train's ETA assume at least its
++                # timetable pace. Runs AFTER the speed samples above so the
++                # estimate never feeds back into the measured speed.
++                position_age_seconds = None
++                position_estimated = False
++                if current_position_distance_km is not None and live_source == "railradar":
++                    dr = quick_live.dead_reckon(
++                        train_number, timeline_json, current_position_distance_km, segment_info,
++                        live_gps_speed if live_gps_speed is not None else eta_speed_kmph,
++                    )
++                    position_age_seconds = dr["age_seconds"]
++                    if dr["estimated"]:
++                        position_estimated = True
++                        current_position_distance_km = dr["km"]
++                        dr_lat, dr_lng = quick_live.latlng_at_km(timeline_json, dr["km"])
++                        if dr_lat is not None:
++                            interp_lat, interp_lng = dr_lat, dr_lng
++                eta_speed_kmph = quick_live.eta_speed_with_recovery(
++                    timeline_json, current_position_distance_km, eta_speed_kmph, position.delay_minutes,
++                )
++
+                 # FEATURE: per-station predicted delay for every upcoming
+                 # reporting halt (RailYatri-style), computed from the SAME
+                 # real trend + avg-speed signals as the single-figure
+@@ -7825,6 +7857,8 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
+                     "delay_minutes": position.delay_minutes,
+                     "train_name": getattr(position, "train_name", None),
+                     "live_source": live_source,
++                    "position_age_seconds": position_age_seconds,
++                    "position_estimated": position_estimated,
+                     # Why RailRadar wasn't used for this frame (key missing,
+                     # 401/404/429, no route...) — shown on the screen so a
+                     # RailKit frame is never a silent mystery.
+diff --git a/backend/quick_live.py b/backend/quick_live.py
+index 4c2969f..9d0fd44 100644
+--- a/backend/quick_live.py
++++ b/backend/quick_live.py
+@@ -272,3 +272,128 @@ def railradar_status(train_number: str, date_ddmmyyyy: Optional[str] = None) ->
+                     "current_station": pos.current_station_name if pos else None,
+                     "train_name": pos.train_name if pos else None})
+     return out
++
++
++# ===========================================================================
++# FEATURE ("RailRadar doesn't update the train's live location instantly" —
++# 20833 predicted 22:12 at Samalkot, really arrived 21:58):
++# RailRadar's position is crowdsourced and only moves when a new report
++# comes in; between reports it sits still, often for several minutes. While
++# it sits still, "now + remaining km / speed" keeps sliding LATER (the clock
++# moves, the train on screen doesn't) — so the ETA drifts late by roughly
++# however stale the position is.
++#
++# Two fixes, both plain arithmetic on real data:
++#   1. dead_reckon(): once the reported position hasn't moved for 45s+, move
++#      it forward by speed x time since it was last reported — never past the
++#      next scheduled halt (the train must stop there), and never more than
++#      20 minutes' worth (a feed silent that long is stale, not moving).
++#   2. eta_speed_with_recovery(): a late train runs at least its timetable
++#      pace to the next halt (drivers make up time), so the ETA speed is
++#      never below the scheduled section speed while the train is late.
++# ===========================================================================
++import time as _time  # noqa: E402
++
++_position_seen: dict = {}
++DR_MIN_AGE_SECONDS = 45
++DR_MAX_AGE_SECONDS = 20 * 60
++
++
++def _clock_min(v) -> Optional[int]:
++    m = _HHMM.search(str(v or ""))
++    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
++
++
++def scheduled_section_speed(timeline_json: list, current_km: Optional[float]) -> Optional[float]:
++    """Timetable speed (km/h) between the last halt behind the train and the
++    next halt ahead — from the stations' own scheduled times and distances."""
++    if current_km is None:
++        return None
++    prev = nxt = None
++    for s in timeline_json:
++        if s.get("kind") == "intermediate":
++            continue
++        d = gps_tracking._distance_km_value(s.get("distance_km"))
++        if d is None:
++            continue
++        if d <= current_km + 0.2:
++            prev = (d, s)
++        elif nxt is None:
++            nxt = (d, s)
++    if not prev or not nxt:
++        return None
++    dep = _clock_min((prev[1].get("departure") or {}).get("scheduled") or (prev[1].get("arrival") or {}).get("scheduled"))
++    arr = _clock_min((nxt[1].get("arrival") or {}).get("scheduled"))
++    if dep is None or arr is None:
++        return None
++    mins = (arr - dep) % 1440
++    if mins <= 0 or mins > 720:
++        return None
++    v = (nxt[0] - prev[0]) / (mins / 60.0)
++    return v if 10 <= v <= 160 else None
++
++
++def _next_halt_km(timeline_json: list, km: float) -> Optional[float]:
++    for s in timeline_json:
++        if s.get("kind") == "intermediate" or s.get("status") in ("passed", "current"):
++            continue
++        d = gps_tracking._distance_km_value(s.get("distance_km"))
++        if d is not None and d > km + 0.05:
++            return d
++    return None
++
++
++def dead_reckon(train_number: str, timeline_json: list, base_km: Optional[float], seg: Optional[dict],
++                speed_kmph: Optional[float], now: Optional[float] = None, key: Optional[str] = None) -> dict:
++    """{"km", "age_seconds", "estimated"} — base_km moved forward when the
++    reported position is stale (see block comment above)."""
++    now = now or _time.time()
++    if base_km is None:
++        return {"km": None, "age_seconds": None, "estimated": False}
++    seg = seg or {}
++    sig = (seg.get("station_code"), None if seg.get("segment_progress") is None else round(float(seg["segment_progress"]), 3),
++           round(float(base_km), 2))
++    k = key or str(train_number)
++    rec = _position_seen.get(k)
++    if not rec or rec["sig"] != sig:
++        rec = {"sig": sig, "since": now}
++        _position_seen[k] = rec
++    reported_at = seg.get("reported_at_epoch")
++    age = now - (reported_at if reported_at and reported_at <= now else rec["since"])
++    if age < DR_MIN_AGE_SECONDS:
++        return {"km": base_km, "age_seconds": int(age), "estimated": False}
++    v = speed_kmph if speed_kmph and speed_kmph >= 15 else scheduled_section_speed(timeline_json, base_km)
++    if not v:
++        return {"km": base_km, "age_seconds": int(age), "estimated": False}
++    v = min(v, 130.0)
++    moved = v * min(age, DR_MAX_AGE_SECONDS) / 3600.0
++    cap = _next_halt_km(timeline_json, base_km)
++    est = base_km + moved
++    if cap is not None:
++        est = min(est, cap)
++    return {"km": round(est, 2), "age_seconds": int(age), "estimated": est > base_km + 0.05}
++
++
++def eta_speed_with_recovery(timeline_json: list, current_km: Optional[float], speed_kmph: Optional[float],
++                            delay_minutes: Optional[int]) -> Optional[float]:
++    sched = scheduled_section_speed(timeline_json, current_km)
++    if speed_kmph is None:
++        return sched
++    if sched and delay_minutes is not None and delay_minutes > 5 and sched > speed_kmph:
++        return sched
++    return speed_kmph
++
++
++def latlng_at_km(timeline_json: list, km: float):
++    """Point on the route at `km` from origin, interpolated between the two
++    surrounding stations that have coordinates."""
++    pts = []
++    for s in timeline_json:
++        d = gps_tracking._distance_km_value(s.get("distance_km"))
++        if d is not None and s.get("lat") is not None and s.get("lng") is not None:
++            pts.append((d, s["lat"], s["lng"]))
++    for (d1, la1, ln1), (d2, la2, ln2) in zip(pts, pts[1:]):
++        if d1 <= km <= d2 and d2 > d1:
++            t = (km - d1) / (d2 - d1)
++            return la1 + (la2 - la1) * t, ln1 + (ln2 - ln1) * t
++    return None, None
+diff --git a/backend/railradar_fallback.py b/backend/railradar_fallback.py
+index 24b8167..2675a85 100644
+--- a/backend/railradar_fallback.py
++++ b/backend/railradar_fallback.py
+@@ -32,7 +32,7 @@ response it's backing up.
+ 
+ import os
+ import re
+-from datetime import date as date_cls, datetime, timedelta
++from datetime import date as date_cls, datetime, timedelta, timezone
+ from typing import List, Optional
+ 
+ import requests
+@@ -409,6 +409,27 @@ def get_live_speed_kmph(train_number: str) -> "tuple[Optional[float], Optional[s
+     return speed, "RailRadar live GPS speed reading (currentLocation.speedKmh), not a distance/time calculation"
+ 
+ 
++def _position_reported_epoch(loc: dict, data: dict) -> Optional[float]:
++    for src in (loc or {}, data or {}):
++        for k in ("lastUpdatedAt", "updatedAt", "lastUpdated", "reportedAt", "lastReportedAt", "timestamp", "lastUpdateTime"):
++            v = src.get(k) if isinstance(src, dict) else None
++            if v in (None, ""):
++                continue
++            try:
++                f = float(v)
++                return f / 1000.0 if f > 1e12 else f
++            except (TypeError, ValueError):
++                pass
++            try:
++                dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
++                if dt.tzinfo is None:  # RailRadar times are IST
++                    dt = dt.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))
++                return dt.timestamp()
++            except (TypeError, ValueError):
++                continue
++    return None
++
++
+ def get_segment_progress(train_number: str, date_ddmmyyyy: Optional[str] = None) -> dict:
+     """
+     FEATURE: smooth position/ETA between real station-crossing updates.
+@@ -445,7 +466,7 @@ def get_segment_progress(train_number: str, date_ddmmyyyy: Optional[str] = None)
+     """
+     empty = {
+         "segment_progress": None, "station_code": None, "sequence": None,
+-        "is_actual_position": None, "bearing_degrees": None, "note": None,
++        "is_actual_position": None, "bearing_degrees": None, "reported_at_epoch": None, "note": None,
+     }
+     try:
+         data = _fetch_raw(train_number, _ddmmyyyy_to_iso(date_ddmmyyyy))
+@@ -465,6 +486,10 @@ def get_segment_progress(train_number: str, date_ddmmyyyy: Optional[str] = None)
+         "sequence": loc.get("sequence"),
+         "is_actual_position": loc.get("isActualPosition"),
+         "bearing_degrees": loc.get("bearingDegrees"),
++        # When RailRadar last got a real report for this position, if its
++        # response says so (field name read tolerantly; None otherwise) —
++        # used to dead-reckon a stale position forward (quick_live.dead_reckon).
++        "reported_at_epoch": _position_reported_epoch(loc, data),
+         "note": "RailRadar live segment progress (currentLocation.segmentProgress) — crowdsourced GPS, real progress between the previous and next station" if progress is not None else None,
+     }
+ 
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.web.js b/mobile-app/src/screens/LiveTrackingScreen.web.js
+index 321c232..c3265bb 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.web.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.web.js
+@@ -1998,7 +1998,11 @@ export default function LiveTrackingScreen({ navigation }) {
+                   ? payload.provider_note
+                   : payload.quick_frame
+                     ? "Live data: RailRadar — loading full details…"
+-                    : payload.live_source === "railradar" ? "Live data: RailRadar" : null}
++                    : payload.live_source === "railradar"
++                      ? `Live data: RailRadar${payload.position_estimated && payload.position_age_seconds
++                        ? ` · position moved on by speed since the last report ${Math.max(1, Math.round(payload.position_age_seconds / 60))} min ago`
++                        : ""}`
++                      : null}
+             </Text>
+           ) : null}
+         </View>
