@@ -187,6 +187,18 @@ async function registerForWebPushNotifications({ prompt = true } = {}) {
     if (!webForegroundHandlerAttached) {
     webForegroundHandlerAttached = true;
     onMessage(messaging, (payload) => {
+      // FEATURE: "Read notifications aloud" — hand every train push to the
+      // Live Tracking screen (it speaks it when the user opted in).
+      try {
+        window.dispatchEvent(new CustomEvent("rail-push", { detail: {
+          title: payload.notification?.title || payload.data?.title || "",
+          body: payload.notification?.body || payload.data?.body || "",
+          type: payload.data?.type || "",
+          train_number: payload.data?.train_number || "",
+          alert: payload.data?.alert || "",
+          sent_at: payload.data?.sent_at || "",
+        } }));
+      } catch (e) { /* ignore */ }
       // The silent background running-status update is for when the app is
       // CLOSED — while it's open the Live Tracking screen already shows it.
       if (payload?.data?.type === "running_status") return;

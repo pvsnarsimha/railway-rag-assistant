@@ -35,6 +35,7 @@ def _ist_now() -> datetime:
     """Train times are IST; Render runs in UTC, so stamp notifications in IST."""
     return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 from typing import Optional
+import time
 
 import requests
 
@@ -273,6 +274,7 @@ def send_delay_alert(
         "predicted_delay_minutes": str(predicted_delay_minutes),
         "predicted_for_station": predicted_for_station or "",
         "checked_at": checked_at.strftime("%H:%M"),
+        "sent_at": str(int(time.time())),
         "crossed_station": (running or {}).get("crossed_station") or "",
         "next_station": (running or {}).get("next_station") or "",
     }
@@ -333,6 +335,7 @@ def send_fare_alert(
         "new_fare": str(new_fare) if new_fare is not None else "",
         "status_text": status_text or "",
         "checked_at": checked_at.strftime("%H:%M"),
+        "sent_at": str(int(time.time())),
     }
 
     if _is_expo_token(token):
@@ -380,6 +383,7 @@ def send_alarm_alert(
         "station": station,
         "lead_minutes": str(lead_minutes),
         "checked_at": checked_at.strftime("%H:%M"),
+        "sent_at": str(int(time.time())),
     }
 
     if _is_expo_token(token):
@@ -437,6 +441,7 @@ def send_approach_alert(
         "type": "approach_alert", "train_number": str(train_number), "station": station or "",
         "eta": eta_text or "", "minutes": "" if minutes is None else str(int(round(minutes))),
         "checked_at": checked_at.strftime("%H:%M"),
+        "sent_at": str(int(time.time())),
     }
     if _is_expo_token(token):
         return _send_via_expo(token, title, body, data, sound="default")
@@ -539,7 +544,11 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
         "next_halt_eta": running.get("next_halt_eta") or "",
         "delay_minutes": "" if dp is None else str(dp),
         "completed": "1" if running.get("completed") else "0",
+        # "1" = an alerting push (the user's interval / final); "0" = a
+        # silent in-place card refresh — read-aloud speaks only "1".
+        "alert": "1" if (final or alert) else "0",
         "checked_at": checked_at.strftime("%H:%M"),
+        "sent_at": str(int(time.time())),
     }
 
     if _is_expo_token(token):

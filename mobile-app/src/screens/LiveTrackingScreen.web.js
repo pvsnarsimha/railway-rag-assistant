@@ -20,6 +20,7 @@ import { formatDelayDuration } from "../utils/formatDelay";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 import OfflineTrackingCard from "../components/OfflineTrackingCard";
 import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
+import { isSpeechSupported, loadReadAloud, saveReadAloud, speak, onTrainPush, shouldSpeakPush } from "../utils/speakNotifications";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
   loadStatusEvery, saveStatusEvery,
@@ -73,6 +74,7 @@ async function saveLastPayload(trainNumber, date, payload) {
 // push can't reach.
 const APPROACH_ALERT_MINUTES = 10;
 function showLocalNotice(title, body, tag) {
+  try { if (loadReadAloud()) speak(`${title}. ${body}`); } catch (e) { /* ignore */ }
   try {
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       // eslint-disable-next-line no-new
@@ -789,6 +791,24 @@ export default function LiveTrackingScreen({ navigation }) {
   // FEATURE: "notify me every 10 / 20 / 30 / custom min" for the tracked
   // train — the live position + prediction as a notification at the
   // user's own interval, app open or closed (0 = off).
+  // FEATURE: "Read notifications aloud" checkbox (off by default).
+  const [readAloud, setReadAloud] = useState(() => loadReadAloud());
+  const readAloudRef = useRef(readAloud);
+  useEffect(() => { readAloudRef.current = readAloud; }, [readAloud]);
+  useEffect(() => onTrainPush((m) => {
+    if (!readAloudRef.current || !shouldSpeakPush(m)) return;
+    speak([m.title, m.body].filter(Boolean).join(". "));
+  }), []);
+  const toggleReadAloud = useCallback(() => {
+    setReadAloud((on) => {
+      const next = !on;
+      saveReadAloud(next);
+      // Speaking once from the tap itself also unlocks speech on mobile.
+      if (next) speak("Read aloud is on. Train notifications and delay alerts will be read out.");
+      else if (isSpeechSupported()) window.speechSynthesis.cancel();
+      return next;
+    });
+  }, []);
   const [statusEvery, setStatusEvery] = useState(10);
   const statusEveryRef = useRef(10);
   const [statusEveryCustomOpen, setStatusEveryCustomOpen] = useState(false);
@@ -1797,6 +1817,7 @@ export default function LiveTrackingScreen({ navigation }) {
       approachFiredRef.current[key] = true;
       const name = toDisplayCase(st.name);
       setApproachNotice({ code, name, minutes, eta: st.predicted_eta || null });
+      if (readAloudRef.current && !(gpsOn || (typeof navigator !== "undefined" && navigator.onLine === false))) speak(`Train ${activeTrack.trainNumber} arriving at ${name} in about ${Math.max(1, minutes)} minutes. Please be alert.`);
       if (gpsOn || (typeof navigator !== "undefined" && navigator.onLine === false)) {
         showLocalNotice(
           `🚆 ${activeTrack.trainNumber} arriving at ${name} ${minutes < 1 ? "now" : `in ~${minutes} min`}`,
@@ -2045,6 +2066,24 @@ export default function LiveTrackingScreen({ navigation }) {
               <Text style={[styles.everyChipText, !statusEveryCustomOpen && statusEvery === 0 && styles.everyChipTextActive]}>Off</Text>
             </TouchableOpacity>
           </View>
+          {/* Read notifications aloud (opt-in). */}
+          <TouchableOpacity
+            onPress={toggleReadAloud}
+            style={styles.everyRow}
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: readAloud }}
+            disabled={!isSpeechSupported()}
+          >
+            <Ionicons name={readAloud ? "checkbox" : "square-outline"} size={18} color={isSpeechSupported() ? colors.primary : colors.textMuted} />
+            <Text style={styles.everyLabel}>
+              {isSpeechSupported() ? "🔊 Read notifications aloud" : "Read aloud isn't supported in this browser"}
+            </Text>
+          </TouchableOpacity>
+          {readAloud ? (
+            <Text style={styles.bgTrackText}>
+              Reads the status updates and bell/delay alerts while this app is open (also in a background tab). With the app fully closed, you'll still get the notification and sound.
+            </Text>
+          ) : null}
           {statusEveryCustomOpen ? (
             <View style={styles.everyRow}>
               <LabeledInput

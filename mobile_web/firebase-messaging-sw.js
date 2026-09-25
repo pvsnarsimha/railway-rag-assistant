@@ -139,7 +139,7 @@ self.addEventListener("push", function (event) {
   try { p = event.data ? event.data.json() : {}; } catch (e) { return; }
   var n = p.notification || {};
   var d = p.data || {};
-  var msg = { kind: "rail-push", title: n.title || d.title || "", body: n.body || d.body || "", type: d.type || "", train_number: d.train_number || "" };
+  var msg = { kind: "rail-push", title: n.title || d.title || "", body: n.body || d.body || "", type: d.type || "", train_number: d.train_number || "", alert: d.alert || "", sent_at: d.sent_at || "" };
   event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (list) {
     list.forEach(function (c) { try { c.postMessage(msg); } catch (e) {} });
   }));

@@ -128,3 +128,19 @@ self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   event.waitUntil(clients.openWindow("/mobile-app/"));
 });
+
+
+// FEATURE: "Read notifications aloud" — when a push arrives while the app
+// is open in a background tab, relay it to the page so it can be spoken
+// (a service worker itself cannot use text-to-speech). Runs alongside the
+// Firebase SDK's own handling; displays nothing by itself.
+self.addEventListener("push", function (event) {
+  var p = {};
+  try { p = event.data ? event.data.json() : {}; } catch (e) { return; }
+  var n = p.notification || {};
+  var d = p.data || {};
+  var msg = { kind: "rail-push", title: n.title || d.title || "", body: n.body || d.body || "", type: d.type || "", train_number: d.train_number || "", alert: d.alert || "", sent_at: d.sent_at || "" };
+  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (list) {
+    list.forEach(function (c) { try { c.postMessage(msg); } catch (e) {} });
+  }));
+});

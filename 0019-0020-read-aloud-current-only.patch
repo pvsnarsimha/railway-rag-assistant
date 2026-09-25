@@ -1,0 +1,286 @@
+diff --git a/backend/push_notifications.py b/backend/push_notifications.py
+index eba26ce..46712ce 100644
+--- a/backend/push_notifications.py
++++ b/backend/push_notifications.py
+@@ -35,6 +35,7 @@ def _ist_now() -> datetime:
+     """Train times are IST; Render runs in UTC, so stamp notifications in IST."""
+     return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+ from typing import Optional
++import time
+ 
+ import requests
+ 
+@@ -273,6 +274,7 @@ def send_delay_alert(
+         "predicted_delay_minutes": str(predicted_delay_minutes),
+         "predicted_for_station": predicted_for_station or "",
+         "checked_at": checked_at.strftime("%H:%M"),
++        "sent_at": str(int(time.time())),
+         "crossed_station": (running or {}).get("crossed_station") or "",
+         "next_station": (running or {}).get("next_station") or "",
+     }
+@@ -333,6 +335,7 @@ def send_fare_alert(
+         "new_fare": str(new_fare) if new_fare is not None else "",
+         "status_text": status_text or "",
+         "checked_at": checked_at.strftime("%H:%M"),
++        "sent_at": str(int(time.time())),
+     }
+ 
+     if _is_expo_token(token):
+@@ -380,6 +383,7 @@ def send_alarm_alert(
+         "station": station,
+         "lead_minutes": str(lead_minutes),
+         "checked_at": checked_at.strftime("%H:%M"),
++        "sent_at": str(int(time.time())),
+     }
+ 
+     if _is_expo_token(token):
+@@ -437,6 +441,7 @@ def send_approach_alert(
+         "type": "approach_alert", "train_number": str(train_number), "station": station or "",
+         "eta": eta_text or "", "minutes": "" if minutes is None else str(int(round(minutes))),
+         "checked_at": checked_at.strftime("%H:%M"),
++        "sent_at": str(int(time.time())),
+     }
+     if _is_expo_token(token):
+         return _send_via_expo(token, title, body, data, sound="default")
+@@ -539,7 +544,11 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
+         "next_halt_eta": running.get("next_halt_eta") or "",
+         "delay_minutes": "" if dp is None else str(dp),
+         "completed": "1" if running.get("completed") else "0",
++        # "1" = an alerting push (the user's interval / final); "0" = a
++        # silent in-place card refresh — read-aloud speaks only "1".
++        "alert": "1" if (final or alert) else "0",
+         "checked_at": checked_at.strftime("%H:%M"),
++        "sent_at": str(int(time.time())),
+     }
+ 
+     if _is_expo_token(token):
+diff --git a/mobile-app/public/firebase-messaging-sw.js b/mobile-app/public/firebase-messaging-sw.js
+index ab27df5..202c946 100644
+--- a/mobile-app/public/firebase-messaging-sw.js
++++ b/mobile-app/public/firebase-messaging-sw.js
+@@ -128,3 +128,19 @@ self.addEventListener("notificationclick", (event) => {
+   event.notification.close();
+   event.waitUntil(clients.openWindow("/mobile-app/"));
+ });
++
++
++// FEATURE: "Read notifications aloud" — when a push arrives while the app
++// is open in a background tab, relay it to the page so it can be spoken
++// (a service worker itself cannot use text-to-speech). Runs alongside the
++// Firebase SDK's own handling; displays nothing by itself.
++self.addEventListener("push", function (event) {
++  var p = {};
++  try { p = event.data ? event.data.json() : {}; } catch (e) { return; }
++  var n = p.notification || {};
++  var d = p.data || {};
++  var msg = { kind: "rail-push", title: n.title || d.title || "", body: n.body || d.body || "", type: d.type || "", train_number: d.train_number || "", alert: d.alert || "", sent_at: d.sent_at || "" };
++  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (list) {
++    list.forEach(function (c) { try { c.postMessage(msg); } catch (e) {} });
++  }));
++});
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.web.js b/mobile-app/src/screens/LiveTrackingScreen.web.js
+index ab2ee6f..68cbea7 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.web.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.web.js
+@@ -20,6 +20,7 @@ import { formatDelayDuration } from "../utils/formatDelay";
+ import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
+ import OfflineTrackingCard from "../components/OfflineTrackingCard";
+ import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
++import { isSpeechSupported, loadReadAloud, saveReadAloud, speak, onTrainPush, shouldSpeakPush } from "../utils/speakNotifications";
+ import {
+   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
+   loadStatusEvery, saveStatusEvery,
+@@ -73,6 +74,7 @@ async function saveLastPayload(trainNumber, date, payload) {
+ // push can't reach.
+ const APPROACH_ALERT_MINUTES = 10;
+ function showLocalNotice(title, body, tag) {
++  try { if (loadReadAloud()) speak(`${title}. ${body}`); } catch (e) { /* ignore */ }
+   try {
+     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+       // eslint-disable-next-line no-new
+@@ -789,6 +791,24 @@ export default function LiveTrackingScreen({ navigation }) {
+   // FEATURE: "notify me every 10 / 20 / 30 / custom min" for the tracked
+   // train — the live position + prediction as a notification at the
+   // user's own interval, app open or closed (0 = off).
++  // FEATURE: "Read notifications aloud" checkbox (off by default).
++  const [readAloud, setReadAloud] = useState(() => loadReadAloud());
++  const readAloudRef = useRef(readAloud);
++  useEffect(() => { readAloudRef.current = readAloud; }, [readAloud]);
++  useEffect(() => onTrainPush((m) => {
++    if (!readAloudRef.current || !shouldSpeakPush(m)) return;
++    speak([m.title, m.body].filter(Boolean).join(". "));
++  }), []);
++  const toggleReadAloud = useCallback(() => {
++    setReadAloud((on) => {
++      const next = !on;
++      saveReadAloud(next);
++      // Speaking once from the tap itself also unlocks speech on mobile.
++      if (next) speak("Read aloud is on. Train notifications and delay alerts will be read out.");
++      else if (isSpeechSupported()) window.speechSynthesis.cancel();
++      return next;
++    });
++  }, []);
+   const [statusEvery, setStatusEvery] = useState(10);
+   const statusEveryRef = useRef(10);
+   const [statusEveryCustomOpen, setStatusEveryCustomOpen] = useState(false);
+@@ -1797,6 +1817,7 @@ export default function LiveTrackingScreen({ navigation }) {
+       approachFiredRef.current[key] = true;
+       const name = toDisplayCase(st.name);
+       setApproachNotice({ code, name, minutes, eta: st.predicted_eta || null });
++      if (readAloudRef.current && !(gpsOn || (typeof navigator !== "undefined" && navigator.onLine === false))) speak(`Train ${activeTrack.trainNumber} arriving at ${name} in about ${Math.max(1, minutes)} minutes. Please be alert.`);
+       if (gpsOn || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+         showLocalNotice(
+           `🚆 ${activeTrack.trainNumber} arriving at ${name} ${minutes < 1 ? "now" : `in ~${minutes} min`}`,
+@@ -2045,6 +2066,24 @@ export default function LiveTrackingScreen({ navigation }) {
+               <Text style={[styles.everyChipText, !statusEveryCustomOpen && statusEvery === 0 && styles.everyChipTextActive]}>Off</Text>
+             </TouchableOpacity>
+           </View>
++          {/* Read notifications aloud (opt-in). */}
++          <TouchableOpacity
++            onPress={toggleReadAloud}
++            style={styles.everyRow}
++            accessibilityRole="checkbox"
++            accessibilityState={{ checked: readAloud }}
++            disabled={!isSpeechSupported()}
++          >
++            <Ionicons name={readAloud ? "checkbox" : "square-outline"} size={18} color={isSpeechSupported() ? colors.primary : colors.textMuted} />
++            <Text style={styles.everyLabel}>
++              {isSpeechSupported() ? "🔊 Read notifications aloud" : "Read aloud isn't supported in this browser"}
++            </Text>
++          </TouchableOpacity>
++          {readAloud ? (
++            <Text style={styles.bgTrackText}>
++              Reads the status updates and bell/delay alerts while this app is open (also in a background tab). With the app fully closed, you'll still get the notification and sound.
++            </Text>
++          ) : null}
+           {statusEveryCustomOpen ? (
+             <View style={styles.everyRow}>
+               <LabeledInput
+diff --git a/mobile-app/src/services/pushNotifications.js b/mobile-app/src/services/pushNotifications.js
+index f6d990f..8935128 100644
+--- a/mobile-app/src/services/pushNotifications.js
++++ b/mobile-app/src/services/pushNotifications.js
+@@ -187,6 +187,18 @@ async function registerForWebPushNotifications({ prompt = true } = {}) {
+     if (!webForegroundHandlerAttached) {
+     webForegroundHandlerAttached = true;
+     onMessage(messaging, (payload) => {
++      // FEATURE: "Read notifications aloud" — hand every train push to the
++      // Live Tracking screen (it speaks it when the user opted in).
++      try {
++        window.dispatchEvent(new CustomEvent("rail-push", { detail: {
++          title: payload.notification?.title || payload.data?.title || "",
++          body: payload.notification?.body || payload.data?.body || "",
++          type: payload.data?.type || "",
++          train_number: payload.data?.train_number || "",
++          alert: payload.data?.alert || "",
++          sent_at: payload.data?.sent_at || "",
++        } }));
++      } catch (e) { /* ignore */ }
+       // The silent background running-status update is for when the app is
+       // CLOSED — while it's open the Live Tracking screen already shows it.
+       if (payload?.data?.type === "running_status") return;
+diff --git a/mobile-app/src/utils/speakNotifications.js b/mobile-app/src/utils/speakNotifications.js
+new file mode 100644
+index 0000000..89ce4ef
+--- /dev/null
++++ b/mobile-app/src/utils/speakNotifications.js
+@@ -0,0 +1,99 @@
++// speakNotifications.js
++// ---------------------
++// FEATURE: "Read notifications aloud" (opt-in checkbox on Live Tracking).
++// When ON, every train notification — the general running-status update
++// ("Crossed Eluru · 12 km to Rajahmundry …") and every bell / delay alert —
++// is read out with the phone's own text-to-speech (Web Speech API).
++//
++// Browser limit, stated plainly: a web page can only speak while it is
++// open (visible, or still alive in a background tab). With the app fully
++// closed only the normal notification + sound can appear; the Android/iOS
++// app build would be needed to speak from a closed state.
++
++const KEY = "liveTracking.readAloud";
++const recent = new Map(); // text -> time, to skip the same message arriving twice
++
++export function isSpeechSupported() {
++  return typeof window !== "undefined" && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined";
++}
++
++export function loadReadAloud() {
++  try { return localStorage.getItem(KEY) === "1"; } catch (e) { return false; }
++}
++
++export function saveReadAloud(on) {
++  try { localStorage.setItem(KEY, on ? "1" : "0"); } catch (e) { /* ignore */ }
++}
++
++function clean(text) {
++  return String(text || "")
++    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, "") // emoji
++    .replace(/·/g, ",")
++    .replace(/\s+/g, " ")
++    .replace(/\bkm\b/g, "kilometres")
++    .replace(/\bmin\b/g, "minutes")
++    .replace(/\bJn\b/gi, "Junction")
++    .trim();
++}
++
++// Read ONLY the current notification, once: a newer message cuts off
++// anything still being read or queued (older updates are never read after
++// a newer one arrives), and the exact same text is never read twice.
++export function speak(text) {
++  if (!isSpeechSupported()) return false;
++  const t = clean(text);
++  if (!t) return false;
++  const now = Date.now();
++  for (const [k, at] of recent) if (now - at > 6 * 3600 * 1000) recent.delete(k);
++  if (recent.has(t)) return false;
++  recent.set(t, now);
++  try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
++  try {
++    const u = new SpeechSynthesisUtterance(t);
++    const voices = window.speechSynthesis.getVoices() || [];
++    const v = voices.find((x) => /en[-_]IN/i.test(x.lang)) || voices.find((x) => /^en/i.test(x.lang));
++    if (v) u.voice = v;
++    u.lang = (v && v.lang) || "en-IN";
++    u.rate = 0.95;
++    window.speechSynthesis.speak(u);
++    return true;
++  } catch (e) {
++    return false;
++  }
++}
++
++/** Calls handler({title, body, type}) for every train push received while
++ *  the page is alive — foreground (in-page Firebase handler) or background
++ *  tab (relayed by the service worker). Returns an unsubscribe function. */
++export function onTrainPush(handler) {
++  if (typeof window === "undefined") return () => {};
++  const fromPage = (e) => handler(e.detail || {});
++  const fromSw = (e) => { if (e.data && e.data.kind === "rail-push") handler(e.data); };
++  window.addEventListener("rail-push", fromPage);
++  const sw = typeof navigator !== "undefined" && navigator.serviceWorker;
++  if (sw) sw.addEventListener("message", fromSw);
++  return () => {
++    window.removeEventListener("rail-push", fromPage);
++    if (sw) sw.removeEventListener("message", fromSw);
++  };
++}
++
++/** Should this push be read aloud? Only the current, alerting one:
++ *  - silent in-place status refreshes (alert="0") are not read,
++ *  - a push older than 3 minutes (delivered late, e.g. after reopening the
++ *    browser) is past news and is not read,
++ *  - an older push arriving after a newer one for the same train is skipped. */
++const lastSentAt = new Map(); // train -> newest sent_at seen
++export function shouldSpeakPush(m) {
++  if (!m) return false;
++  if (m.type === "running_status" && m.alert === "0") return false;
++  const sent = parseInt(m.sent_at, 10);
++  if (Number.isFinite(sent)) {
++    if (Date.now() / 1000 - sent > 180) return false;
++    const key = m.train_number || "_";
++    const prev = lastSentAt.get(key) || 0;
++    if (sent < prev) return false;
++    lastSentAt.set(key, sent);
++  }
++  return true;
++}
