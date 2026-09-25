@@ -148,6 +148,15 @@ def _notification_icon_url() -> Optional[str]:
     return None
 
 
+def _delay_tag(train_number) -> str:
+    """BUGFIX ("bell alerts never show, only 'Crossed Eluru'"): delay /
+    station alerts used the SAME per-train tag as the silent running-status
+    card, so the next silent status update (every few minutes) replaced the
+    delay alert in place before it was ever seen. Bell alerts now get their
+    own slot, so both stay visible."""
+    return f"delay-{train_number}"
+
+
 def _train_tag(train_number) -> str:
     """ONE notification slot per train (RailYatri-style): delay alerts,
     station-reached notices and the background running-status update all
@@ -229,15 +238,16 @@ def send_delay_alert(
     # "as of HH:MM" makes that legible instead of looking like a
     # contradiction or a stale/buggy figure.
     checked_at = _ist_now()
-    title = f"Train {train_number} delayed"
+    title = f"Train {train_number} delayed" if (predicted_delay_minutes or 0) > 0 else f"Train {train_number} · on time"
     display_name = f"{train_number}" + (f" — {label}" if label else "")
     station_phrase = f" at {predicted_for_station}" if predicted_for_station else ""
     if stations_summary:
         body = f"Train {train_number} predicted late — {stations_summary} (as of {checked_at.strftime('%H:%M')})."
     else:
         body = (
-            f"{display_name} is now predicted ~{predicted_delay_minutes} min late{station_phrase} "
-            f"(as of {checked_at.strftime('%H:%M')})."
+            (f"{display_name} is now predicted ~{predicted_delay_minutes} min late{station_phrase} "
+             if (predicted_delay_minutes or 0) > 0 else f"{display_name} is running on time{station_phrase} ")
+            + f"(as of {checked_at.strftime('%H:%M')})."
         )
     # Current, physics-checked ETA to the bell's station — "ETA 04:07 ·
     # 2 km away" rather than a far-off timetable-based time.
@@ -255,7 +265,7 @@ def send_delay_alert(
     position_line = (running or {}).get("headline")
     if position_line:
         title = f"{train_number}" + (f" {running['train_name']}" if running.get("train_name") else "") \
-            + f" · ~{predicted_delay_minutes} min late"
+            + (f" · ~{predicted_delay_minutes} min late" if (predicted_delay_minutes or 0) > 0 else " · on time")
         body = f"{position_line}\n" + body
     data = {
         "type": "delay_alert",
@@ -283,7 +293,7 @@ def send_delay_alert(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=_webpush_config(title, body, tag=_train_tag(train_number)),
+        webpush=_webpush_config(title, body, tag=_delay_tag(train_number)),
     )
     try:
         messaging.send(message)
@@ -483,7 +493,7 @@ def send_station_status_alert(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=_webpush_config(title, body, tag=_train_tag(train_number)),
+        webpush=_webpush_config(title, body, tag=_delay_tag(train_number)),
     )
     try:
         messaging.send(fcm_message)
@@ -492,7 +502,8 @@ def send_station_status_alert(
         return {"sent": False, "error": str(e)}
 
 
-def send_running_status(token: str, train_number: str, running: dict, final: bool = False) -> dict:
+def send_running_status(token: str, train_number: str, running: dict, final: bool = False,
+                        alert: bool = False) -> dict:
     """
     FEATURE: background Live Tracking (RailYatri-style ongoing status).
     Sent by alert_scheduler.run_tracking_check_once for every train a
@@ -532,7 +543,7 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
     }
 
     if _is_expo_token(token):
-        return _send_via_expo(token, title, body, data, sound="default" if final else None)
+        return _send_via_expo(token, title, body, data, sound="default" if (final or alert) else None)
 
     if not _ensure_initialized():
         return {"sent": False, "error": _init_error}
@@ -543,7 +554,8 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=_webpush_config(title, body, tag=_train_tag(train_number), renotify=final, silent=not final),
+        webpush=_webpush_config(title, body, tag=_train_tag(train_number),
+                                renotify=final or alert, silent=not (final or alert)),
     )
     try:
         messaging.send(fcm_message)

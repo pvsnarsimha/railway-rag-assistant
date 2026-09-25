@@ -5351,6 +5351,9 @@ class TrackingWatchRequest(BaseModel):
     date: Optional[str] = None
     source: Optional[str] = None
     dest: Optional[str] = None
+    # "Notify me every N min" for this train (0 = off). None keeps the
+    # current setting (default 10 for a new watch).
+    interval_minutes: Optional[int] = None
 
 
 class TrackingWatchDeleteRequest(BaseModel):
@@ -5423,7 +5426,7 @@ def api_push_start_tracking(req: TrackingWatchRequest):
         raise HTTPException(status_code=400, detail="token and train_number are required")
     push_store.register_token(token)
     push_store.upsert_tracking_watch(token, req.train_number.strip(), (req.date or "").strip() or None,
-                                     req.source, req.dest)
+                                     req.source, req.dest, req.interval_minutes)
     return {"ok": True, "tracking": push_store.list_tracking_watches_for_token(token)}
 
 

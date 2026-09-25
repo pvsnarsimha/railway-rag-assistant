@@ -22,6 +22,7 @@ import OfflineTrackingCard from "../components/OfflineTrackingCard";
 import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
+  loadStatusEvery, saveStatusEvery,
 } from "../services/backgroundTracking";
 
 // FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
@@ -697,6 +698,9 @@ export default function LiveTrackingScreen({ navigation }) {
   // loadLeaflet() for why a real Leaflet map is possible here despite
   // react-native-maps having no web target.
   const [showMap, setShowMap] = useState(false);
+  // Live-status bubble on the train icon: hidden until the icon is tapped.
+  const [calloutOpen, setCalloutOpen] = useState(false);
+  const toggleCallout = useCallback(() => setCalloutOpen((v) => !v), []);
   const [mapError, setMapError] = useState(null);
   const mapContainerRef = useRef(null);
   const leafletMapRef = useRef(null);
@@ -782,6 +786,16 @@ export default function LiveTrackingScreen({ navigation }) {
   // Collapses the "Track a train" form into a compact RailYatri-style
   // header once a train is being tracked (tap "Change" to edit).
   const [formOpen, setFormOpen] = useState(true);
+  // FEATURE: "notify me every 10 / 20 / 30 / custom min" for the tracked
+  // train — the live position + prediction as a notification at the
+  // user's own interval, app open or closed (0 = off).
+  const [statusEvery, setStatusEvery] = useState(10);
+  const statusEveryRef = useRef(10);
+  const [statusEveryCustomOpen, setStatusEveryCustomOpen] = useState(false);
+  const [statusEveryCustomText, setStatusEveryCustomText] = useState("");
+  useEffect(() => {
+    loadStatusEvery().then((n) => { statusEveryRef.current = n; setStatusEvery(n); });
+  }, []);
   const datePickForHeaderRef = useRef(false);
 
   // FEATURE: Smart Alarm — same station-arrival wake-up as
@@ -924,7 +938,9 @@ export default function LiveTrackingScreen({ navigation }) {
         await reloadStationWatches();
       }
       if (settings) {
-        setStatus(true, `Alert set for ${station.name}: a push every ${settings.repeatMinutes} min while it's predicted ≥ ${settings.threshold} min late.`);
+        setStatus(true, settings.threshold === 0
+          ? `Alert set for ${station.name}: live ETA + delay every ${settings.repeatMinutes} min, and ~10 min before arrival.`
+          : `Alert set for ${station.name}: a push every ${settings.repeatMinutes} min while it's predicted ≥ ${settings.threshold} min late.`);
       }
       return { ok: true };
     } catch (e) {
@@ -1545,9 +1561,27 @@ export default function LiveTrackingScreen({ navigation }) {
     setBgTracking({ state: "pending" });
     enableBackgroundTracking(
       apiBaseUrl,
-      { trainNumber: params.trainNumber, date: trackedDate, source: params.source, dest: params.dest },
+      { trainNumber: params.trainNumber, date: trackedDate, source: params.source, dest: params.dest, intervalMinutes: statusEveryRef.current },
       { prompt: !fromResume },
     ).then((r) => setBgTracking(r.ok ? { state: "on" } : { state: "off", reason: r.reason }));
+  }
+
+  // Change "notify me every N min" for the tracked train: saved on this
+  // device and sent to the server's tracking watch right away.
+  function applyStatusEvery(minutes) {
+    const n = Math.max(0, Math.min(720, Math.round(minutes)));
+    statusEveryRef.current = n;
+    setStatusEvery(n);
+    saveStatusEvery(n);
+    const params = activeParamsRef.current;
+    if (params && params.trainNumber && !manualStopRef.current) {
+      setBgTracking({ state: "pending" });
+      enableBackgroundTracking(
+        apiBaseUrl,
+        { trainNumber: params.trainNumber, date: effectiveTrackDate(params.date), source: params.source, dest: params.dest, intervalMinutes: n },
+        { prompt: true },
+      ).then((r) => setBgTracking(r.ok ? { state: "on" } : { state: "off", reason: r.reason }));
+    }
   }
 
   // "Stop" is the ONLY thing that ends tracking for good — leaving the
@@ -1982,6 +2016,55 @@ export default function LiveTrackingScreen({ navigation }) {
             </TouchableOpacity>
           </View>
 
+          {/* "Notify me every" — live position + prediction as a notification
+              at the user's own interval, app open or closed. */}
+          <View style={styles.everyRow}>
+            <Ionicons name="notifications-outline" size={14} color={colors.primary} />
+            <Text style={styles.everyLabel}>Notify me every</Text>
+            {[10, 20, 30].map((m) => (
+              <TouchableOpacity
+                key={m}
+                onPress={() => { setStatusEveryCustomOpen(false); applyStatusEvery(m); }}
+                style={[styles.everyChip, !statusEveryCustomOpen && statusEvery === m && styles.everyChipActive]}
+              >
+                <Text style={[styles.everyChipText, !statusEveryCustomOpen && statusEvery === m && styles.everyChipTextActive]}>{m}m</Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity
+              onPress={() => setStatusEveryCustomOpen(true)}
+              style={[styles.everyChip, (statusEveryCustomOpen || ![0, 10, 20, 30].includes(statusEvery)) && styles.everyChipActive]}
+            >
+              <Text style={[styles.everyChipText, (statusEveryCustomOpen || ![0, 10, 20, 30].includes(statusEvery)) && styles.everyChipTextActive]}>
+                {![0, 10, 20, 30].includes(statusEvery) && !statusEveryCustomOpen ? `${statusEvery}m` : "Custom"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => { setStatusEveryCustomOpen(false); applyStatusEvery(0); }}
+              style={[styles.everyChip, !statusEveryCustomOpen && statusEvery === 0 && styles.everyChipActive]}
+            >
+              <Text style={[styles.everyChipText, !statusEveryCustomOpen && statusEvery === 0 && styles.everyChipTextActive]}>Off</Text>
+            </TouchableOpacity>
+          </View>
+          {statusEveryCustomOpen ? (
+            <View style={styles.everyRow}>
+              <LabeledInput
+                label="Minutes (e.g. 15, or 1:30 for 1 hr 30 min)"
+                value={statusEveryCustomText}
+                onChangeText={setStatusEveryCustomText}
+                keyboardType="numbers-and-punctuation"
+                style={{ flex: 1 }}
+              />
+              <TouchableOpacity
+                style={styles.everySetBtn}
+                onPress={() => {
+                  const n = parseLeadMinutesInput(statusEveryCustomText);
+                  if (n) { setStatusEveryCustomOpen(false); applyStatusEvery(n); }
+                }}
+              >
+                <Text style={styles.everySetBtnText}>Set</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
           {bgTracking && bgTracking.state !== "on" ? (
             <Text style={styles.bgTrackText}>
               {bgTracking.state === "pending" ? "Turning on background notifications…" : bgTracking.reason || "Background notifications are off."}
@@ -2277,6 +2360,8 @@ export default function LiveTrackingScreen({ navigation }) {
                       nextStationName={payload?.next_station}
                       segmentSpeedSignal={payload?.segment_speed_signal}
                       gpsMode={gpsOn}
+                      calloutOpen={calloutOpen}
+                      onTrainIconPress={toggleCallout}
                     />
                   );
                 }
@@ -2318,6 +2403,8 @@ export default function LiveTrackingScreen({ navigation }) {
                       nextStationName={payload?.next_station}
                       segmentSpeedSignal={payload?.segment_speed_signal}
                       gpsMode={gpsOn}
+                      calloutOpen={calloutOpen}
+                      onTrainIconPress={toggleCallout}
                       alertArmed={!!stationWatches[(entry.code || "").toUpperCase()]}
                       alertBlocked={ltJourneyLikelyComplete || reallyReachedCodes.has((entry.code || "").toUpperCase())}
                       onBellPress={bellsEnabledForPayload ? openStationAlert : undefined}
@@ -2474,7 +2561,7 @@ export default function LiveTrackingScreen({ navigation }) {
       station={delayModalStation}
       active={!!(delayModalStation && stationWatches[delayModalStation.code])}
       busy={delayWatchBusy}
-      initialThreshold={delayModalStation && stationWatches[delayModalStation.code] ? stationWatches[delayModalStation.code].threshold : 20}
+      initialThreshold={delayModalStation && stationWatches[delayModalStation.code] ? stationWatches[delayModalStation.code].threshold : 0}
       initialRepeat={delayModalStation && stationWatches[delayModalStation.code] ? stationWatches[delayModalStation.code].repeatMinutes : 10}
       statusMessage={delayWatchStatus ? delayWatchStatus.message : null}
       onConfirm={confirmDelayAlert}
@@ -2492,7 +2579,28 @@ export default function LiveTrackingScreen({ navigation }) {
 // train glyph with a small red circular "pin" badge overlapping its
 // bottom-right corner — same silhouette as the reference screenshot,
 // replacing the plain solid-red circle this screen used before.
-function TrainMarkerIcon() {
+// FEATURE: the live-status bubble opens ONLY when the train icon is tapped:
+// first tap shows it, second tap hides it. A real button for screen readers.
+function TrainMarkerIcon({ onPress, open }) {
+  if (onPress) {
+    return (
+      <TouchableOpacity
+        onPress={onPress}
+        style={styles.trainMarkerWrap}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: !!open }}
+        accessibilityLabel={open ? "Train position. Tap to hide live status" : "Train position. Tap to show live status"}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <View style={styles.trainMarkerSquare}>
+          <Ionicons name="train" size={16} color={colors.primary} />
+        </View>
+        <View style={styles.trainMarkerPinBadge}>
+          <Ionicons name="location" size={9} color="#fff" />
+        </View>
+      </TouchableOpacity>
+    );
+  }
   return (
     <View style={styles.trainMarkerWrap}>
       <View style={styles.trainMarkerSquare}>
@@ -2761,6 +2869,7 @@ function NoHaltGroupRow({
   group, expanded, onToggle,
   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
   statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal, gpsMode,
+  calloutOpen, onTrainIconPress,
 }) {
   const stations = group.stations || [];
   const firstPassed = stations.length > 0 && stations[0].status === "passed";
@@ -2795,7 +2904,7 @@ function NoHaltGroupRow({
             <View style={styles.tlTimeCol} />
             <View style={styles.tlRail}>
               <View style={[styles.tlLine, passed && styles.tlLinePassed]} />
-              {current ? <TrainMarkerIcon /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
+              {current ? <TrainMarkerIcon onPress={onTrainIconPress} open={calloutOpen} /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
               <View style={[styles.tlLine, passed && !current && styles.tlLinePassed]} />
             </View>
             <View style={styles.tlBody}>
@@ -2823,7 +2932,7 @@ function NoHaltGroupRow({
                   {s.distance_km != null ? `${s.distance_km} km from origin` : ""}
                 </Text>
               )}
-              {current && (
+              {current && calloutOpen && (
                 <LiveStatusCallout
                   stop={s}
                   statusUpdatedAt={statusUpdatedAt}
@@ -2910,6 +3019,7 @@ function TimelineStopRow({
   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
   statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
   alertArmed, alertBlocked, onBellPress, gpsMode,
+  calloutOpen, onTrainIconPress,
 }) {
   // BUGFIX: once the journey looks likely complete (see
   // computeJourneyLikelyComplete near the top of this file), the train
@@ -2949,7 +3059,7 @@ function TimelineStopRow({
             behind the train, same as the reference app, instead of a
             uniform grey line regardless of what's actually been covered. */}
         <View style={[styles.tlLine, isFirst && styles.tlLineHidden, isPassed && styles.tlLinePassed]} />
-        {isCurrent ? <TrainMarkerIcon /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
+        {isCurrent ? <TrainMarkerIcon onPress={onTrainIconPress} open={calloutOpen} /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
         <View style={[styles.tlLine, isLast && styles.tlLineHidden, isPassed && !isCurrent && styles.tlLinePassed]} />
       </View>
       <View style={styles.tlBody}>
@@ -2975,7 +3085,7 @@ function TimelineStopRow({
         </View>
         {metaBits.length > 0 && <Text style={styles.tlMeta}>{metaBits.join(" | ")}</Text>}
         {showStatusPill && <DelayPill minutes={effectiveDelay} />}
-        {isCurrent && (
+        {isCurrent && calloutOpen && (
           <LiveStatusCallout
             stop={stop}
             statusUpdatedAt={statusUpdatedAt}
@@ -3256,6 +3366,18 @@ const styles = StyleSheet.create({
     backgroundColor: "#eef4fb", alignItems: "center", justifyContent: "center",
   },
   tlBellArmed: { backgroundColor: colors.primary, borderColor: colors.primary },
+
+  everyRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6, marginTop: spacing.sm },
+  everyLabel: { fontSize: 12.5, fontWeight: "600", color: colors.text, marginRight: 2 },
+  everyChip: {
+    paddingVertical: 4, paddingHorizontal: 10, borderRadius: radius.pill,
+    borderWidth: 1, borderColor: colors.border, backgroundColor: "#fff",
+  },
+  everyChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  everyChipText: { fontSize: 12, fontWeight: "600", color: colors.text },
+  everyChipTextActive: { color: "#fff" },
+  everySetBtn: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: radius.md, backgroundColor: colors.primary },
+  everySetBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
 
   // REDESIGN (RailYatri-style header / status / banners / GPS prompt).
   ryHeader: {

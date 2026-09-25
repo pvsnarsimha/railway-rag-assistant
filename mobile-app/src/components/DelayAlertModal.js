@@ -5,9 +5,11 @@ import { colors, spacing, radius } from "../theme/colors";
 
 // Threshold ("alert when delay >= X") and repeat ("notify every Y") use
 // separate preset rows: repeat is offered as 10/20/30 min per request.
-const THRESHOLD_PRESETS = ["10", "15", "20", "30", "45"];
+// "0" = Always: a status push every repeat interval, even when on time
+// (per request — the bell should always keep you posted, not only when late).
+const THRESHOLD_PRESETS = ["0", "10", "15", "20", "30", "45"];
 const REPEAT_PRESETS = ["10", "20", "30"];
-const DEFAULT_THRESHOLD = "20";
+const DEFAULT_THRESHOLD = "0";
 const DEFAULT_REPEAT = "10";
 
 function ChipRow({ presets, value, isCustomOpen, onPick, onPickCustom, disabled }) {
@@ -22,7 +24,7 @@ function ChipRow({ presets, value, isCustomOpen, onPick, onPickCustom, disabled 
             onPress={() => onPick(m)}
             style={[styles.chip, active && styles.chipActive]}
           >
-            <Text style={[styles.chipText, active && styles.chipTextActive]}>{m} min</Text>
+            <Text style={[styles.chipText, active && styles.chipTextActive]}>{m === "0" ? "Always" : `${m} min`}</Text>
           </TouchableOpacity>
         );
       })}
@@ -78,7 +80,7 @@ export default function DelayAlertModal({
 
   React.useEffect(() => {
     if (!visible) return;
-    const t = String(initialThreshold || DEFAULT_THRESHOLD);
+    const t = String(initialThreshold ?? DEFAULT_THRESHOLD);
     const r = String(initialRepeat || DEFAULT_REPEAT);
     setThresholdChip(THRESHOLD_PRESETS.includes(t) ? t : "");
     setThresholdCustomOpen(!THRESHOLD_PRESETS.includes(t));
@@ -91,7 +93,7 @@ export default function DelayAlertModal({
   const thresholdValue = thresholdCustomOpen ? parseInt(thresholdCustomText, 10) : parseInt(thresholdChip, 10);
   const repeatValue = repeatCustomOpen ? parseInt(repeatCustomText, 10) : parseInt(repeatChip, 10);
   const num = (trainNumber || "").trim();
-  const canConfirm = !!num && thresholdValue > 0 && repeatValue > 0 && !busy;
+  const canConfirm = !!num && thresholdValue >= 0 && repeatValue > 0 && !busy;
 
   return (
     <Modal visible={!!visible} animationType="fade" transparent onRequestClose={onClose}>
@@ -111,7 +113,7 @@ export default function DelayAlertModal({
           </Text>
 
           <Text style={styles.fieldLabel}>
-            Alert me when delay{station ? ` at ${station.name}` : ""} is at least
+            Notify me{station ? ` about ${station.name}` : ""} when the delay is
           </Text>
           <ChipRow
             presets={THRESHOLD_PRESETS}
@@ -148,9 +150,9 @@ export default function DelayAlertModal({
             />
           )}
           <Text style={styles.hint}>
-            While {num || "this train"} is predicted to reach {station ? station.name : "this station"} at or past
-            your threshold, you'll get a push this often — even with the app closed. Stops by itself once the
-            train reaches the station.
+            {thresholdValue === 0
+              ? `You'll get the live position, ETA and delay for ${station ? station.name : "this station"} this often — even with the app closed, and ~10 min before arrival. Stops by itself once the train reaches the station.`
+              : `While ${num || "this train"} is predicted to reach ${station ? station.name : "this station"} at or past your threshold, you'll get a push this often — even with the app closed. Stops by itself once the train reaches the station.`}
           </Text>
 
           {statusMessage ? <Text style={styles.status}>{statusMessage}</Text> : null}

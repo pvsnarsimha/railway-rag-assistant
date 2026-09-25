@@ -687,20 +687,28 @@ def run_tracking_check_once(status_fn: Callable[[str, Optional[str]], dict]) -> 
         final = bool(rs.get("completed")) or result.get("status") == "journey_completed"
         changed = sig != (w.get("last_signature") or "")
         is_expo = push_notifications._is_expo_token(w["token"])
-        heartbeat_due = (not is_expo) and (
-            w.get("last_pushed_at") is None
-            or now - w["last_pushed_at"] >= TRACKING_REFRESH_MINUTES * 60 - _REPEAT_SLACK_SECONDS
+        # FEATURE: "notify me every 10/20/30/custom min" (user's own
+        # interval, 0 = off). A due interval push ALERTS (sound/vibrate) with
+        # the current position + prediction; between intervals, a web card
+        # is only refreshed SILENTLY in place when the train really moves on.
+        interval = w.get("interval_minutes")
+        interval = 10 if interval is None else int(interval)
+        last_alert = w.get("last_alert_at")
+        interval_due = interval > 0 and (
+            last_alert is None or now - last_alert >= interval * 60 - _REPEAT_SLACK_SECONDS
         )
-        if not (changed or heartbeat_due or final):
+        silent_refresh = (not is_expo) and changed and interval > 0
+        if not (interval_due or silent_refresh or final):
             continue
-        res = push_notifications.send_running_status(w["token"], w["train_number"], rs, final=final)
+        alert = interval_due or final
+        res = push_notifications.send_running_status(w["token"], w["train_number"], rs, final=final, alert=alert)
         if res["sent"]:
             pushed += 1
             if final:
                 push_store.delete_tracking_watch_by_id(w["id"])
                 retired += 1
             else:
-                push_store.mark_tracking_pushed(w["id"], sig)
+                push_store.mark_tracking_pushed(w["id"], sig, alerted=alert)
         else:
             push_failed += 1
             logger.warning("Tracking push failed id=%s: %s", w["id"], res["error"])

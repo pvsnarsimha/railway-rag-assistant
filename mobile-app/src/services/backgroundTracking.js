@@ -19,6 +19,21 @@ import { registerForPushNotifications, refreshWebPushToken } from "./pushNotific
 const PUSH_TOKEN_KEY = "moreTools.pushToken"; // shared with the rest of the app
 export const ACTIVE_TRACK_KEY = "liveTracking.active"; // web screen: one train
 export const NATIVE_TRACKED_KEY = "liveTracking.nativeTracked"; // native screen: list
+export const STATUS_EVERY_KEY = "liveTracking.statusEveryMinutes"; // "notify me every N min" (0 = off)
+
+export async function loadStatusEvery() {
+  try {
+    const v = await AsyncStorage.getItem(STATUS_EVERY_KEY);
+    const n = v == null ? 10 : parseInt(v, 10);
+    return Number.isFinite(n) && n >= 0 ? n : 10;
+  } catch (e) {
+    return 10;
+  }
+}
+
+export async function saveStatusEvery(minutes) {
+  try { await AsyncStorage.setItem(STATUS_EVERY_KEY, String(minutes)); } catch (e) { /* ignore */ }
+}
 const MAX_AGE_MS = 3 * 24 * 3600 * 1000; // a multi-day run still fits
 
 export async function saveActiveTrack(params) {
@@ -89,11 +104,11 @@ async function getToken(apiBaseUrl, prompt) {
  * Registers the tracked train for background push. Never throws.
  * Returns { ok: true } or { ok: false, reason }.
  */
-export async function enableBackgroundTracking(apiBaseUrl, { trainNumber, date, source, dest }, { prompt = true } = {}) {
+export async function enableBackgroundTracking(apiBaseUrl, { trainNumber, date, source, dest, intervalMinutes }, { prompt = true } = {}) {
   const { token, reason } = await getToken(apiBaseUrl, prompt);
   if (!token) return { ok: false, reason: reason || "Notifications are off — allow notifications to keep tracking after you close the app." };
   try {
-    await startBackgroundTracking(apiBaseUrl, token, { trainNumber, date, source, dest });
+    await startBackgroundTracking(apiBaseUrl, token, { trainNumber, date, source, dest, intervalMinutes });
     return { ok: true };
   } catch (e) {
     return { ok: false, reason: "Couldn't reach the server to start background tracking — it'll retry next time the app opens." };

@@ -1,0 +1,643 @@
+diff --git a/backend/alert_scheduler.py b/backend/alert_scheduler.py
+index 9a90339..4f0510d 100644
+--- a/backend/alert_scheduler.py
++++ b/backend/alert_scheduler.py
+@@ -687,20 +687,28 @@ def run_tracking_check_once(status_fn: Callable[[str, Optional[str]], dict]) ->
+         final = bool(rs.get("completed")) or result.get("status") == "journey_completed"
+         changed = sig != (w.get("last_signature") or "")
+         is_expo = push_notifications._is_expo_token(w["token"])
+-        heartbeat_due = (not is_expo) and (
+-            w.get("last_pushed_at") is None
+-            or now - w["last_pushed_at"] >= TRACKING_REFRESH_MINUTES * 60 - _REPEAT_SLACK_SECONDS
++        # FEATURE: "notify me every 10/20/30/custom min" (user's own
++        # interval, 0 = off). A due interval push ALERTS (sound/vibrate) with
++        # the current position + prediction; between intervals, a web card
++        # is only refreshed SILENTLY in place when the train really moves on.
++        interval = w.get("interval_minutes")
++        interval = 10 if interval is None else int(interval)
++        last_alert = w.get("last_alert_at")
++        interval_due = interval > 0 and (
++            last_alert is None or now - last_alert >= interval * 60 - _REPEAT_SLACK_SECONDS
+         )
+-        if not (changed or heartbeat_due or final):
++        silent_refresh = (not is_expo) and changed and interval > 0
++        if not (interval_due or silent_refresh or final):
+             continue
+-        res = push_notifications.send_running_status(w["token"], w["train_number"], rs, final=final)
++        alert = interval_due or final
++        res = push_notifications.send_running_status(w["token"], w["train_number"], rs, final=final, alert=alert)
+         if res["sent"]:
+             pushed += 1
+             if final:
+                 push_store.delete_tracking_watch_by_id(w["id"])
+                 retired += 1
+             else:
+-                push_store.mark_tracking_pushed(w["id"], sig)
++                push_store.mark_tracking_pushed(w["id"], sig, alerted=alert)
+         else:
+             push_failed += 1
+             logger.warning("Tracking push failed id=%s: %s", w["id"], res["error"])
+diff --git a/backend/app.py b/backend/app.py
+index d4f00f5..db71700 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -5351,6 +5351,9 @@ class TrackingWatchRequest(BaseModel):
+     date: Optional[str] = None
+     source: Optional[str] = None
+     dest: Optional[str] = None
++    # "Notify me every N min" for this train (0 = off). None keeps the
++    # current setting (default 10 for a new watch).
++    interval_minutes: Optional[int] = None
+ 
+ 
+ class TrackingWatchDeleteRequest(BaseModel):
+@@ -5423,7 +5426,7 @@ def api_push_start_tracking(req: TrackingWatchRequest):
+         raise HTTPException(status_code=400, detail="token and train_number are required")
+     push_store.register_token(token)
+     push_store.upsert_tracking_watch(token, req.train_number.strip(), (req.date or "").strip() or None,
+-                                     req.source, req.dest)
++                                     req.source, req.dest, req.interval_minutes)
+     return {"ok": True, "tracking": push_store.list_tracking_watches_for_token(token)}
+ 
+ 
+diff --git a/backend/push_notifications.py b/backend/push_notifications.py
+index 5fde884..eba26ce 100644
+--- a/backend/push_notifications.py
++++ b/backend/push_notifications.py
+@@ -148,6 +148,15 @@ def _notification_icon_url() -> Optional[str]:
+     return None
+ 
+ 
++def _delay_tag(train_number) -> str:
++    """BUGFIX ("bell alerts never show, only 'Crossed Eluru'"): delay /
++    station alerts used the SAME per-train tag as the silent running-status
++    card, so the next silent status update (every few minutes) replaced the
++    delay alert in place before it was ever seen. Bell alerts now get their
++    own slot, so both stay visible."""
++    return f"delay-{train_number}"
++
++
+ def _train_tag(train_number) -> str:
+     """ONE notification slot per train (RailYatri-style): delay alerts,
+     station-reached notices and the background running-status update all
+@@ -229,15 +238,16 @@ def send_delay_alert(
+     # "as of HH:MM" makes that legible instead of looking like a
+     # contradiction or a stale/buggy figure.
+     checked_at = _ist_now()
+-    title = f"Train {train_number} delayed"
++    title = f"Train {train_number} delayed" if (predicted_delay_minutes or 0) > 0 else f"Train {train_number} · on time"
+     display_name = f"{train_number}" + (f" — {label}" if label else "")
+     station_phrase = f" at {predicted_for_station}" if predicted_for_station else ""
+     if stations_summary:
+         body = f"Train {train_number} predicted late — {stations_summary} (as of {checked_at.strftime('%H:%M')})."
+     else:
+         body = (
+-            f"{display_name} is now predicted ~{predicted_delay_minutes} min late{station_phrase} "
+-            f"(as of {checked_at.strftime('%H:%M')})."
++            (f"{display_name} is now predicted ~{predicted_delay_minutes} min late{station_phrase} "
++             if (predicted_delay_minutes or 0) > 0 else f"{display_name} is running on time{station_phrase} ")
++            + f"(as of {checked_at.strftime('%H:%M')})."
+         )
+     # Current, physics-checked ETA to the bell's station — "ETA 04:07 ·
+     # 2 km away" rather than a far-off timetable-based time.
+@@ -255,7 +265,7 @@ def send_delay_alert(
+     position_line = (running or {}).get("headline")
+     if position_line:
+         title = f"{train_number}" + (f" {running['train_name']}" if running.get("train_name") else "") \
+-            + f" · ~{predicted_delay_minutes} min late"
++            + (f" · ~{predicted_delay_minutes} min late" if (predicted_delay_minutes or 0) > 0 else " · on time")
+         body = f"{position_line}\n" + body
+     data = {
+         "type": "delay_alert",
+@@ -283,7 +293,7 @@ def send_delay_alert(
+         token=token,
+         notification=messaging.Notification(title=title, body=body),
+         data=data,
+-        webpush=_webpush_config(title, body, tag=_train_tag(train_number)),
++        webpush=_webpush_config(title, body, tag=_delay_tag(train_number)),
+     )
+     try:
+         messaging.send(message)
+@@ -483,7 +493,7 @@ def send_station_status_alert(
+         token=token,
+         notification=messaging.Notification(title=title, body=body),
+         data=data,
+-        webpush=_webpush_config(title, body, tag=_train_tag(train_number)),
++        webpush=_webpush_config(title, body, tag=_delay_tag(train_number)),
+     )
+     try:
+         messaging.send(fcm_message)
+@@ -492,7 +502,8 @@ def send_station_status_alert(
+         return {"sent": False, "error": str(e)}
+ 
+ 
+-def send_running_status(token: str, train_number: str, running: dict, final: bool = False) -> dict:
++def send_running_status(token: str, train_number: str, running: dict, final: bool = False,
++                        alert: bool = False) -> dict:
+     """
+     FEATURE: background Live Tracking (RailYatri-style ongoing status).
+     Sent by alert_scheduler.run_tracking_check_once for every train a
+@@ -532,7 +543,7 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
+     }
+ 
+     if _is_expo_token(token):
+-        return _send_via_expo(token, title, body, data, sound="default" if final else None)
++        return _send_via_expo(token, title, body, data, sound="default" if (final or alert) else None)
+ 
+     if not _ensure_initialized():
+         return {"sent": False, "error": _init_error}
+@@ -543,7 +554,8 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
+         token=token,
+         notification=messaging.Notification(title=title, body=body),
+         data=data,
+-        webpush=_webpush_config(title, body, tag=_train_tag(train_number), renotify=final, silent=not final),
++        webpush=_webpush_config(title, body, tag=_train_tag(train_number),
++                                renotify=final or alert, silent=not (final or alert)),
+     )
+     try:
+         messaging.send(fcm_message)
+diff --git a/backend/push_store.py b/backend/push_store.py
+index c687296..8c258e8 100644
+--- a/backend/push_store.py
++++ b/backend/push_store.py
+@@ -186,6 +186,17 @@ def _init_db():
+             """
+         )
+         conn.execute("CREATE INDEX IF NOT EXISTS idx_tracking_watches_token ON tracking_watches(token)")
++        # FEATURE: "notify me every 10/20/30/custom min" for the tracked
++        # train (0 = off) + when that periodic alert last went out.
++        for stmt in (
++            "ALTER TABLE tracking_watches ADD COLUMN interval_minutes INTEGER NOT NULL DEFAULT 10",
++            "ALTER TABLE tracking_watches ADD COLUMN last_alert_at REAL",
++        ):
++            try:
++                conn.execute(stmt)
++            except sqlite3.OperationalError as e:
++                if "duplicate column" not in str(e).lower():
++                    raise
+ 
+ 
+ @contextmanager
+@@ -310,7 +321,8 @@ def replace_watches(token: str, watches: List[dict]) -> None:
+                     token,
+                     train_number,
+                     w.get("date"),
+-                    int(w.get("threshold_minutes") or 15),
++                    # 0 = "Always" (notify every repeat interval, even on time)
++                    int(w["threshold_minutes"]) if w.get("threshold_minutes") is not None else 15,
+                     int(w.get("repeat_minutes") or w.get("threshold_minutes") or 15),
+                     w.get("label"),
+                     carried_delay,
+@@ -549,20 +561,36 @@ TRACKING_WATCH_MAX_AGE_SECONDS = 3 * 24 * 3600  # a multi-day run still fits
+ 
+ 
+ def upsert_tracking_watch(token: str, train_number: str, date: Optional[str],
+-                          source: Optional[str] = None, dest: Optional[str] = None) -> None:
++                          source: Optional[str] = None, dest: Optional[str] = None,
++                          interval_minutes: Optional[int] = None) -> None:
+     train_number = str(train_number or "").strip()
+     if not token or not train_number:
+         return
+     now = time.time()
+     with _connect() as conn:
++        if not date:
++            # SQLite's UNIQUE treats NULL dates as all different, so a
++            # blank-date watch would be duplicated (and double-notified)
++            # instead of updated — handle that case explicitly.
++            cur = conn.execute(
++                "UPDATE tracking_watches SET source = ?, dest = ?, interval_minutes = COALESCE(?, interval_minutes) "
++                "WHERE token = ? AND train_number = ? AND date IS NULL",
++                (source or None, dest or None, None if interval_minutes is None else max(0, int(interval_minutes)),
++                 token, train_number),
++            )
++            if cur.rowcount:
++                return
+         conn.execute(
+             """
+-            INSERT INTO tracking_watches (token, train_number, date, source, dest, created_at)
+-            VALUES (?, ?, ?, ?, ?, ?)
++            INSERT INTO tracking_watches (token, train_number, date, source, dest, created_at, interval_minutes)
++            VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(token, train_number, date) DO UPDATE SET
+-                source = excluded.source, dest = excluded.dest
++                source = excluded.source, dest = excluded.dest,
++                interval_minutes = CASE WHEN ? IS NULL THEN tracking_watches.interval_minutes
++                                        ELSE excluded.interval_minutes END
+             """,
+-            (token, train_number, date or None, source or None, dest or None, now),
++            (token, train_number, date or None, source or None, dest or None, now,
++             10 if interval_minutes is None else max(0, int(interval_minutes)), interval_minutes),
+         )
+         # Keep only the most recent few per device.
+         rows = conn.execute(
+@@ -613,9 +641,15 @@ def count_tracking_watches() -> int:
+         return conn.execute("SELECT COUNT(*) FROM tracking_watches").fetchone()[0]
+ 
+ 
+-def mark_tracking_pushed(watch_id: int, signature: str) -> None:
++def mark_tracking_pushed(watch_id: int, signature: str, alerted: bool = False) -> None:
+     with _connect() as conn:
+-        conn.execute(
+-            "UPDATE tracking_watches SET last_signature = ?, last_pushed_at = ? WHERE id = ?",
+-            (signature, time.time(), watch_id),
+-        )
++        if alerted:
++            conn.execute(
++                "UPDATE tracking_watches SET last_signature = ?, last_pushed_at = ?, last_alert_at = ? WHERE id = ?",
++                (signature, time.time(), time.time(), watch_id),
++            )
++        else:
++            conn.execute(
++                "UPDATE tracking_watches SET last_signature = ?, last_pushed_at = ? WHERE id = ?",
++                (signature, time.time(), watch_id),
++            )
+diff --git a/mobile-app/src/api/railwayApi.js b/mobile-app/src/api/railwayApi.js
+index 1d66991..edfe388 100644
+--- a/mobile-app/src/api/railwayApi.js
++++ b/mobile-app/src/api/railwayApi.js
+@@ -814,10 +814,12 @@ export function buildTripShareUrl(apiBaseUrl, shareId) {
+  * "Crossed X at HH:MM · N km to Y" notification after the app is closed.
+  * See backend/alert_scheduler.py's run_tracking_check_once.
+  */
+-export async function startBackgroundTracking(baseUrl, token, { trainNumber, date, source, dest }) {
++export async function startBackgroundTracking(baseUrl, token, { trainNumber, date, source, dest, intervalMinutes }) {
+   const client = makeClient(baseUrl);
+   const { data } = await client.post("/api/push/tracking", {
+     token, train_number: trainNumber, date: date || null, source: source || null, dest: dest || null,
++    // "Notify me every N min" (0 = off); omitted keeps the server's setting.
++    ...(intervalMinutes != null ? { interval_minutes: intervalMinutes } : {}),
+   });
+   return data;
+ }
+diff --git a/mobile-app/src/components/DelayAlertModal.js b/mobile-app/src/components/DelayAlertModal.js
+index a27ae1e..7c7a2b2 100644
+--- a/mobile-app/src/components/DelayAlertModal.js
++++ b/mobile-app/src/components/DelayAlertModal.js
+@@ -5,9 +5,11 @@ import { colors, spacing, radius } from "../theme/colors";
+ 
+ // Threshold ("alert when delay >= X") and repeat ("notify every Y") use
+ // separate preset rows: repeat is offered as 10/20/30 min per request.
+-const THRESHOLD_PRESETS = ["10", "15", "20", "30", "45"];
++// "0" = Always: a status push every repeat interval, even when on time
++// (per request — the bell should always keep you posted, not only when late).
++const THRESHOLD_PRESETS = ["0", "10", "15", "20", "30", "45"];
+ const REPEAT_PRESETS = ["10", "20", "30"];
+-const DEFAULT_THRESHOLD = "20";
++const DEFAULT_THRESHOLD = "0";
+ const DEFAULT_REPEAT = "10";
+ 
+ function ChipRow({ presets, value, isCustomOpen, onPick, onPickCustom, disabled }) {
+@@ -22,7 +24,7 @@ function ChipRow({ presets, value, isCustomOpen, onPick, onPickCustom, disabled
+             onPress={() => onPick(m)}
+             style={[styles.chip, active && styles.chipActive]}
+           >
+-            <Text style={[styles.chipText, active && styles.chipTextActive]}>{m} min</Text>
++            <Text style={[styles.chipText, active && styles.chipTextActive]}>{m === "0" ? "Always" : `${m} min`}</Text>
+           </TouchableOpacity>
+         );
+       })}
+@@ -78,7 +80,7 @@ export default function DelayAlertModal({
+ 
+   React.useEffect(() => {
+     if (!visible) return;
+-    const t = String(initialThreshold || DEFAULT_THRESHOLD);
++    const t = String(initialThreshold ?? DEFAULT_THRESHOLD);
+     const r = String(initialRepeat || DEFAULT_REPEAT);
+     setThresholdChip(THRESHOLD_PRESETS.includes(t) ? t : "");
+     setThresholdCustomOpen(!THRESHOLD_PRESETS.includes(t));
+@@ -91,7 +93,7 @@ export default function DelayAlertModal({
+   const thresholdValue = thresholdCustomOpen ? parseInt(thresholdCustomText, 10) : parseInt(thresholdChip, 10);
+   const repeatValue = repeatCustomOpen ? parseInt(repeatCustomText, 10) : parseInt(repeatChip, 10);
+   const num = (trainNumber || "").trim();
+-  const canConfirm = !!num && thresholdValue > 0 && repeatValue > 0 && !busy;
++  const canConfirm = !!num && thresholdValue >= 0 && repeatValue > 0 && !busy;
+ 
+   return (
+     <Modal visible={!!visible} animationType="fade" transparent onRequestClose={onClose}>
+@@ -111,7 +113,7 @@ export default function DelayAlertModal({
+           </Text>
+ 
+           <Text style={styles.fieldLabel}>
+-            Alert me when delay{station ? ` at ${station.name}` : ""} is at least
++            Notify me{station ? ` about ${station.name}` : ""} when the delay is
+           </Text>
+           <ChipRow
+             presets={THRESHOLD_PRESETS}
+@@ -148,9 +150,9 @@ export default function DelayAlertModal({
+             />
+           )}
+           <Text style={styles.hint}>
+-            While {num || "this train"} is predicted to reach {station ? station.name : "this station"} at or past
+-            your threshold, you'll get a push this often — even with the app closed. Stops by itself once the
+-            train reaches the station.
++            {thresholdValue === 0
++              ? `You'll get the live position, ETA and delay for ${station ? station.name : "this station"} this often — even with the app closed, and ~10 min before arrival. Stops by itself once the train reaches the station.`
++              : `While ${num || "this train"} is predicted to reach ${station ? station.name : "this station"} at or past your threshold, you'll get a push this often — even with the app closed. Stops by itself once the train reaches the station.`}
+           </Text>
+ 
+           {statusMessage ? <Text style={styles.status}>{statusMessage}</Text> : null}
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.web.js b/mobile-app/src/screens/LiveTrackingScreen.web.js
+index c3265bb..ab2ee6f 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.web.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.web.js
+@@ -22,6 +22,7 @@ import OfflineTrackingCard from "../components/OfflineTrackingCard";
+ import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
+ import {
+   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
++  loadStatusEvery, saveStatusEvery,
+ } from "../services/backgroundTracking";
+ 
+ // FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
+@@ -697,6 +698,9 @@ export default function LiveTrackingScreen({ navigation }) {
+   // loadLeaflet() for why a real Leaflet map is possible here despite
+   // react-native-maps having no web target.
+   const [showMap, setShowMap] = useState(false);
++  // Live-status bubble on the train icon: hidden until the icon is tapped.
++  const [calloutOpen, setCalloutOpen] = useState(false);
++  const toggleCallout = useCallback(() => setCalloutOpen((v) => !v), []);
+   const [mapError, setMapError] = useState(null);
+   const mapContainerRef = useRef(null);
+   const leafletMapRef = useRef(null);
+@@ -782,6 +786,16 @@ export default function LiveTrackingScreen({ navigation }) {
+   // Collapses the "Track a train" form into a compact RailYatri-style
+   // header once a train is being tracked (tap "Change" to edit).
+   const [formOpen, setFormOpen] = useState(true);
++  // FEATURE: "notify me every 10 / 20 / 30 / custom min" for the tracked
++  // train — the live position + prediction as a notification at the
++  // user's own interval, app open or closed (0 = off).
++  const [statusEvery, setStatusEvery] = useState(10);
++  const statusEveryRef = useRef(10);
++  const [statusEveryCustomOpen, setStatusEveryCustomOpen] = useState(false);
++  const [statusEveryCustomText, setStatusEveryCustomText] = useState("");
++  useEffect(() => {
++    loadStatusEvery().then((n) => { statusEveryRef.current = n; setStatusEvery(n); });
++  }, []);
+   const datePickForHeaderRef = useRef(false);
+ 
+   // FEATURE: Smart Alarm — same station-arrival wake-up as
+@@ -924,7 +938,9 @@ export default function LiveTrackingScreen({ navigation }) {
+         await reloadStationWatches();
+       }
+       if (settings) {
+-        setStatus(true, `Alert set for ${station.name}: a push every ${settings.repeatMinutes} min while it's predicted ≥ ${settings.threshold} min late.`);
++        setStatus(true, settings.threshold === 0
++          ? `Alert set for ${station.name}: live ETA + delay every ${settings.repeatMinutes} min, and ~10 min before arrival.`
++          : `Alert set for ${station.name}: a push every ${settings.repeatMinutes} min while it's predicted ≥ ${settings.threshold} min late.`);
+       }
+       return { ok: true };
+     } catch (e) {
+@@ -1545,11 +1561,29 @@ export default function LiveTrackingScreen({ navigation }) {
+     setBgTracking({ state: "pending" });
+     enableBackgroundTracking(
+       apiBaseUrl,
+-      { trainNumber: params.trainNumber, date: trackedDate, source: params.source, dest: params.dest },
++      { trainNumber: params.trainNumber, date: trackedDate, source: params.source, dest: params.dest, intervalMinutes: statusEveryRef.current },
+       { prompt: !fromResume },
+     ).then((r) => setBgTracking(r.ok ? { state: "on" } : { state: "off", reason: r.reason }));
+   }
+ 
++  // Change "notify me every N min" for the tracked train: saved on this
++  // device and sent to the server's tracking watch right away.
++  function applyStatusEvery(minutes) {
++    const n = Math.max(0, Math.min(720, Math.round(minutes)));
++    statusEveryRef.current = n;
++    setStatusEvery(n);
++    saveStatusEvery(n);
++    const params = activeParamsRef.current;
++    if (params && params.trainNumber && !manualStopRef.current) {
++      setBgTracking({ state: "pending" });
++      enableBackgroundTracking(
++        apiBaseUrl,
++        { trainNumber: params.trainNumber, date: effectiveTrackDate(params.date), source: params.source, dest: params.dest, intervalMinutes: n },
++        { prompt: true },
++      ).then((r) => setBgTracking(r.ok ? { state: "on" } : { state: "off", reason: r.reason }));
++    }
++  }
++
+   // "Stop" is the ONLY thing that ends tracking for good — leaving the
+   // screen or closing the app keeps it going in the background.
+   function stopTracking() {
+@@ -1982,6 +2016,55 @@ export default function LiveTrackingScreen({ navigation }) {
+             </TouchableOpacity>
+           </View>
+ 
++          {/* "Notify me every" — live position + prediction as a notification
++              at the user's own interval, app open or closed. */}
++          <View style={styles.everyRow}>
++            <Ionicons name="notifications-outline" size={14} color={colors.primary} />
++            <Text style={styles.everyLabel}>Notify me every</Text>
++            {[10, 20, 30].map((m) => (
++              <TouchableOpacity
++                key={m}
++                onPress={() => { setStatusEveryCustomOpen(false); applyStatusEvery(m); }}
++                style={[styles.everyChip, !statusEveryCustomOpen && statusEvery === m && styles.everyChipActive]}
++              >
++                <Text style={[styles.everyChipText, !statusEveryCustomOpen && statusEvery === m && styles.everyChipTextActive]}>{m}m</Text>
++              </TouchableOpacity>
++            ))}
++            <TouchableOpacity
++              onPress={() => setStatusEveryCustomOpen(true)}
++              style={[styles.everyChip, (statusEveryCustomOpen || ![0, 10, 20, 30].includes(statusEvery)) && styles.everyChipActive]}
++            >
++              <Text style={[styles.everyChipText, (statusEveryCustomOpen || ![0, 10, 20, 30].includes(statusEvery)) && styles.everyChipTextActive]}>
++                {![0, 10, 20, 30].includes(statusEvery) && !statusEveryCustomOpen ? `${statusEvery}m` : "Custom"}
++              </Text>
++            </TouchableOpacity>
++            <TouchableOpacity
++              onPress={() => { setStatusEveryCustomOpen(false); applyStatusEvery(0); }}
++              style={[styles.everyChip, !statusEveryCustomOpen && statusEvery === 0 && styles.everyChipActive]}
++            >
++              <Text style={[styles.everyChipText, !statusEveryCustomOpen && statusEvery === 0 && styles.everyChipTextActive]}>Off</Text>
++            </TouchableOpacity>
++          </View>
++          {statusEveryCustomOpen ? (
++            <View style={styles.everyRow}>
++              <LabeledInput
++                label="Minutes (e.g. 15, or 1:30 for 1 hr 30 min)"
++                value={statusEveryCustomText}
++                onChangeText={setStatusEveryCustomText}
++                keyboardType="numbers-and-punctuation"
++                style={{ flex: 1 }}
++              />
++              <TouchableOpacity
++                style={styles.everySetBtn}
++                onPress={() => {
++                  const n = parseLeadMinutesInput(statusEveryCustomText);
++                  if (n) { setStatusEveryCustomOpen(false); applyStatusEvery(n); }
++                }}
++              >
++                <Text style={styles.everySetBtnText}>Set</Text>
++              </TouchableOpacity>
++            </View>
++          ) : null}
+           {bgTracking && bgTracking.state !== "on" ? (
+             <Text style={styles.bgTrackText}>
+               {bgTracking.state === "pending" ? "Turning on background notifications…" : bgTracking.reason || "Background notifications are off."}
+@@ -2277,6 +2360,8 @@ export default function LiveTrackingScreen({ navigation }) {
+                       nextStationName={payload?.next_station}
+                       segmentSpeedSignal={payload?.segment_speed_signal}
+                       gpsMode={gpsOn}
++                      calloutOpen={calloutOpen}
++                      onTrainIconPress={toggleCallout}
+                     />
+                   );
+                 }
+@@ -2318,6 +2403,8 @@ export default function LiveTrackingScreen({ navigation }) {
+                       nextStationName={payload?.next_station}
+                       segmentSpeedSignal={payload?.segment_speed_signal}
+                       gpsMode={gpsOn}
++                      calloutOpen={calloutOpen}
++                      onTrainIconPress={toggleCallout}
+                       alertArmed={!!stationWatches[(entry.code || "").toUpperCase()]}
+                       alertBlocked={ltJourneyLikelyComplete || reallyReachedCodes.has((entry.code || "").toUpperCase())}
+                       onBellPress={bellsEnabledForPayload ? openStationAlert : undefined}
+@@ -2474,7 +2561,7 @@ export default function LiveTrackingScreen({ navigation }) {
+       station={delayModalStation}
+       active={!!(delayModalStation && stationWatches[delayModalStation.code])}
+       busy={delayWatchBusy}
+-      initialThreshold={delayModalStation && stationWatches[delayModalStation.code] ? stationWatches[delayModalStation.code].threshold : 20}
++      initialThreshold={delayModalStation && stationWatches[delayModalStation.code] ? stationWatches[delayModalStation.code].threshold : 0}
+       initialRepeat={delayModalStation && stationWatches[delayModalStation.code] ? stationWatches[delayModalStation.code].repeatMinutes : 10}
+       statusMessage={delayWatchStatus ? delayWatchStatus.message : null}
+       onConfirm={confirmDelayAlert}
+@@ -2492,7 +2579,28 @@ export default function LiveTrackingScreen({ navigation }) {
+ // train glyph with a small red circular "pin" badge overlapping its
+ // bottom-right corner — same silhouette as the reference screenshot,
+ // replacing the plain solid-red circle this screen used before.
+-function TrainMarkerIcon() {
++// FEATURE: the live-status bubble opens ONLY when the train icon is tapped:
++// first tap shows it, second tap hides it. A real button for screen readers.
++function TrainMarkerIcon({ onPress, open }) {
++  if (onPress) {
++    return (
++      <TouchableOpacity
++        onPress={onPress}
++        style={styles.trainMarkerWrap}
++        accessibilityRole="button"
++        accessibilityState={{ expanded: !!open }}
++        accessibilityLabel={open ? "Train position. Tap to hide live status" : "Train position. Tap to show live status"}
++        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
++      >
++        <View style={styles.trainMarkerSquare}>
++          <Ionicons name="train" size={16} color={colors.primary} />
++        </View>
++        <View style={styles.trainMarkerPinBadge}>
++          <Ionicons name="location" size={9} color="#fff" />
++        </View>
++      </TouchableOpacity>
++    );
++  }
+   return (
+     <View style={styles.trainMarkerWrap}>
+       <View style={styles.trainMarkerSquare}>
+@@ -2761,6 +2869,7 @@ function NoHaltGroupRow({
+   group, expanded, onToggle,
+   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
+   statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal, gpsMode,
++  calloutOpen, onTrainIconPress,
+ }) {
+   const stations = group.stations || [];
+   const firstPassed = stations.length > 0 && stations[0].status === "passed";
+@@ -2795,7 +2904,7 @@ function NoHaltGroupRow({
+             <View style={styles.tlTimeCol} />
+             <View style={styles.tlRail}>
+               <View style={[styles.tlLine, passed && styles.tlLinePassed]} />
+-              {current ? <TrainMarkerIcon /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
++              {current ? <TrainMarkerIcon onPress={onTrainIconPress} open={calloutOpen} /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
+               <View style={[styles.tlLine, passed && !current && styles.tlLinePassed]} />
+             </View>
+             <View style={styles.tlBody}>
+@@ -2823,7 +2932,7 @@ function NoHaltGroupRow({
+                   {s.distance_km != null ? `${s.distance_km} km from origin` : ""}
+                 </Text>
+               )}
+-              {current && (
++              {current && calloutOpen && (
+                 <LiveStatusCallout
+                   stop={s}
+                   statusUpdatedAt={statusUpdatedAt}
+@@ -2910,6 +3019,7 @@ function TimelineStopRow({
+   statusUpdatedAt, refreshCountdown, distanceRemainingToNextKm, totalCoveredKm,
+   statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal,
+   alertArmed, alertBlocked, onBellPress, gpsMode,
++  calloutOpen, onTrainIconPress,
+ }) {
+   // BUGFIX: once the journey looks likely complete (see
+   // computeJourneyLikelyComplete near the top of this file), the train
+@@ -2949,7 +3059,7 @@ function TimelineStopRow({
+             behind the train, same as the reference app, instead of a
+             uniform grey line regardless of what's actually been covered. */}
+         <View style={[styles.tlLine, isFirst && styles.tlLineHidden, isPassed && styles.tlLinePassed]} />
+-        {isCurrent ? <TrainMarkerIcon /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
++        {isCurrent ? <TrainMarkerIcon onPress={onTrainIconPress} open={calloutOpen} /> : <View style={[styles.tlDot, { backgroundColor: dotColor }]} />}
+         <View style={[styles.tlLine, isLast && styles.tlLineHidden, isPassed && !isCurrent && styles.tlLinePassed]} />
+       </View>
+       <View style={styles.tlBody}>
+@@ -2975,7 +3085,7 @@ function TimelineStopRow({
+         </View>
+         {metaBits.length > 0 && <Text style={styles.tlMeta}>{metaBits.join(" | ")}</Text>}
+         {showStatusPill && <DelayPill minutes={effectiveDelay} />}
+-        {isCurrent && (
++        {isCurrent && calloutOpen && (
+           <LiveStatusCallout
+             stop={stop}
+             statusUpdatedAt={statusUpdatedAt}
+@@ -3257,6 +3367,18 @@ const styles = StyleSheet.create({
+   },
+   tlBellArmed: { backgroundColor: colors.primary, borderColor: colors.primary },
+ 
++  everyRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6, marginTop: spacing.sm },
++  everyLabel: { fontSize: 12.5, fontWeight: "600", color: colors.text, marginRight: 2 },
++  everyChip: {
++    paddingVertical: 4, paddingHorizontal: 10, borderRadius: radius.pill,
++    borderWidth: 1, borderColor: colors.border, backgroundColor: "#fff",
++  },
++  everyChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
++  everyChipText: { fontSize: 12, fontWeight: "600", color: colors.text },
++  everyChipTextActive: { color: "#fff" },
++  everySetBtn: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: radius.md, backgroundColor: colors.primary },
++  everySetBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
++
+   // REDESIGN (RailYatri-style header / status / banners / GPS prompt).
+   ryHeader: {
+     backgroundColor: "#fff", borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
+diff --git a/mobile-app/src/services/backgroundTracking.js b/mobile-app/src/services/backgroundTracking.js
+index 832b34a..53b29f4 100644
+--- a/mobile-app/src/services/backgroundTracking.js
++++ b/mobile-app/src/services/backgroundTracking.js
+@@ -19,6 +19,21 @@ import { registerForPushNotifications, refreshWebPushToken } from "./pushNotific
+ const PUSH_TOKEN_KEY = "moreTools.pushToken"; // shared with the rest of the app
+ export const ACTIVE_TRACK_KEY = "liveTracking.active"; // web screen: one train
+ export const NATIVE_TRACKED_KEY = "liveTracking.nativeTracked"; // native screen: list
++export const STATUS_EVERY_KEY = "liveTracking.statusEveryMinutes"; // "notify me every N min" (0 = off)
++
++export async function loadStatusEvery() {
++  try {
++    const v = await AsyncStorage.getItem(STATUS_EVERY_KEY);
++    const n = v == null ? 10 : parseInt(v, 10);
++    return Number.isFinite(n) && n >= 0 ? n : 10;
++  } catch (e) {
++    return 10;
++  }
++}
++
++export async function saveStatusEvery(minutes) {
++  try { await AsyncStorage.setItem(STATUS_EVERY_KEY, String(minutes)); } catch (e) { /* ignore */ }
++}
+ const MAX_AGE_MS = 3 * 24 * 3600 * 1000; // a multi-day run still fits
+ 
+ export async function saveActiveTrack(params) {
+@@ -89,11 +104,11 @@ async function getToken(apiBaseUrl, prompt) {
+  * Registers the tracked train for background push. Never throws.
+  * Returns { ok: true } or { ok: false, reason }.
+  */
+-export async function enableBackgroundTracking(apiBaseUrl, { trainNumber, date, source, dest }, { prompt = true } = {}) {
++export async function enableBackgroundTracking(apiBaseUrl, { trainNumber, date, source, dest, intervalMinutes }, { prompt = true } = {}) {
+   const { token, reason } = await getToken(apiBaseUrl, prompt);
+   if (!token) return { ok: false, reason: reason || "Notifications are off — allow notifications to keep tracking after you close the app." };
+   try {
+-    await startBackgroundTracking(apiBaseUrl, token, { trainNumber, date, source, dest });
++    await startBackgroundTracking(apiBaseUrl, token, { trainNumber, date, source, dest, intervalMinutes });
+     return { ok: true };
+   } catch (e) {
+     return { ok: false, reason: "Couldn't reach the server to start background tracking — it'll retry next time the app opens." };

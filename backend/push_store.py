@@ -186,6 +186,17 @@ def _init_db():
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tracking_watches_token ON tracking_watches(token)")
+        # FEATURE: "notify me every 10/20/30/custom min" for the tracked
+        # train (0 = off) + when that periodic alert last went out.
+        for stmt in (
+            "ALTER TABLE tracking_watches ADD COLUMN interval_minutes INTEGER NOT NULL DEFAULT 10",
+            "ALTER TABLE tracking_watches ADD COLUMN last_alert_at REAL",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
 
 
 @contextmanager
@@ -310,7 +321,8 @@ def replace_watches(token: str, watches: List[dict]) -> None:
                     token,
                     train_number,
                     w.get("date"),
-                    int(w.get("threshold_minutes") or 15),
+                    # 0 = "Always" (notify every repeat interval, even on time)
+                    int(w["threshold_minutes"]) if w.get("threshold_minutes") is not None else 15,
                     int(w.get("repeat_minutes") or w.get("threshold_minutes") or 15),
                     w.get("label"),
                     carried_delay,
@@ -549,20 +561,36 @@ TRACKING_WATCH_MAX_AGE_SECONDS = 3 * 24 * 3600  # a multi-day run still fits
 
 
 def upsert_tracking_watch(token: str, train_number: str, date: Optional[str],
-                          source: Optional[str] = None, dest: Optional[str] = None) -> None:
+                          source: Optional[str] = None, dest: Optional[str] = None,
+                          interval_minutes: Optional[int] = None) -> None:
     train_number = str(train_number or "").strip()
     if not token or not train_number:
         return
     now = time.time()
     with _connect() as conn:
+        if not date:
+            # SQLite's UNIQUE treats NULL dates as all different, so a
+            # blank-date watch would be duplicated (and double-notified)
+            # instead of updated — handle that case explicitly.
+            cur = conn.execute(
+                "UPDATE tracking_watches SET source = ?, dest = ?, interval_minutes = COALESCE(?, interval_minutes) "
+                "WHERE token = ? AND train_number = ? AND date IS NULL",
+                (source or None, dest or None, None if interval_minutes is None else max(0, int(interval_minutes)),
+                 token, train_number),
+            )
+            if cur.rowcount:
+                return
         conn.execute(
             """
-            INSERT INTO tracking_watches (token, train_number, date, source, dest, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO tracking_watches (token, train_number, date, source, dest, created_at, interval_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(token, train_number, date) DO UPDATE SET
-                source = excluded.source, dest = excluded.dest
+                source = excluded.source, dest = excluded.dest,
+                interval_minutes = CASE WHEN ? IS NULL THEN tracking_watches.interval_minutes
+                                        ELSE excluded.interval_minutes END
             """,
-            (token, train_number, date or None, source or None, dest or None, now),
+            (token, train_number, date or None, source or None, dest or None, now,
+             10 if interval_minutes is None else max(0, int(interval_minutes)), interval_minutes),
         )
         # Keep only the most recent few per device.
         rows = conn.execute(
@@ -613,9 +641,15 @@ def count_tracking_watches() -> int:
         return conn.execute("SELECT COUNT(*) FROM tracking_watches").fetchone()[0]
 
 
-def mark_tracking_pushed(watch_id: int, signature: str) -> None:
+def mark_tracking_pushed(watch_id: int, signature: str, alerted: bool = False) -> None:
     with _connect() as conn:
-        conn.execute(
-            "UPDATE tracking_watches SET last_signature = ?, last_pushed_at = ? WHERE id = ?",
-            (signature, time.time(), watch_id),
-        )
+        if alerted:
+            conn.execute(
+                "UPDATE tracking_watches SET last_signature = ?, last_pushed_at = ?, last_alert_at = ? WHERE id = ?",
+                (signature, time.time(), time.time(), watch_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE tracking_watches SET last_signature = ?, last_pushed_at = ? WHERE id = ?",
+                (signature, time.time(), watch_id),
+            )

@@ -814,10 +814,12 @@ export function buildTripShareUrl(apiBaseUrl, shareId) {
  * "Crossed X at HH:MM · N km to Y" notification after the app is closed.
  * See backend/alert_scheduler.py's run_tracking_check_once.
  */
-export async function startBackgroundTracking(baseUrl, token, { trainNumber, date, source, dest }) {
+export async function startBackgroundTracking(baseUrl, token, { trainNumber, date, source, dest, intervalMinutes }) {
   const client = makeClient(baseUrl);
   const { data } = await client.post("/api/push/tracking", {
     token, train_number: trainNumber, date: date || null, source: source || null, dest: dest || null,
+    // "Notify me every N min" (0 = off); omitted keeps the server's setting.
+    ...(intervalMinutes != null ? { interval_minutes: intervalMinutes } : {}),
   });
   return data;
 }
