@@ -1,0 +1,393 @@
+diff --git a/backend/push_notifications.py b/backend/push_notifications.py
+index 46712ce..81894b3 100644
+--- a/backend/push_notifications.py
++++ b/backend/push_notifications.py
+@@ -75,11 +75,32 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
+             return {"sent": False, "error": ticket.get("message") or "Expo push API returned an error."}
+         if not resp.ok:
+             return {"sent": False, "error": f"Expo push API HTTP {resp.status_code}: {resp.text[:200]}"}
++        if sound:
++            _send_via_expo_speak(token, title, body, data)
+         return {"sent": True, "error": None}
+     except requests.exceptions.RequestException as e:
+         return {"sent": False, "error": f"Expo push API request failed: {e}"}
+ 
+ 
++def _send_via_expo_speak(token: str, title: str, body: str, data: dict) -> None:
++    """FEATURE: read notifications aloud in the native app even when it's
++    closed. A data-only (no title/body) high-priority message wakes the
++    app's headless task (mobile-app/src/services/readAloudTask.js), which
++    speaks `speak_text` if the user ticked "Read notifications aloud".
++    Best-effort: the visible notification above has already been sent."""
++    try:
++        requests.post(
++            _EXPO_PUSH_URL,
++            json={"to": token, "data": {**(data or {}), "title": title, "body": body,
++                                          "speak_text": f"{title}. {body}", "kind": "speak"},
++                  "priority": "high", "_contentAvailable": True},
++            headers={"Content-Type": "application/json", "Accept": "application/json"},
++            timeout=10,
++        )
++    except requests.exceptions.RequestException:
++        pass
++
++
+ def _ensure_initialized() -> bool:
+     global _initialized, _init_error
+     if _initialized:
+diff --git a/mobile-app/App.js b/mobile-app/App.js
+index 91bb53c..347fdd5 100644
+--- a/mobile-app/App.js
++++ b/mobile-app/App.js
+@@ -8,7 +8,11 @@ import { Ionicons } from "@expo/vector-icons";
+ 
+ import { SettingsProvider } from "./src/context/SettingsContext";
+ import { colors } from "./src/theme/colors";
+-import { configureForegroundNotificationHandler, addNotificationResponseListener, registerOfflineShell } from "./src/services/pushNotifications";
++import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell } from "./src/services/pushNotifications";
++// Registers the headless "read notifications aloud" task at module scope.
++import { registerReadAloudTask, speakPushData } from "./src/services/readAloudTask";
++import { loadReadAloudAsync } from "./src/utils/speakNotifications";
++import { Platform } from "react-native";
+ 
+ import ChatScreen from "./src/screens/ChatScreen";
+ import LiveTrackingScreen from "./src/screens/LiveTrackingScreen";
+@@ -86,7 +90,19 @@ export default function App() {
+         console.log("[push] notification tapped:", data);
+       }
+     });
+-    return unsubscribe;
++    // FEATURE: read train notifications aloud (native app). Open app: the
++    // received listener speaks them; closed / background: the headless
++    // task in src/services/readAloudTask.js does.
++    let unsubscribeReceived = () => {};
++    if (Platform.OS !== "web") {
++      registerReadAloudTask();
++      unsubscribeReceived = addNotificationReceivedListener(async (notification) => {
++        const content = notification?.request?.content || {};
++        if (!(await loadReadAloudAsync())) return;
++        speakPushData({ ...(content.data || {}), title: content.title || content.data?.title, body: content.body || content.data?.body });
++      });
++    }
++    return () => { unsubscribe(); unsubscribeReceived(); };
+   }, []);
+ 
+   return (
+diff --git a/mobile-app/package-lock.json b/mobile-app/package-lock.json
+index 57fe448..0743b7e 100644
+--- a/mobile-app/package-lock.json
++++ b/mobile-app/package-lock.json
+@@ -20,7 +20,9 @@
+         "expo-image-picker": "~17.0.0",
+         "expo-location": "~18.0.0",
+         "expo-notifications": "~0.32.17",
++        "expo-speech": "~14.0.8",
+         "expo-status-bar": "~3.0.0",
++        "expo-task-manager": "~14.0.9",
+         "firebase": "^10.12.2",
+         "react": "19.1.0",
+         "react-dom": "19.1.0",
+@@ -1826,7 +1828,7 @@
+       "version": "6.1.2",
+       "resolved": "https://registry.npmjs.org/@expo/metro-runtime/-/metro-runtime-6.1.2.tgz",
+       "integrity": "sha512-nvM+Qv45QH7pmYvP8JB1G8JpScrWND3KrMA6ZKe62cwwNiX/BjHU28Ear0v/4bQWXlOY0mv6B8CDIm8JxXde9g==",
+-      "devOptional": true,
++      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "anser": "^1.4.9",
+@@ -5302,21 +5304,6 @@
+         "react-native": "*"
+       }
+     },
+-    "node_modules/expo-font": {
+-      "version": "57.0.4",
+-      "resolved": "https://registry.npmjs.org/expo-font/-/expo-font-57.0.4.tgz",
+-      "integrity": "sha512-7WOMC2oA6xCfOm8bbofqWn2bIqyWFm7YLEnpc/gA1MJH0Ll0TfT/3+CqRkoW2eNRWMS8sxrz5WukUmSvmNquHA==",
+-      "license": "MIT",
+-      "peer": true,
+-      "dependencies": {
+-        "fontfaceobserver": "^2.1.0"
+-      },
+-      "peerDependencies": {
+-        "expo": "*",
+-        "react": "*",
+-        "react-native": "*"
+-      }
+-    },
+     "node_modules/expo-image-loader": {
+       "version": "6.0.0",
+       "resolved": "https://registry.npmjs.org/expo-image-loader/-/expo-image-loader-6.0.0.tgz",
+@@ -5405,6 +5392,15 @@
+         "node": ">=20.16.0"
+       }
+     },
++    "node_modules/expo-speech": {
++      "version": "14.0.8",
++      "resolved": "https://registry.npmjs.org/expo-speech/-/expo-speech-14.0.8.tgz",
++      "integrity": "sha512-UjBFCFv58nutlLw92L7kUS0ZjbOOfaTdiEv/HbjvMrT6BfldoOLLBZbaEcEhDdZK36NY/kass0Kzxk+co6vxSQ==",
++      "license": "MIT",
++      "peerDependencies": {
++        "expo": "*"
++      }
++    },
+     "node_modules/expo-status-bar": {
+       "version": "3.0.9",
+       "resolved": "https://registry.npmjs.org/expo-status-bar/-/expo-status-bar-3.0.9.tgz",
+@@ -5418,6 +5414,19 @@
+         "react-native": "*"
+       }
+     },
++    "node_modules/expo-task-manager": {
++      "version": "14.0.9",
++      "resolved": "https://registry.npmjs.org/expo-task-manager/-/expo-task-manager-14.0.9.tgz",
++      "integrity": "sha512-GKWtXrkedr4XChHfTm5IyTcSfMtCPxzx89y4CMVqKfyfROATibrE/8UI5j7UC/pUOfFoYlQvulQEvECMreYuUA==",
++      "license": "MIT",
++      "dependencies": {
++        "unimodules-app-loader": "~6.0.8"
++      },
++      "peerDependencies": {
++        "expo": "*",
++        "react-native": "*"
++      }
++    },
+     "node_modules/expo/node_modules/@expo/cli": {
+       "version": "54.0.27",
+       "resolved": "https://registry.npmjs.org/@expo/cli/-/cli-54.0.27.tgz",
+@@ -9055,16 +9064,6 @@
+         "async-limiter": "~1.0.0"
+       }
+     },
+-    "node_modules/react-refresh": {
+-      "version": "0.19.0",
+-      "resolved": "https://registry.npmjs.org/react-refresh/-/react-refresh-0.19.0.tgz",
+-      "integrity": "sha512-5HdstYgoJBbBofjapO5qCPcovECJCBfvjLb+iTcsmqDFVMRdqy0qs7iiInBJTUXmIFc2bjoc5b2HVLp2zRtYhQ==",
+-      "license": "MIT",
+-      "peer": true,
+-      "engines": {
+-        "node": ">=0.10.0"
+-      }
+-    },
+     "node_modules/regenerate": {
+       "version": "1.4.2",
+       "resolved": "https://registry.npmjs.org/regenerate/-/regenerate-1.4.2.tgz",
+@@ -10089,6 +10088,12 @@
+         "node": ">=4"
+       }
+     },
++    "node_modules/unimodules-app-loader": {
++      "version": "6.0.8",
++      "resolved": "https://registry.npmjs.org/unimodules-app-loader/-/unimodules-app-loader-6.0.8.tgz",
++      "integrity": "sha512-fqS8QwT/MC/HAmw1NKCHdzsPA6WaLm0dNmoC5Pz6lL+cDGYeYCNdHMO9fy08aL2ZD7cVkNM0pSR/AoNRe+rslA==",
++      "license": "MIT"
++    },
+     "node_modules/unpipe": {
+       "version": "1.0.0",
+       "resolved": "https://registry.npmjs.org/unpipe/-/unpipe-1.0.0.tgz",
+diff --git a/mobile-app/package.json b/mobile-app/package.json
+index 26a5811..ed580dc 100644
+--- a/mobile-app/package.json
++++ b/mobile-app/package.json
+@@ -22,7 +22,9 @@
+     "expo-image-picker": "~17.0.0",
+     "expo-location": "~18.0.0",
+     "expo-notifications": "~0.32.17",
++    "expo-speech": "~14.0.8",
+     "expo-status-bar": "~3.0.0",
++    "expo-task-manager": "~14.0.9",
+     "firebase": "^10.12.2",
+     "react": "19.1.0",
+     "react-dom": "19.1.0",
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.js b/mobile-app/src/screens/LiveTrackingScreen.js
+index 73c4a71..2451819 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.js
+@@ -1,4 +1,4 @@
+-import React, { useState } from "react";
++import React, { useEffect, useState } from "react";
+ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator } from "react-native";
+ import { Ionicons } from "@expo/vector-icons";
+ import { colors, spacing, radius } from "../theme/colors";
+@@ -13,6 +13,7 @@ import { useSettings } from "../context/SettingsContext";
+ import { sendChatMessage } from "../api/railwayApi";
+ import { describeApiError } from "../api/client";
+ import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
++import { isSpeechSupported, loadReadAloudAsync, saveReadAloud, speak } from "../utils/speakNotifications";
+ 
+ let trackIdCounter = 0;
+ function nextTrackId() {
+@@ -29,6 +30,17 @@ export default function LiveTrackingScreen() {
+   // track train 12709 today AND 20833 on a custom date at the same time,
+   // not just one train at a time. ---
+   const [tracked, setTracked] = useState([]);
++  // FEATURE: "Read notifications aloud" — status updates and bell / delay
++  // alerts are spoken with the app open, in the background or closed
++  // (Android; see src/services/readAloudTask.js for the limits).
++  const [readAloud, setReadAloud] = useState(false);
++  useEffect(() => { loadReadAloudAsync().then(setReadAloud); }, []);
++  const toggleReadAloud = () => {
++    const next = !readAloud;
++    setReadAloud(next);
++    saveReadAloud(next);
++    if (next) speak("Read aloud is on. Train notifications and delay alerts will be read out, even when the app is closed.");
++  };
+   const [trainNumber, setTrainNumber] = useState("");
+   const [trackDate, setTrackDate] = useState(""); // DD-MM-YYYY, optional - blank = today
+   const [dayPickerVisible, setDayPickerVisible] = useState(false);
+@@ -119,6 +131,16 @@ export default function LiveTrackingScreen() {
+         title="Track a train"
+         subtitle="Add one or more trains — each streams its own position + delay + crowd update every ~5s (tap the refresh icon on a card for an instant update), on today's date or a date you pick."
+       >
++        <TouchableOpacity
++          onPress={toggleReadAloud}
++          disabled={!isSpeechSupported()}
++          style={styles.readAloudRow}
++          accessibilityRole="checkbox"
++          accessibilityState={{ checked: readAloud }}
++        >
++          <Ionicons name={readAloud ? "checkbox" : "square-outline"} size={20} color={colors.primary} />
++          <Text style={styles.readAloudText}>🔊 Read notifications aloud (app open or closed)</Text>
++        </TouchableOpacity>
+         <LabeledInput
+           label="Train number"
+           placeholder="e.g. 12709"
+@@ -383,4 +405,6 @@ const styles = StyleSheet.create({
+   compareRow: { marginBottom: 6 },
+   compareRowLabel: { fontSize: 10.5, color: colors.textMuted },
+   compareRowValue: { fontSize: 12.5, fontWeight: "600", color: colors.text },
++  readAloudRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: spacing.md },
++  readAloudText: { fontSize: 13, fontWeight: "600", color: colors.text, flex: 1 },
+ });
+diff --git a/mobile-app/src/services/readAloudTask.js b/mobile-app/src/services/readAloudTask.js
+new file mode 100644
+index 0000000..b1d3802
+--- /dev/null
++++ b/mobile-app/src/services/readAloudTask.js
+@@ -0,0 +1,61 @@
++// readAloudTask.js
++// ----------------
++// FEATURE (native Android/iOS build): read train notifications aloud even
++// when the app is CLOSED or in the background.
++//
++// How: the backend sends every alerting train notification to an Expo push
++// token twice — the normal visible notification, plus a data-only "speak"
++// message (see push_notifications._send_via_expo_speak). A data-only message
++// wakes this headless background task, which reads the text with the
++// phone's text-to-speech if the user ticked "Read notifications aloud".
++// While the app is open, the foreground listener in App.js does the same.
++//
++// Limits, stated plainly:
++//   - Needs a real app build (EAS / dev client), not Expo Go.
++//   - Android: works with the app in the background or swiped away, as long
++//     as the OS hasn't blocked it (battery saver / "restricted" background
++//     usage for this app will stop it — set the app to "Unrestricted").
++//   - iOS: Apple does not let an app speak from a background push; iPhone
++//     users get the notification + sound only when the app isn't open.
++
++import * as TaskManager from "expo-task-manager";
++import * as Notifications from "expo-notifications";
++import { Platform } from "react-native";
++import { loadReadAloudAsync, speak, shouldSpeakPush } from "../utils/speakNotifications";
++
++export const READ_ALOUD_TASK = "railway-read-aloud-notification";
++
++function extract(data) {
++  // Expo delivers the push payload in slightly different shapes per
++  // platform / state; read tolerantly.
++  const n = (data && (data.notification || data)) || {};
++  let d = n.data || n.body || data?.data || {};
++  if (typeof d === "string") { try { d = JSON.parse(d); } catch (e) { d = {}; } }
++  if (d && d.dataString) { try { d = JSON.parse(d.dataString); } catch (e) { /* keep */ } }
++  return d || {};
++}
++
++export function speakPushData(d) {
++  if (!d) return;
++  const text = d.speak_text || [d.title, d.body].filter(Boolean).join(". ");
++  if (!text) return;
++  if (!shouldSpeakPush(d)) return;
++  speak(text);
++}
++
++// Must be defined at module scope (imported from App.js) so the OS can
++// start it without the UI.
++if (Platform.OS !== "web") {
++  TaskManager.defineTask(READ_ALOUD_TASK, async ({ data, error }) => {
++    if (error) return;
++    try {
++      if (!(await loadReadAloudAsync())) return;
++      speakPushData(extract(data));
++    } catch (e) { /* never crash the headless task */ }
++  });
++}
++
++export async function registerReadAloudTask() {
++  if (Platform.OS === "web") return;
++  try { await Notifications.registerTaskAsync(READ_ALOUD_TASK); } catch (e) { /* Expo Go / unsupported */ }
++}
+diff --git a/mobile-app/src/utils/speakNotifications.js b/mobile-app/src/utils/speakNotifications.js
+index 89ce4ef..3eaa911 100644
+--- a/mobile-app/src/utils/speakNotifications.js
++++ b/mobile-app/src/utils/speakNotifications.js
+@@ -10,18 +10,45 @@
+ // closed only the normal notification + sound can appear; the Android/iOS
+ // app build would be needed to speak from a closed state.
+ 
++import { Platform } from "react-native";
++import AsyncStorage from "@react-native-async-storage/async-storage";
++
++// NATIVE (Android/iOS app build): speech uses expo-speech, and the setting
++// is kept in AsyncStorage so the background notification task
++// (services/readAloudTask.js) can read it even when the app is closed.
++const IS_WEB = Platform.OS === "web";
++let NativeSpeech = null;
++if (!IS_WEB) {
++  try { NativeSpeech = require("expo-speech"); } catch (e) { NativeSpeech = null; } // eslint-disable-line global-require
++}
++let nativeReadAloud = false;
++
+ const KEY = "liveTracking.readAloud";
+ const recent = new Map(); // text -> time, to skip the same message arriving twice
+ 
+ export function isSpeechSupported() {
++  if (!IS_WEB) return !!NativeSpeech;
+   return typeof window !== "undefined" && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined";
+ }
+ 
+ export function loadReadAloud() {
++  if (!IS_WEB) return nativeReadAloud;
+   try { return localStorage.getItem(KEY) === "1"; } catch (e) { return false; }
+ }
+ 
++/** Native: the stored setting (async). Web: same as loadReadAloud. */
++export async function loadReadAloudAsync() {
++  if (IS_WEB) return loadReadAloud();
++  try { nativeReadAloud = (await AsyncStorage.getItem(KEY)) === "1"; } catch (e) { /* keep */ }
++  return nativeReadAloud;
++}
++
+ export function saveReadAloud(on) {
++  if (!IS_WEB) {
++    nativeReadAloud = !!on;
++    AsyncStorage.setItem(KEY, on ? "1" : "0").catch(() => {});
++    return;
++  }
+   try { localStorage.setItem(KEY, on ? "1" : "0"); } catch (e) { /* ignore */ }
+ }
+ 
+@@ -47,6 +74,15 @@ export function speak(text) {
+   for (const [k, at] of recent) if (now - at > 6 * 3600 * 1000) recent.delete(k);
+   if (recent.has(t)) return false;
+   recent.set(t, now);
++  if (!IS_WEB) {
++    try {
++      NativeSpeech.stop();
++      NativeSpeech.speak(t, { language: "en-IN", rate: 0.95 });
++      return true;
++    } catch (e) {
++      return false;
++    }
++  }
+   try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+   try {
+     const u = new SpeechSynthesisUtterance(t);

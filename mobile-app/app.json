@@ -59,7 +59,7 @@
       "defaultApiBaseUrl": "http://localhost:8000",
       "defaultWsBaseUrl": "ws://localhost:8000",
       "eas": {
-        "projectId": "YOUR_EAS_PROJECT_ID"
+        "projectId": "e2324d97-ebfd-42b8-9798-5ae330fae615"
       }
     }
   }

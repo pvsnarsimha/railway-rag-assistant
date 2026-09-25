@@ -10,18 +10,45 @@
 // closed only the normal notification + sound can appear; the Android/iOS
 // app build would be needed to speak from a closed state.
 
+import { Platform } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+// NATIVE (Android/iOS app build): speech uses expo-speech, and the setting
+// is kept in AsyncStorage so the background notification task
+// (services/readAloudTask.js) can read it even when the app is closed.
+const IS_WEB = Platform.OS === "web";
+let NativeSpeech = null;
+if (!IS_WEB) {
+  try { NativeSpeech = require("expo-speech"); } catch (e) { NativeSpeech = null; } // eslint-disable-line global-require
+}
+let nativeReadAloud = false;
+
 const KEY = "liveTracking.readAloud";
 const recent = new Map(); // text -> time, to skip the same message arriving twice
 
 export function isSpeechSupported() {
+  if (!IS_WEB) return !!NativeSpeech;
   return typeof window !== "undefined" && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined";
 }
 
 export function loadReadAloud() {
+  if (!IS_WEB) return nativeReadAloud;
   try { return localStorage.getItem(KEY) === "1"; } catch (e) { return false; }
 }
 
+/** Native: the stored setting (async). Web: same as loadReadAloud. */
+export async function loadReadAloudAsync() {
+  if (IS_WEB) return loadReadAloud();
+  try { nativeReadAloud = (await AsyncStorage.getItem(KEY)) === "1"; } catch (e) { /* keep */ }
+  return nativeReadAloud;
+}
+
 export function saveReadAloud(on) {
+  if (!IS_WEB) {
+    nativeReadAloud = !!on;
+    AsyncStorage.setItem(KEY, on ? "1" : "0").catch(() => {});
+    return;
+  }
   try { localStorage.setItem(KEY, on ? "1" : "0"); } catch (e) { /* ignore */ }
 }
 
@@ -47,6 +74,15 @@ export function speak(text) {
   for (const [k, at] of recent) if (now - at > 6 * 3600 * 1000) recent.delete(k);
   if (recent.has(t)) return false;
   recent.set(t, now);
+  if (!IS_WEB) {
+    try {
+      NativeSpeech.stop();
+      NativeSpeech.speak(t, { language: "en-IN", rate: 0.95 });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
   try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
   try {
     const u = new SpeechSynthesisUtterance(t);

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
@@ -13,6 +13,7 @@ import { useSettings } from "../context/SettingsContext";
 import { sendChatMessage } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
+import { isSpeechSupported, loadReadAloudAsync, saveReadAloud, speak } from "../utils/speakNotifications";
 
 let trackIdCounter = 0;
 function nextTrackId() {
@@ -29,6 +30,17 @@ export default function LiveTrackingScreen() {
   // track train 12709 today AND 20833 on a custom date at the same time,
   // not just one train at a time. ---
   const [tracked, setTracked] = useState([]);
+  // FEATURE: "Read notifications aloud" — status updates and bell / delay
+  // alerts are spoken with the app open, in the background or closed
+  // (Android; see src/services/readAloudTask.js for the limits).
+  const [readAloud, setReadAloud] = useState(false);
+  useEffect(() => { loadReadAloudAsync().then(setReadAloud); }, []);
+  const toggleReadAloud = () => {
+    const next = !readAloud;
+    setReadAloud(next);
+    saveReadAloud(next);
+    if (next) speak("Read aloud is on. Train notifications and delay alerts will be read out, even when the app is closed.");
+  };
   const [trainNumber, setTrainNumber] = useState("");
   const [trackDate, setTrackDate] = useState(""); // DD-MM-YYYY, optional - blank = today
   const [dayPickerVisible, setDayPickerVisible] = useState(false);
@@ -119,6 +131,16 @@ export default function LiveTrackingScreen() {
         title="Track a train"
         subtitle="Add one or more trains — each streams its own position + delay + crowd update every ~5s (tap the refresh icon on a card for an instant update), on today's date or a date you pick."
       >
+        <TouchableOpacity
+          onPress={toggleReadAloud}
+          disabled={!isSpeechSupported()}
+          style={styles.readAloudRow}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: readAloud }}
+        >
+          <Ionicons name={readAloud ? "checkbox" : "square-outline"} size={20} color={colors.primary} />
+          <Text style={styles.readAloudText}>🔊 Read notifications aloud (app open or closed)</Text>
+        </TouchableOpacity>
         <LabeledInput
           label="Train number"
           placeholder="e.g. 12709"
@@ -383,4 +405,6 @@ const styles = StyleSheet.create({
   compareRow: { marginBottom: 6 },
   compareRowLabel: { fontSize: 10.5, color: colors.textMuted },
   compareRowValue: { fontSize: 12.5, fontWeight: "600", color: colors.text },
+  readAloudRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: spacing.md },
+  readAloudText: { fontSize: 13, fontWeight: "600", color: colors.text, flex: 1 },
 });

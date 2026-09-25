@@ -8,7 +8,11 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { SettingsProvider } from "./src/context/SettingsContext";
 import { colors } from "./src/theme/colors";
-import { configureForegroundNotificationHandler, addNotificationResponseListener, registerOfflineShell } from "./src/services/pushNotifications";
+import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell } from "./src/services/pushNotifications";
+// Registers the headless "read notifications aloud" task at module scope.
+import { registerReadAloudTask, speakPushData } from "./src/services/readAloudTask";
+import { loadReadAloudAsync } from "./src/utils/speakNotifications";
+import { Platform } from "react-native";
 
 import ChatScreen from "./src/screens/ChatScreen";
 import LiveTrackingScreen from "./src/screens/LiveTrackingScreen";
@@ -86,7 +90,19 @@ export default function App() {
         console.log("[push] notification tapped:", data);
       }
     });
-    return unsubscribe;
+    // FEATURE: read train notifications aloud (native app). Open app: the
+    // received listener speaks them; closed / background: the headless
+    // task in src/services/readAloudTask.js does.
+    let unsubscribeReceived = () => {};
+    if (Platform.OS !== "web") {
+      registerReadAloudTask();
+      unsubscribeReceived = addNotificationReceivedListener(async (notification) => {
+        const content = notification?.request?.content || {};
+        if (!(await loadReadAloudAsync())) return;
+        speakPushData({ ...(content.data || {}), title: content.title || content.data?.title, body: content.body || content.data?.body });
+      });
+    }
+    return () => { unsubscribe(); unsubscribeReceived(); };
   }, []);
 
   return (

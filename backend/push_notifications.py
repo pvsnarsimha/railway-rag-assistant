@@ -75,9 +75,30 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
             return {"sent": False, "error": ticket.get("message") or "Expo push API returned an error."}
         if not resp.ok:
             return {"sent": False, "error": f"Expo push API HTTP {resp.status_code}: {resp.text[:200]}"}
+        if sound:
+            _send_via_expo_speak(token, title, body, data)
         return {"sent": True, "error": None}
     except requests.exceptions.RequestException as e:
         return {"sent": False, "error": f"Expo push API request failed: {e}"}
+
+
+def _send_via_expo_speak(token: str, title: str, body: str, data: dict) -> None:
+    """FEATURE: read notifications aloud in the native app even when it's
+    closed. A data-only (no title/body) high-priority message wakes the
+    app's headless task (mobile-app/src/services/readAloudTask.js), which
+    speaks `speak_text` if the user ticked "Read notifications aloud".
+    Best-effort: the visible notification above has already been sent."""
+    try:
+        requests.post(
+            _EXPO_PUSH_URL,
+            json={"to": token, "data": {**(data or {}), "title": title, "body": body,
+                                          "speak_text": f"{title}. {body}", "kind": "speak"},
+                  "priority": "high", "_contentAvailable": True},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=10,
+        )
+    except requests.exceptions.RequestException:
+        pass
 
 
 def _ensure_initialized() -> bool:
