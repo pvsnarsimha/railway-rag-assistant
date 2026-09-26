@@ -1,5 +1,6 @@
 import React from "react";
-import { View, Text, Image, StyleSheet } from "react-native";
+import { View, Image, StyleSheet } from "react-native";
+import { Text } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import FeedbackBar from "./FeedbackBar";
@@ -23,7 +24,8 @@ export default function ChatBubble({ message }) {
           <Image source={{ uri: message.imageUri }} style={styles.attachedImage} resizeMode="cover" />
         ) : null}
 
-        <Text style={[styles.text, isUser ? styles.textUser : styles.textAssistant]}>{message.text}</Text>
+        {/* The user's own words stay exactly as typed. */}
+        <Text noTranslate={isUser} style={[styles.text, isUser ? styles.textUser : styles.textAssistant]}>{message.text}</Text>
 
         {!isUser && message.map && <RouteMapPreview map={message.map} />}
 
@@ -49,7 +51,7 @@ export default function ChatBubble({ message }) {
         {!isUser && message.sentiment?.emotion && EMOTION_ICON[message.sentiment.emotion] && (
           <View style={styles.sentimentHint}>
             <Ionicons name={EMOTION_ICON[message.sentiment.emotion]} size={12} color={colors.textMuted} />
-            <Text style={styles.sentimentText}>detected tone: {message.sentiment.emotion}</Text>
+            <Text style={styles.sentimentText}>{"detected tone: " + message.sentiment.emotion}</Text>
           </View>
         )}
 

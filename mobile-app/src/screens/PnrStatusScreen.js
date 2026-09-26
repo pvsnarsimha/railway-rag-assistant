@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { ScrollView, View, Text, StyleSheet } from "react-native";
+import { ScrollView, View, StyleSheet } from "react-native";
+import { Text } from "../i18n/Localized";
 import { colors, spacing, radius } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";

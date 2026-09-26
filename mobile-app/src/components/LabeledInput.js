@@ -1,5 +1,6 @@
 import React from "react";
-import { View, Text, TextInput, StyleSheet } from "react-native";
+import { View, StyleSheet } from "react-native";
+import { Text, TextInput } from "../i18n/Localized";
 import { colors, spacing, radius } from "../theme/colors";
 
 export default function LabeledInput({ label, style, ...inputProps }) {

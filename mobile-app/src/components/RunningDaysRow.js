@@ -1,5 +1,6 @@
 import React from "react";
-import { View, Text, StyleSheet } from "react-native";
+import { View, StyleSheet } from "react-native";
+import { Text } from "../i18n/Localized";
 import { colors, spacing } from "../theme/colors";
 
 const DAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"]; // Mon..Sun, index matches backend's running_days (0=Mon..6=Sun)

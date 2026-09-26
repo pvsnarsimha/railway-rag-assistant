@@ -9,6 +9,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { SettingsProvider } from "./src/context/SettingsContext";
 import { LanguageProvider, useT } from "./src/context/LanguageContext";
 import { colors } from "./src/theme/colors";
+import { View } from "react-native";
+import { SpeakScope } from "./src/i18n/Localized";
+import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
 import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell } from "./src/services/pushNotifications";
 // Registers the headless "read notifications aloud" task at module scope.
 import { registerReadAloudTask, speakPushData } from "./src/services/readAloudTask";
@@ -27,6 +30,46 @@ import SeatAvailabilityScreen from "./src/screens/SeatAvailabilityScreen";
 import FareEnquiryScreen from "./src/screens/FareEnquiryScreen";
 import TrainSearchScreen from "./src/screens/TrainSearchScreen";
 import StationSearchScreen from "./src/screens/StationSearchScreen";
+
+/**
+ * FEATURE: every screen in the chosen language + "Speak screen".
+ * Each screen gets its own SpeakScope (what it shows can be read aloud).
+ * Screens that already place the 🌐 / 🔊 bar themselves (Home, Railway
+ * Assistant, Live Tracking) are only wrapped; the rest get the bar on top.
+ */
+function withScreenLanguage(Screen, { bar = true } = {}) {
+  function Localized(props) {
+    return (
+      <SpeakScope>
+        {bar ? (
+          <View style={{ flex: 1, backgroundColor: colors.bg }}>
+            <ScreenLanguageBar style={{ paddingHorizontal: 12, paddingTop: 8, marginBottom: 0 }} />
+            <View style={{ flex: 1 }}>
+              <Screen {...props} />
+            </View>
+          </View>
+        ) : (
+          <Screen {...props} />
+        )}
+      </SpeakScope>
+    );
+  }
+  Localized.displayName = `WithScreenLanguage(${Screen.displayName || Screen.name || "Screen"})`;
+  return Localized;
+}
+
+const HomeScreenL = withScreenLanguage(HomeScreen, { bar: false });
+const ChatScreenL = withScreenLanguage(ChatScreen, { bar: false });
+const LiveTrackingScreenL = withScreenLanguage(LiveTrackingScreen, { bar: false });
+const MoreToolsScreenL = withScreenLanguage(MoreToolsScreen);
+const SettingsScreenL = withScreenLanguage(SettingsScreen);
+const PnrStatusScreenL = withScreenLanguage(PnrStatusScreen);
+const LiveTrainStatusScreenL = withScreenLanguage(LiveTrainStatusScreen);
+const TrainScheduleScreenL = withScreenLanguage(TrainScheduleScreen);
+const SeatAvailabilityScreenL = withScreenLanguage(SeatAvailabilityScreen);
+const FareEnquiryScreenL = withScreenLanguage(FareEnquiryScreen);
+const TrainSearchScreenL = withScreenLanguage(TrainSearchScreen);
+const StationSearchScreenL = withScreenLanguage(StationSearchScreen);
 
 const Tab = createBottomTabNavigator();
 const HomeStack = createNativeStackNavigator();
@@ -61,14 +104,14 @@ function HomeStackNavigator() {
         headerTitleStyle: { fontWeight: "700" },
       }}
     >
-      <HomeStack.Screen name="Home" component={HomeScreen} options={{ title: t("Train Enquiry Center") }} />
-      <HomeStack.Screen name="LiveTrainStatus" component={LiveTrainStatusScreen} options={{ title: t("Live Train Status") }} />
-      <HomeStack.Screen name="PnrStatus" component={PnrStatusScreen} options={{ title: t("PNR Status") }} />
-      <HomeStack.Screen name="TrainSchedule" component={TrainScheduleScreen} options={{ title: t("Time Table") }} />
-      <HomeStack.Screen name="SeatAvailability" component={SeatAvailabilityScreen} options={{ title: t("Seat Availability") }} />
-      <HomeStack.Screen name="FareEnquiry" component={FareEnquiryScreen} options={{ title: t("Fare Calculator") }} />
-      <HomeStack.Screen name="TrainsBetween" component={TrainSearchScreen} options={{ title: t("Trains Between Stations") }} />
-      <HomeStack.Screen name="StationSearch" component={StationSearchScreen} options={{ title: t("Station Search") }} />
+      <HomeStack.Screen name="Home" component={HomeScreenL} options={{ title: t("Train Enquiry Center") }} />
+      <HomeStack.Screen name="LiveTrainStatus" component={LiveTrainStatusScreenL} options={{ title: t("Live Train Status") }} />
+      <HomeStack.Screen name="PnrStatus" component={PnrStatusScreenL} options={{ title: t("PNR Status") }} />
+      <HomeStack.Screen name="TrainSchedule" component={TrainScheduleScreenL} options={{ title: t("Time Table") }} />
+      <HomeStack.Screen name="SeatAvailability" component={SeatAvailabilityScreenL} options={{ title: t("Seat Availability") }} />
+      <HomeStack.Screen name="FareEnquiry" component={FareEnquiryScreenL} options={{ title: t("Fare Calculator") }} />
+      <HomeStack.Screen name="TrainsBetween" component={TrainSearchScreenL} options={{ title: t("Trains Between Stations") }} />
+      <HomeStack.Screen name="StationSearch" component={StationSearchScreenL} options={{ title: t("Station Search") }} />
     </HomeStack.Navigator>
   );
 }
@@ -138,10 +181,10 @@ function AppTabs() {
             })}
           >
             <Tab.Screen name="Home" component={HomeStackNavigator} options={{ title: t("Home"), headerShown: false }} />
-            <Tab.Screen name="Chat" component={ChatScreen} options={{ title: t("Railway Assistant") }} />
-            <Tab.Screen name="Track" component={LiveTrackingScreen} options={{ title: t("Live Tracking") }} />
-            <Tab.Screen name="More" component={MoreToolsScreen} options={{ title: t("More Tools") }} />
-            <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: t("Settings") }} />
+            <Tab.Screen name="Chat" component={ChatScreenL} options={{ title: t("Railway Assistant") }} />
+            <Tab.Screen name="Track" component={LiveTrackingScreenL} options={{ title: t("Live Tracking") }} />
+            <Tab.Screen name="More" component={MoreToolsScreenL} options={{ title: t("More Tools") }} />
+            <Tab.Screen name="Settings" component={SettingsScreenL} options={{ title: t("Settings") }} />
           </Tab.Navigator>
         </NavigationContainer>
   );

@@ -1,5 +1,6 @@
 import React from "react";
-import { TouchableOpacity, Text, ActivityIndicator, StyleSheet } from "react-native";
+import { TouchableOpacity, ActivityIndicator, StyleSheet } from "react-native";
+import { Text } from "../i18n/Localized";
 import { colors, spacing, radius } from "../theme/colors";
 
 export default function PrimaryButton({ title, onPress, loading, disabled, variant = "primary", style }) {

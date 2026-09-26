@@ -1,8 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
-  Text,
-  TextInput,
   FlatList,
   TouchableOpacity,
   StyleSheet,
@@ -12,6 +10,7 @@ import {
   ScrollView,
   Image,
 } from "react-native";
+import { Text, TextInput } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";

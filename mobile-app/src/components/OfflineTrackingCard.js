@@ -20,7 +20,8 @@
 // phone, so GPS placement works with NO internet at all later.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, Platform } from "react-native";
+import { View, StyleSheet, TouchableOpacity, Platform } from "react-native";
+import { Text } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import { saveRouteCache, loadRouteCache, locateOnRoute, estimateFromTimetable } from "../utils/offlineTracker";

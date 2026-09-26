@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, ScrollView, Linking, Alert } from "react-native";
+import { View, StyleSheet, FlatList, TouchableOpacity, ScrollView, Linking } from "react-native";
+import { Text, TextInput, Alert } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import * as Clipboard from "expo-clipboard";
 import { colors, spacing, radius } from "../theme/colors";

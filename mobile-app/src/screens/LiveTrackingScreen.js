@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Share, Linking, Modal, Platform, AppState } from "react-native";
+import { View, StyleSheet, ScrollView, TouchableOpacity, Share, Linking, Modal, Platform, AppState } from "react-native";
+import { Text } from "../i18n/Localized";
 import * as Notifications from "expo-notifications";
 import LiveTrainMap from "../components/LiveTrainMap";
 import AsyncStorage from "@react-native-async-storage/async-storage";

@@ -5188,11 +5188,12 @@ def api_translate(req: TranslateRequest):
     back unchanged."""
     import ui_translate
     try:
-        out, source = ui_translate.translate(req.lang, req.texts, llm=_call_llm_for_synthesis)
+        out, source, failed = ui_translate.translate_full(req.lang, req.texts, llm=_call_llm_for_synthesis)
     except Exception as e:  # noqa: BLE001
         print(f"[translate] failed: {e}")
         out, source = list(req.texts or []), "error"
-    return {"lang": req.lang, "translations": out, "source": source}
+        failed = list(range(len(out)))
+    return {"lang": req.lang, "translations": out, "source": source, "failed": failed}
 
 
 @app.get("/api/push/languages")

@@ -1,5 +1,6 @@
 import React from "react";
-import { View, Text, StyleSheet } from "react-native";
+import { View, StyleSheet } from "react-native";
+import { Text } from "../i18n/Localized";
 import { colors, spacing, radius } from "../theme/colors";
 
 /**

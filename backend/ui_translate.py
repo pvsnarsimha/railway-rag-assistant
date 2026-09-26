@@ -5,7 +5,10 @@ FEATURE: the whole screen in the user's language (Home, Railway Assistant,
 Live Tracking): headings, labels AND station / train names, for English +
 the 22 Eighth-Schedule languages.
 
-POST /api/translate {lang, texts:[...]} -> {translations:[...]} (same order).
+POST /api/translate {lang, texts:[...]} -> {translations:[...], failed:[i...]}
+(same order; `failed` lists the indexes that couldn't be translated right
+now and came back in English, so the app asks again later instead of
+remembering the English text as the "translation").
 
 How each string is translated, in order:
   1. cache (memory + a small SQLite file, so a station name is translated
@@ -25,6 +28,7 @@ import os
 import re
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Tuple
 
 import requests
@@ -136,20 +140,24 @@ def _google_one(lang: str, text: str) -> Optional[str]:
         return None
 
 
-def translate(lang: str, texts: List[str], llm: Optional[Callable] = None) -> Tuple[List[str], str]:
-    """Returns (translations in input order, source-of-new-ones)."""
+def translate_full(lang: str, texts: List[str], llm: Optional[Callable] = None) -> Tuple[List[str], str, List[int]]:
+    """Returns (translations in input order, source-of-new-ones, failed indexes)."""
     lang = i18n_notify.normalize(lang)
     texts = [str(t)[:MAX_LEN] for t in (texts or [])][:MAX_TEXTS]
     if lang == "en" or not texts:
-        return texts, "none"
+        return texts, "none", []
     todo = sorted({t for t in texts if not _skip(t)})
     have = _cache_get(lang, todo)
     missing = [t for t in todo if t not in have]
     source = "cache"
     if missing and llm is not None:
+        # Batches run side by side: the first time someone picks a language
+        # a whole screen arrives at once and should come back in seconds.
+        batches = [missing[i:i + 30] for i in range(0, len(missing), 30)]
         got = {}
-        for i in range(0, len(missing), 30):
-            got.update(_llm_batch(lang, missing[i:i + 30], llm))
+        with ThreadPoolExecutor(max_workers=min(4, len(batches))) as pool:
+            for part in pool.map(lambda b: _llm_batch(lang, b, llm), batches):
+                got.update(part)
         if got:
             _cache_put(lang, got)
             have.update(got)
@@ -157,12 +165,19 @@ def translate(lang: str, texts: List[str], llm: Optional[Callable] = None) -> Tu
         missing = [t for t in missing if t not in have]
     if missing:
         got = {}
-        for t in missing[:60]:
-            d = _google_one(lang, t)
-            if d:
-                got[t] = d
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for t, d in zip(missing, pool.map(lambda x: _google_one(lang, x), missing)):
+                if d:
+                    got[t] = d
         if got:
             _cache_put(lang, got)
             have.update(got)
             source = "google" if source == "cache" else source + "+google"
-    return [have.get(t, t) for t in texts], source
+    failed = [i for i, t in enumerate(texts) if not _skip(t) and t not in have]
+    return [have.get(t, t) for t in texts], source, failed
+
+
+def translate(lang: str, texts: List[str], llm: Optional[Callable] = None) -> Tuple[List[str], str]:
+    """Returns (translations in input order, source-of-new-ones)."""
+    out, source, _failed = translate_full(lang, texts, llm)
+    return out, source

@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Linking } from "react-native";
+import { View, StyleSheet, ScrollView, TouchableOpacity, Linking } from "react-native";
+import { Text } from "../i18n/Localized";
 import NearbyStationMap from "../components/NearbyStationMap";
 import RoutePositionMap from "../components/RoutePositionMap";
 import AsyncStorage from "@react-native-async-storage/async-storage";

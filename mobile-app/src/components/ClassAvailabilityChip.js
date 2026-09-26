@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { TouchableOpacity, Text, ActivityIndicator, StyleSheet } from "react-native";
+import { TouchableOpacity, ActivityIndicator, StyleSheet } from "react-native";
+import { Text } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import { checkSeatAvailability } from "../api/railwayApi";
