@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "72786651974",
+    "project_id": "railway-142a6",
+    "storage_bucket": "railway-142a6.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:72786651974:android:e3b1fa6a8903c0b16e9347",
+        "android_client_info": {
+          "package_name": "com.railwayrag.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAEn9PZKyxGYmSMVmtl0MvXt8O1xogl7Z4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

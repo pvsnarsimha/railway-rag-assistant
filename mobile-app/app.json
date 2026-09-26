@@ -23,7 +23,8 @@
       }
     },
     "android": {
-      "package": "com.railwayrag.mobile",
+         "package": "com.railwayrag.mobile",
+   "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#0B3D91"
       },
