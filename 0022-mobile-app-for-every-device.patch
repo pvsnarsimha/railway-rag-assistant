@@ -1,0 +1,35 @@
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -8347,7 +8347,9 @@
+ @app.get("/track/{train_number}")
+ def track_share_page(train_number: str, request: Request, date: Optional[str] = None):
+     user_agent = request.headers.get("user-agent", "")
+-    if _looks_like_mobile(user_agent):
++    # Same "mobile experience for everyone" rule as "/": the lightweight
++    # live share page opens on every device unless LEGACY_DESKTOP_UI is set.
++    if _looks_like_mobile(user_agent) or not _LEGACY_DESKTOP_UI:
+         return FileResponse(os.path.join(FRONTEND_DIR, "track.html"))
+ 
+     # Desktop: hand off to the full app UI via a redirect (not a direct
+@@ -8386,10 +8388,20 @@
+ _MOBILE_WEB_INDEX = os.path.join(MOBILE_WEB_DIR, "index.html")
+ 
+ 
++# CHANGE (per request: "whoever opens the link — phone, tablet, or a
++# browser tab on a laptop — should see the mobile app"): the site's root
++# now always opens the mobile app (/mobile-app/), not only for phone user
++# agents — tablets (iPad / Android tablets often report a desktop-like
++# user agent) and desktop browsers included. The old desktop UI is still
++# reachable at /index.html, and setting LEGACY_DESKTOP_UI=1 restores the
++# old device-based behaviour.
++_LEGACY_DESKTOP_UI = os.environ.get("LEGACY_DESKTOP_UI", "").strip().lower() in ("1", "true", "yes")
++
++
+ @app.get("/")
+ def home_page(request: Request):
+     user_agent = request.headers.get("user-agent", "")
+-    if _looks_like_mobile(user_agent) and os.path.isfile(_MOBILE_WEB_INDEX):
++    if os.path.isfile(_MOBILE_WEB_INDEX) and (not _LEGACY_DESKTOP_UI or _looks_like_mobile(user_agent)):
+         return RedirectResponse(url="/mobile-app/")
+     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+ 

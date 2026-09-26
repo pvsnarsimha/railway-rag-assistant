@@ -102,7 +102,9 @@ export function speak(text) {
  *  the page is alive — foreground (in-page Firebase handler) or background
  *  tab (relayed by the service worker). Returns an unsubscribe function. */
 export function onTrainPush(handler) {
-  if (typeof window === "undefined") return () => {};
+  // Phone app: App.js's notification listener + the background task speak
+  // pushes there (window events don't exist in React Native).
+  if (!IS_WEB || typeof window === "undefined" || !window.addEventListener) return () => {};
   const fromPage = (e) => handler(e.detail || {});
   const fromSw = (e) => { if (e.data && e.data.kind === "rail-push") handler(e.data); };
   window.addEventListener("rail-push", fromPage);
@@ -132,4 +134,11 @@ export function shouldSpeakPush(m) {
     lastSentAt.set(key, sent);
   }
   return true;
+}
+
+export function stopSpeaking() {
+  try {
+    if (!IS_WEB) { if (NativeSpeech) NativeSpeech.stop(); return; }
+    if (typeof window !== "undefined" && window.speechSynthesis) window.speechSynthesis.cancel();
+  } catch (e) { /* ignore */ }
 }
