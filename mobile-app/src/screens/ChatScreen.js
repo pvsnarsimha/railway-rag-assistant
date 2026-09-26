@@ -22,6 +22,9 @@ import QueryToolbar from "../components/QueryToolbar";
 import { useSettings } from "../context/SettingsContext";
 import { sendChatMessage, getOfflineKnowledgeBase } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
+import { useT } from "../context/LanguageContext";
+import ScreenLanguageBar from "../components/ScreenLanguageBar";
+import { languageInfo } from "../utils/notifyLanguage";
 
 const LANGUAGES = [
   "auto", "English", "Hindi", "Bengali", "Tamil", "Telugu", "Kannada",
@@ -146,9 +149,14 @@ function nextId() {
 
 export default function ChatScreen({ navigation }) {
   const { apiBaseUrl, language, setLanguage } = useSettings();
+  // FEATURE: app language (🌐 chip at the top). English = the old
+  // behaviour (auto-detect from what you type); any other language = the
+  // assistant answers in it.
+  const { t, lang: appLang } = useT();
+  const chatLanguage = appLang && appLang !== "en" ? languageInfo(appLang).name : language;
   const [messages, setMessages] = useState([
     {
-      id: nextId(),
+      id: "greeting",
       role: "assistant",
       text:
         "Hi! Ask me about a PNR, a train's live running status, seat/crowd predictions, or any railway policy question. You can also attach a photo of your ticket.",
@@ -203,7 +211,7 @@ export default function ChatScreen({ navigation }) {
         message: trimmed,
         imageBase64: imageToSend?.base64,
         imageMediaType: imageToSend?.mediaType,
-        language,
+        language: chatLanguage,
         webSearch: webSearchOn,
         deepThink: deepThinkOn,
       });
@@ -254,27 +262,36 @@ export default function ChatScreen({ navigation }) {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
-      <View style={styles.langRow}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.langScroll}>
-          {LANGUAGES.map((lang) => (
-            <TouchableOpacity
-              key={lang}
-              style={[styles.langChip, language === lang && styles.langChipActive]}
-              onPress={() => setLanguage(lang)}
-            >
-              <Text style={[styles.langChipText, language === lang && styles.langChipTextActive]}>
-                {lang === "auto" ? "Auto-detect" : lang}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-      </View>
+      <ScreenLanguageBar
+        style={{ paddingHorizontal: spacing.md, paddingTop: spacing.sm, marginBottom: 0 }}
+        getSpeech={() => {
+          const last = [...messages].reverse().find((m) => m.role === "assistant");
+          return last ? last.text : "";
+        }}
+      />
+      {appLang === "en" ? (
+        <View style={styles.langRow}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.langScroll}>
+            {LANGUAGES.map((lang) => (
+              <TouchableOpacity
+                key={lang}
+                style={[styles.langChip, language === lang && styles.langChipActive]}
+                onPress={() => setLanguage(lang)}
+              >
+                <Text style={[styles.langChipText, language === lang && styles.langChipTextActive]}>
+                  {lang === "auto" ? "Auto-detect" : lang}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      ) : null}
 
       <FlatList
         ref={listRef}
         data={messages}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => <ChatBubble message={item} />}
+        renderItem={({ item }) => <ChatBubble message={item.id === "greeting" ? { ...item, text: t(item.text) } : item} />}
         contentContainerStyle={styles.listContent}
         onContentSizeChange={scrollToEnd}
       />
@@ -282,14 +299,14 @@ export default function ChatScreen({ navigation }) {
       {sending && (
         <View style={styles.typingRow}>
           <ActivityIndicator size="small" color={colors.primary} />
-          <Text style={styles.typingText}>Thinking…</Text>
+          <Text style={styles.typingText}>{t("Thinking…")}</Text>
         </View>
       )}
 
       {pendingImage && (
         <View style={styles.previewRow}>
           <Image source={{ uri: pendingImage.uri }} style={styles.previewImage} />
-          <Text style={styles.previewText}>Ticket photo attached</Text>
+          <Text style={styles.previewText}>{t("Ticket photo attached")}</Text>
           <TouchableOpacity onPress={() => setPendingImage(null)}>
             <Ionicons name="close-circle" size={20} color={colors.textMuted} />
           </TouchableOpacity>
@@ -309,7 +326,7 @@ export default function ChatScreen({ navigation }) {
         </TouchableOpacity>
         <TextInput
           style={styles.textInput}
-          placeholder="Ask about a PNR, train status, fares…"
+          placeholder={t("Ask about a PNR, train status, fares…")}
           placeholderTextColor={colors.textMuted}
           value={input}
           onChangeText={setInput}

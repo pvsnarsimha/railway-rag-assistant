@@ -106,7 +106,7 @@ export function speak(text, opts = {}) {
   if (!t) return false;
   const now = Date.now();
   for (const [k, at] of recent) if (now - at > 6 * 3600 * 1000) recent.delete(k);
-  if (recent.has(t)) return false;
+  if (recent.has(t) && !opts.force) return false;
   recent.set(t, now);
   const english = opts.fallbackText ? clean(opts.fallbackText, true) : null;
   if (!IS_WEB) {

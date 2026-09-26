@@ -10,7 +10,7 @@ import { checkHealth } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
 import LanguagePickerModal from "../components/LanguagePickerModal";
 import { getLanguage, languageInfo, loadLanguage } from "../utils/notifyLanguage";
-import { applyNotifyLanguage } from "../services/backgroundTracking";
+import { useT } from "../context/LanguageContext";
 
 export default function SettingsScreen() {
   const { apiBaseUrl, setApiBaseUrl, wsBaseUrl } = useSettings();
@@ -18,7 +18,9 @@ export default function SettingsScreen() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null); // { ok, detail }
   // FEATURE: notification language (English + 22 Indian languages).
+  const { lang: screenLang, setLang: setScreenLang } = useT();
   const [lang, setLang] = useState(getLanguage());
+  useEffect(() => { setLang(screenLang); }, [screenLang]);
   const [langOpen, setLangOpen] = useState(false);
   useEffect(() => { loadLanguage().then((c) => { if (c) setLang(c); }); }, []);
 
@@ -82,7 +84,7 @@ export default function SettingsScreen() {
         </View>
       </SectionCard>
 
-      <SectionCard title="Notification language" subtitle="Train notifications are shown and read aloud in this language.">
+      <SectionCard title="App language" subtitle="Screens, station names, notifications and read-aloud use this language.">
         <TouchableOpacity
           onPress={() => setLangOpen(true)}
           accessibilityRole="button"
@@ -98,7 +100,7 @@ export default function SettingsScreen() {
         <LanguagePickerModal
           visible={langOpen}
           selected={lang}
-          onSelect={(code) => { setLangOpen(false); setLang(code); applyNotifyLanguage(apiBaseUrl, code); }}
+          onSelect={(code) => { setLangOpen(false); setLang(code); setScreenLang(code); }}
           onClose={() => setLangOpen(false)}
         />
       </SectionCard>

@@ -7,6 +7,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 
 import { SettingsProvider } from "./src/context/SettingsContext";
+import { LanguageProvider, useT } from "./src/context/LanguageContext";
 import { colors } from "./src/theme/colors";
 import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell } from "./src/services/pushNotifications";
 // Registers the headless "read notifications aloud" task at module scope.
@@ -51,6 +52,7 @@ const TAB_ICONS = {
  * Tools tab below.
  */
 function HomeStackNavigator() {
+  const { t } = useT();
   return (
     <HomeStack.Navigator
       screenOptions={{
@@ -59,14 +61,14 @@ function HomeStackNavigator() {
         headerTitleStyle: { fontWeight: "700" },
       }}
     >
-      <HomeStack.Screen name="Home" component={HomeScreen} options={{ title: "Train Enquiry Center" }} />
-      <HomeStack.Screen name="LiveTrainStatus" component={LiveTrainStatusScreen} options={{ title: "Live Train Status" }} />
-      <HomeStack.Screen name="PnrStatus" component={PnrStatusScreen} options={{ title: "PNR Status" }} />
-      <HomeStack.Screen name="TrainSchedule" component={TrainScheduleScreen} options={{ title: "Time Table" }} />
-      <HomeStack.Screen name="SeatAvailability" component={SeatAvailabilityScreen} options={{ title: "Seat Availability" }} />
-      <HomeStack.Screen name="FareEnquiry" component={FareEnquiryScreen} options={{ title: "Fare Calculator" }} />
-      <HomeStack.Screen name="TrainsBetween" component={TrainSearchScreen} options={{ title: "Trains Between Stations" }} />
-      <HomeStack.Screen name="StationSearch" component={StationSearchScreen} options={{ title: "Station Search" }} />
+      <HomeStack.Screen name="Home" component={HomeScreen} options={{ title: t("Train Enquiry Center") }} />
+      <HomeStack.Screen name="LiveTrainStatus" component={LiveTrainStatusScreen} options={{ title: t("Live Train Status") }} />
+      <HomeStack.Screen name="PnrStatus" component={PnrStatusScreen} options={{ title: t("PNR Status") }} />
+      <HomeStack.Screen name="TrainSchedule" component={TrainScheduleScreen} options={{ title: t("Time Table") }} />
+      <HomeStack.Screen name="SeatAvailability" component={SeatAvailabilityScreen} options={{ title: t("Seat Availability") }} />
+      <HomeStack.Screen name="FareEnquiry" component={FareEnquiryScreen} options={{ title: t("Fare Calculator") }} />
+      <HomeStack.Screen name="TrainsBetween" component={TrainSearchScreen} options={{ title: t("Trains Between Stations") }} />
+      <HomeStack.Screen name="StationSearch" component={StationSearchScreen} options={{ title: t("Station Search") }} />
     </HomeStack.Navigator>
   );
 }
@@ -108,7 +110,20 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <SettingsProvider>
-        <NavigationContainer>
+        <LanguageProvider>
+          <AppTabs />
+        </LanguageProvider>
+      </SettingsProvider>
+    </SafeAreaProvider>
+  );
+}
+
+// Tabs live in their own component so their titles can use the chosen
+// screen language (LanguageContext).
+function AppTabs() {
+  const { t } = useT();
+  return (
+    <NavigationContainer>
           <StatusBar style="light" />
           <Tab.Navigator
             screenOptions={({ route }) => ({
@@ -122,14 +137,12 @@ export default function App() {
               ),
             })}
           >
-            <Tab.Screen name="Home" component={HomeStackNavigator} options={{ title: "Home", headerShown: false }} />
-            <Tab.Screen name="Chat" component={ChatScreen} options={{ title: "Railway Assistant" }} />
-            <Tab.Screen name="Track" component={LiveTrackingScreen} options={{ title: "Live Tracking" }} />
-            <Tab.Screen name="More" component={MoreToolsScreen} options={{ title: "More Tools" }} />
-            <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: "Settings" }} />
+            <Tab.Screen name="Home" component={HomeStackNavigator} options={{ title: t("Home"), headerShown: false }} />
+            <Tab.Screen name="Chat" component={ChatScreen} options={{ title: t("Railway Assistant") }} />
+            <Tab.Screen name="Track" component={LiveTrackingScreen} options={{ title: t("Live Tracking") }} />
+            <Tab.Screen name="More" component={MoreToolsScreen} options={{ title: t("More Tools") }} />
+            <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: t("Settings") }} />
           </Tab.Navigator>
         </NavigationContainer>
-      </SettingsProvider>
-    </SafeAreaProvider>
   );
 }

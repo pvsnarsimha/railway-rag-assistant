@@ -5176,6 +5176,25 @@ def api_push_language(req: PushLanguageRequest):
     return {"ok": True, "lang": lang}
 
 
+class TranslateRequest(BaseModel):
+    lang: str
+    texts: List[str]
+
+
+@app.post("/api/translate")
+def api_translate(req: TranslateRequest):
+    """FEATURE: screen text (headings + station/train names) in the user's
+    language — see ui_translate.py. Never fails: untranslatable text comes
+    back unchanged."""
+    import ui_translate
+    try:
+        out, source = ui_translate.translate(req.lang, req.texts, llm=_call_llm_for_synthesis)
+    except Exception as e:  # noqa: BLE001
+        print(f"[translate] failed: {e}")
+        out, source = list(req.texts or []), "error"
+    return {"lang": req.lang, "translations": out, "source": source}
+
+
 @app.get("/api/push/languages")
 def api_push_languages():
     import i18n_notify

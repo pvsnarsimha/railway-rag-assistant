@@ -25,6 +25,8 @@ import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
 import { isSpeechSupported, loadReadAloud, loadReadAloudAsync, saveReadAloud, speak, stopSpeaking, onTrainPush, shouldSpeakPush } from "../utils/speakNotifications";
 import { getLanguage, hasChosenLanguage, languageInfo, loadLanguage, SAMPLE } from "../utils/notifyLanguage";
 import LanguagePickerModal from "../components/LanguagePickerModal";
+import ScreenLanguageBar from "../components/ScreenLanguageBar";
+import { useT } from "../context/LanguageContext";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
   loadStatusEvery, saveStatusEvery, applyNotifyLanguage,
@@ -569,6 +571,9 @@ const STATUS_COLOR = {
 
 export default function LiveTrackingScreen({ navigation }) {
   const { wsBaseUrl, apiBaseUrl } = useSettings();
+  // FEATURE: screen language (headings + station names) — see LanguageContext.
+  const { t, tf, lang: screenLang, setLang: setScreenLang } = useT();
+  const delayText = useDelayText();
   const [trainNumber, setTrainNumber] = useState("");
   const [source, setSource] = useState("");
   const [dest, setDest] = useState("");
@@ -825,13 +830,14 @@ export default function LiveTrackingScreen({ navigation }) {
   const [notifyLang, setNotifyLang] = useState(getLanguage());
   const [langOpen, setLangOpen] = useState(false);
   useEffect(() => { loadLanguage().then((c) => { if (c) setNotifyLang(c); }); }, []);
+  useEffect(() => { setNotifyLang(screenLang); }, [screenLang]);
   const chooseLanguage = useCallback((code) => {
     setLangOpen(false);
     setNotifyLang(code);
-    applyNotifyLanguage(apiBaseUrl, code);
+    setScreenLang(code); // one language for screen, notifications and read-aloud
     // Read a sample in that language (also unlocks speech on mobile web).
     if (readAloudRef.current) speak(SAMPLE[code] || SAMPLE.en, { lang: code, fallbackText: SAMPLE.en });
-  }, [apiBaseUrl]);
+  }, [setScreenLang]);
   const toggleReadAloud = useCallback(() => {
     setReadAloud((on) => {
       const next = !on;
@@ -2001,8 +2007,24 @@ export default function LiveTrackingScreen({ navigation }) {
     <View style={styles.flex}>
     <ScrollView ref={scrollRef} style={styles.flex} contentContainerStyle={[styles.content, showBottomBar && styles.contentWithBar]}>
     <View ref={scrollContentRef} collapsable={false}>
+      {/* FEATURE: 🌐 screen language + 🔊 "Speak screen" (reads the train's
+          current status only when tapped, in the chosen language). */}
+      <ScreenLanguageBar
+        getSpeech={() => {
+          if (!payload || !activeTrack) return "Live Tracking. Enter a train number and press Start tracking.";
+          const parts = [];
+          parts.push(`Train ${activeTrack.trainNumber}${payload.train_name ? ` ${payload.train_name}` : ""}`);
+          if (ltEffectiveDelay != null) {
+            parts.push(ltEffectiveDelay === 0 ? "running on time" : `${Math.abs(ltEffectiveDelay)} minutes ${ltEffectiveDelay > 0 ? "late" : "early"}`);
+          }
+          if (ltStatus && ltStatus.headline) parts.push(ltStatus.headline);
+          if (ltStatus && ltStatus.sub) parts.push(ltStatus.sub);
+          else if (payload.next_station) parts.push(`Next station ${payload.next_station}${ltNextEtaMinutes != null ? ` in ${ltNextEtaMinutes} minutes` : ""}`);
+          return parts.map((x) => String(x).replace(/\bkm\b/g, "kilometres").replace(/\bmin\b/g, "minutes"));
+        }}
+      />
       {(!activeTrack || formOpen) ? (
-        <SectionCard title="Track a train" subtitle="Shows the live position instantly and keeps it updating every few seconds.">
+        <SectionCard title={t("Track a train")} subtitle={t("Shows the live position instantly and keeps it updating every few seconds.")}>
           <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
           <Text style={styles.fieldLabel}>{"Date (optional \u2014 defaults to today)"}</Text>
           <TouchableOpacity style={styles.dateField} onPress={() => { datePickForHeaderRef.current = false; setDayPickerVisible(true); }} activeOpacity={0.7}>
@@ -2020,7 +2042,7 @@ export default function LiveTrackingScreen({ navigation }) {
             {/* No spinner / "Connecting…" state: tracking starts at once —
                 the last known position is shown instantly and the live
                 feed takes over the moment it answers. */}
-            <PrimaryButton title="Start tracking" onPress={connect} style={styles.half} />
+            <PrimaryButton title={t("Start tracking")} onPress={connect} style={styles.half} />
             {activeTrack ? (
               <PrimaryButton title="Cancel" variant="secondary" onPress={() => setFormOpen(false)} style={styles.half} />
             ) : null}
@@ -2090,7 +2112,7 @@ export default function LiveTrackingScreen({ navigation }) {
               at the user's own interval, app open or closed. */}
           <View style={styles.everyRow}>
             <Ionicons name="notifications-outline" size={14} color={colors.primary} />
-            <Text style={styles.everyLabel}>Notify me every</Text>
+            <Text style={styles.everyLabel}>{t("Notify me every")}</Text>
             {[10, 20, 30].map((m) => (
               <TouchableOpacity
                 key={m}
@@ -2585,12 +2607,12 @@ export default function LiveTrackingScreen({ navigation }) {
       <View style={styles.bottomBar}>
         <View style={styles.bottomBarInfo}>
           <Text style={styles.bottomBarLabel} numberOfLines={1}>
-            Next: <Text style={styles.bottomBarStation}>{payload.next_station}</Text>
-            {ltNextEtaMinutes != null ? ` in ${ltNextEtaMinutes} min${ltNextEtaMinutes === 1 ? "" : "s"}` : ""}
+            {t("Next:")} <Text style={styles.bottomBarStation}>{t(payload.next_station)}</Text>
+            {ltNextEtaMinutes != null ? ` ${tf("in {n} min", { n: ltNextEtaMinutes })}` : ""}
           </Text>
           {ltEffectiveDelay != null && (
             <Text style={[styles.bottomBarDelay, ltEffectiveDelay > 0 ? styles.bottomBarDelayLate : styles.bottomBarDelayOnTime]}>
-              {ltEffectiveDelay === 0 ? "Ontime" : `${ltEffectiveDelay > 0 ? "+" : ""}${formatDelayDuration(ltEffectiveDelay)}${ltEffectiveDelay > 0 ? " late" : " early"}`}
+              {ltEffectiveDelay === 0 ? t("On time") : `${ltEffectiveDelay > 0 ? "+" : ""}${delayText(ltEffectiveDelay)}`}
             </Text>
           )}
         </View>
@@ -2604,14 +2626,14 @@ export default function LiveTrackingScreen({ navigation }) {
             onPress={() => navigation?.navigate?.("More", { initialTab: "coach", trainNumber: trainNumber.trim() })}
           >
             <Ionicons name="grid-outline" size={13} color={colors.primary} />
-            <Text style={styles.bottomBarBtnText}>Coach layout</Text>
+            <Text style={styles.bottomBarBtnText}>{t("Coach layout")}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.bottomBarBtn}
             onPress={() => navigation?.navigate?.("Home", { screen: "TrainSchedule", params: { trainNumber: trainNumber.trim() } })}
           >
             <Ionicons name="time-outline" size={13} color={colors.primary} />
-            <Text style={styles.bottomBarBtnText}>Time Table</Text>
+            <Text style={styles.bottomBarBtnText}>{t("Time Table")}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -2842,7 +2864,23 @@ function humanDelay(minutes) {
   return m ? `${h} hr ${m} min` : `${h} hr`;
 }
 
+// FEATURE (screen language): "8 min late" / "1 hr 5 min late" in the
+// chosen language — templates are translated once, numbers filled in.
+function useDelayText() {
+  const { t, tf } = useT();
+  return (minutes, { early = "early", late = "late" } = {}) => {
+    if (minutes == null) return "";
+    if (Math.round(minutes) === 0) return t("On time");
+    const abs = Math.round(Math.abs(minutes));
+    const h = Math.floor(abs / 60), m = abs % 60;
+    const word = minutes > 0 ? late : early;
+    if (abs < 60) return tf(`{n} min ${word}`, { n: abs });
+    return m ? tf(`{h} hr {m} min ${word}`, { h, m }) : tf(`{h} hr ${word}`, { h });
+  };
+}
+
 function DelayPill({ minutes, small }) {
+  const delayText = useDelayText();
   if (minutes == null) return null;
   const late = minutes > 0;
   const early = minutes < 0;
@@ -2850,7 +2888,7 @@ function DelayPill({ minutes, small }) {
   // "On time" green on pale green.
   const bg = late ? "#fdecec" : "#e7f6ec";
   const fg = late ? colors.danger : colors.success;
-  const label = minutes === 0 ? "On time" : `${humanDelay(minutes)} ${late ? "late" : "early"}`;
+  const label = delayText(minutes);
   return (
     <View style={[styles.delayPill, { backgroundColor: bg }, small && styles.delayPillSmall]}>
       <Text style={[styles.delayPillText, { color: fg }, small && styles.delayPillTextSmall]}>{label}</Text>
@@ -2882,17 +2920,20 @@ function DayPill({ label }) {
 // doesn't make one; nothing here recomputes or re-guesses anything.
 // ETA line for a no-halt (passing) point ahead — ETA + minutes away only.
 function IntermediateEtaLine({ stop }) {
+  const { tf } = useT();
   if (!stop.predicted_eta) return null;
   return (
     <Text style={styles.tlPredictedMuted}>
-      Passing ~{stop.predicted_eta}
-      {stop.minutes_away != null && stop.minutes_away <= 180 ? ` · in ${stop.minutes_away} min` : ""}
+      {tf("Passing ~{t}", { t: stop.predicted_eta })}
+      {stop.minutes_away != null && stop.minutes_away <= 180 ? ` · ${tf("in {n} min", { n: stop.minutes_away })}` : ""}
       {stop.predicted_eta_source === "gps" ? " · GPS" : ""}
     </Text>
   );
 }
 
 function PredictedDelayLine({ stop }) {
+  const { t, tf } = useT();
+  const delayText = useDelayText();
   if (stop.predicted_delay_minutes == null) return null;
   const groundedVia = stop.predicted_delay_grounded_via || stop.predicted_delay_locked_via;
   let badge = null;
@@ -2916,16 +2957,16 @@ function PredictedDelayLine({ stop }) {
   // (used only when this app hasn't personally logged this station for
   // this train yet) — this app has no hover tooltip, so the label itself
   // is the only place this distinction is visible here.
-  const historicalLabel = stop.predicted_delay_historical_source === "railradar_route_history" ? "ⓘ route history" : "ⓘ history";
+  const historicalLabel = "ⓘ " + t(stop.predicted_delay_historical_source === "railradar_route_history" ? "route history" : "history");
   const disagreementNote = (stop.provider_disagreement_minutes != null && stop.provider_disagreement_minutes > 2)
     ? `Providers differ ~${stop.provider_disagreement_minutes}m`
     : null;
   return (
     <View style={styles.tlPredictedRow}>
       <Text style={styles.tlPredicted}>
-        {stop.predicted_delay_minutes > 0 ? `~${humanDelay(stop.predicted_delay_minutes)} late` : "On time"} (predicted)
-        {stop.predicted_eta ? ` · ETA ~${stop.predicted_eta}` : ""}
-        {stop.minutes_away != null && stop.minutes_away <= 180 ? ` · in ${stop.minutes_away} min` : ""}
+        {stop.predicted_delay_minutes > 0 ? `~${delayText(stop.predicted_delay_minutes)}` : t("On time")} ({t("predicted")})
+        {stop.predicted_eta ? ` · ${tf("ETA ~{t}", { t: stop.predicted_eta })}` : ""}
+        {stop.minutes_away != null && stop.minutes_away <= 180 ? ` · ${tf("in {n} min", { n: stop.minutes_away })}` : ""}
       </Text>
       {stop.predicted_eta_source === "gps" && (
         <View style={[styles.tlInfoBadge, styles.tlGpsBadge]}>
@@ -2980,6 +3021,7 @@ function NoHaltGroupRow({
   statusResponseId, reportState, onReportInaccuracy, nextStationName, segmentSpeedSignal, gpsMode,
   calloutOpen, onTrainIconPress,
 }) {
+  const { t, tf } = useT();
   const stations = group.stations || [];
   const firstPassed = stations.length > 0 && stations[0].status === "passed";
   return (
@@ -2991,14 +3033,14 @@ function NoHaltGroupRow({
         </View>
         <TouchableOpacity onPress={onToggle} style={styles.noHaltToggleBody}>
           <Text style={styles.noHaltToggleText}>
-            + {group.count} No-Halt station{group.count === 1 ? "" : "s"}
+            + {tf(group.count === 1 ? "{n} No-Halt station" : "{n} No-Halt stations", { n: group.count })}
             {/* BUGFIX (see the expanded sub-station row's own comment
                 below): this is the SPAN across the whole collapsed group
                 (last stop's distance_km minus first stop's, see _flush()
                 in group_timeline_for_display) — real, but easily misread
                 as a cumulative distance-from-origin figure the same way
                 the sub-station rows were. "span" makes that explicit. */}
-            {group.distance_km != null ? ` (${group.distance_km} km span)` : ""}
+            {group.distance_km != null ? ` (${tf("{km} km span", { km: group.distance_km })})` : ""}
           </Text>
           <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={13} color={colors.primary} />
         </TouchableOpacity>
@@ -3018,8 +3060,8 @@ function NoHaltGroupRow({
             </View>
             <View style={styles.tlBody}>
               <Text style={styles.tlName}>
-                {toDisplayCase(s.name)} <Text style={styles.tlCode}>({s.code})</Text>
-                <Text style={styles.timelineKind}>  · passing</Text>
+                {t(toDisplayCase(s.name))} <Text style={styles.tlCode}>({s.code})</Text>
+                <Text style={styles.timelineKind}>  · {t("passing")}</Text>
               </Text>
               {/* BUGFIX ("707.2 km covered so far ... not a real
                   cumulative distance from origin" — this row used to show
@@ -3035,10 +3077,10 @@ function NoHaltGroupRow({
               {(s.distance_since_last_stoppage_km != null || s.distance_km != null) && (
                 <Text style={styles.tlMeta}>
                   {s.distance_since_last_stoppage_km != null
-                    ? `${s.distance_since_last_stoppage_km} km since ${group.from_station ? toDisplayCase(group.from_station) : "last stop"}`
+                    ? tf("{km} km since {st}", { km: s.distance_since_last_stoppage_km, st: group.from_station ? t(toDisplayCase(group.from_station)) : t("last stop") })
                     : null}
                   {s.distance_since_last_stoppage_km != null && s.distance_km != null ? "  ·  " : ""}
-                  {s.distance_km != null ? `${s.distance_km} km from origin` : ""}
+                  {s.distance_km != null ? tf("{km} km from origin", { km: s.distance_km }) : ""}
                 </Text>
               )}
               {current && calloutOpen && (
@@ -3130,6 +3172,7 @@ function TimelineStopRow({
   alertArmed, alertBlocked, onBellPress, gpsMode,
   calloutOpen, onTrainIconPress,
 }) {
+  const { t: tStop } = useT();
   // BUGFIX: once the journey looks likely complete (see
   // computeJourneyLikelyComplete near the top of this file), the train
   // has genuinely already gone through every remaining station — even
@@ -3174,8 +3217,8 @@ function TimelineStopRow({
       <View style={styles.tlBody}>
         <View style={styles.tlNameRow}>
           <Text style={[styles.tlName, styles.tlNameFlex]}>
-            {stop.name} <Text style={styles.tlCode}>({stop.code})</Text>
-            {stop.kind === "intermediate" ? <Text style={styles.timelineKind}>  · passing</Text> : null}
+            {tStop(stop.name)} <Text style={styles.tlCode}>({stop.code})</Text>
+            {stop.kind === "intermediate" ? <Text style={styles.timelineKind}>  · {tStop("passing")}</Text> : null}
           </Text>
           {/* FEATURE: per-station Delay Alert bell — on every reporting
               station the train hasn't reached yet (a delay alert for a

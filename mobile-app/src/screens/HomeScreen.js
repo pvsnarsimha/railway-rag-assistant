@@ -2,6 +2,8 @@ import React from "react";
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
+import { useT } from "../context/LanguageContext";
+import ScreenLanguageBar from "../components/ScreenLanguageBar";
 
 /**
  * RailYatri-style "Train Enquiry Center" home screen. REDESIGN NOTE (per
@@ -51,6 +53,8 @@ const QUICK_LAUNCH = [
 ];
 
 export default function HomeScreen({ navigation }) {
+  const { t } = useT();
+  const label = (l) => t(l.replace(/\n/g, " "));
   function openTile(key) {
     if (key === "More") {
       // Jump to the existing "More Tools" tab rather than duplicating it
@@ -71,9 +75,17 @@ export default function HomeScreen({ navigation }) {
 
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
+      <ScreenLanguageBar
+        getSpeech={() => [
+          "Train Enquiry Center",
+          "Real-time status, schedules, availability and fares.",
+          "Options on this screen: " + TILES.map((x) => x.label.replace(/\n/g, " ")).join(", "),
+          "Track any train live.",
+        ]}
+      />
       <View style={styles.heroBanner}>
-        <Text style={styles.heroTitle}>Train Enquiry Center</Text>
-        <Text style={styles.heroSubtitle}>Real-time status, schedules, availability and fares — no fabricated data, ever.</Text>
+        <Text style={styles.heroTitle}>{t("Train Enquiry Center")}</Text>
+        <Text style={styles.heroSubtitle}>{t("Real-time status, schedules, availability and fares — no fabricated data, ever.")}</Text>
       </View>
 
       <View style={styles.grid}>
@@ -82,7 +94,7 @@ export default function HomeScreen({ navigation }) {
             <View style={[styles.tileIconWrap, { backgroundColor: tile.bg }]}>
               <Ionicons name={tile.icon} size={24} color={tile.fg} />
             </View>
-            <Text style={styles.tileLabel}>{tile.label}</Text>
+            <Text style={styles.tileLabel}>{label(tile.label)}</Text>
           </TouchableOpacity>
         ))}
       </View>
@@ -92,24 +104,24 @@ export default function HomeScreen({ navigation }) {
           <Ionicons name="navigate-circle" size={30} color={colors.textInverse} />
         </View>
         <View style={styles.promoTextWrap}>
-          <Text style={styles.promoTitle}>Track any train live</Text>
-          <Text style={styles.promoSubtitle}>Real GPS position + station-by-station ML delay prediction, updated every few seconds.</Text>
+          <Text style={styles.promoTitle}>{t("Track any train live")}</Text>
+          <Text style={styles.promoSubtitle}>{t("Real GPS position + station-by-station ML delay prediction, updated every few seconds.")}</Text>
         </View>
         <Ionicons name="chevron-forward" size={20} color={colors.textInverse} style={{ opacity: 0.85 }} />
       </TouchableOpacity>
 
-      <Text style={styles.sectionLabel}>Quick Launch</Text>
+      <Text style={styles.sectionLabel}>{t("Quick Launch")}</Text>
       <View style={styles.quickRow}>
         {QUICK_LAUNCH.map((item) => (
           <TouchableOpacity key={item.key} style={styles.quickItem} onPress={() => openQuickLaunch(item.key)} activeOpacity={0.75}>
             <Ionicons name={item.icon} size={22} color={colors.primary} />
-            <Text style={styles.quickLabel}>{item.label}</Text>
+            <Text style={styles.quickLabel}>{t(item.label)}</Text>
           </TouchableOpacity>
         ))}
       </View>
 
       <Text style={styles.footNote}>
-        Live data via RailKit + RapidAPI. Enquiry only — this app hands off to IRCTC for actual booking.
+        {t("Live data via RailKit + RapidAPI. Enquiry only — this app hands off to IRCTC for actual booking.")}
       </Text>
     </ScrollView>
   );
