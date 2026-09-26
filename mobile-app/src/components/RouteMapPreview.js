@@ -1,7 +1,9 @@
 import React, { useRef, useEffect } from "react";
-import { View, Text, StyleSheet } from "react-native";
+import { View, StyleSheet } from "react-native";
+import { Text } from "../i18n/AutoText";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import { colors, spacing, radius } from "../theme/colors";
+import { useT } from "../context/LanguageContext";
 
 /**
  * RouteMapPreview — renders the `map` field the backend already attaches
@@ -19,6 +21,7 @@ import { colors, spacing, radius } from "../theme/colors";
  *        rail path.
  */
 export default function RouteMapPreview({ map }) {
+  const { t } = useT();
   const mapRef = useRef(null);
 
   const isRoute = map?.type === "route";
@@ -81,8 +84,8 @@ export default function RouteMapPreview({ map }) {
                 <Marker
                   key={`${s.code}_${idx}`}
                   coordinate={{ latitude: s.lat, longitude: s.lng }}
-                  title={`${s.name} (${s.code})`}
-                  description={s.scheduled_arrival ? `Arr ${s.scheduled_arrival}` : undefined}
+                  title={`${t(s.name)} (${s.code})`}
+                  description={s.scheduled_arrival ? `${t("Arr")} ${s.scheduled_arrival}` : undefined}
                   pinColor={idx === 0 ? colors.success : idx === stations.length - 1 ? colors.danger : colors.accent}
                 />
               );
@@ -92,12 +95,12 @@ export default function RouteMapPreview({ map }) {
             <>
               <Marker
                 coordinate={{ latitude: map.source.lat, longitude: map.source.lng }}
-                title={map.source.name || map.source.code}
+                title={t(map.source.name || map.source.code)}
                 pinColor={colors.success}
               />
               <Marker
                 coordinate={{ latitude: map.dest.lat, longitude: map.dest.lng }}
-                title={map.dest.name || map.dest.code}
+                title={t(map.dest.name || map.dest.code)}
                 pinColor={colors.danger}
               />
             </>

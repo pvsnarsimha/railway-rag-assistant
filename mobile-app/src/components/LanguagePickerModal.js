@@ -1,5 +1,6 @@
 import React from "react";
-import { Modal, View, Text, TouchableOpacity, ScrollView, StyleSheet } from "react-native";
+import { Modal, View, TouchableOpacity, ScrollView, StyleSheet } from "react-native";
+import { Text } from "../i18n/AutoText";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import { LANGUAGES } from "../utils/notifyLanguage";
@@ -16,11 +17,11 @@ export default function LanguagePickerModal({ visible, selected, onSelect, onClo
       <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={onClose}>
         <TouchableOpacity activeOpacity={1} style={styles.sheet} onPress={() => {}}>
           <View style={styles.handle} />
-          <Text style={styles.title}>Notification language</Text>
-          <Text style={styles.subtitle}>
+          <Text style={styles.title}>App language</Text>
+          <Text style={styles.subtitle} noTranslate>
             भाषा चुनें · భాష ఎంచుకోండి · மொழியைத் தேர்ந்தெடுக்கவும் · ভাষা বেছে নিন
           </Text>
-          <Text style={styles.hint}>Train notifications will be shown and read aloud in this language.</Text>
+          <Text style={styles.hint}>Every screen, station name, notification and read-aloud will use this language.</Text>
           <ScrollView style={styles.list} bounces={false}>
             <View style={styles.grid}>
               {LANGUAGES.map((l) => {
@@ -35,8 +36,8 @@ export default function LanguagePickerModal({ visible, selected, onSelect, onClo
                     accessibilityLabel={l.name}
                   >
                     <View style={{ flex: 1 }}>
-                      <Text style={[styles.native, active && styles.nativeActive]}>{l.native}</Text>
-                      {l.native !== l.name ? <Text style={styles.english}>{l.name}</Text> : null}
+                      <Text style={[styles.native, active && styles.nativeActive]} noTranslate>{l.native}</Text>
+                      {l.native !== l.name ? <Text style={styles.english} noTranslate>{l.name}</Text> : null}
                     </View>
                     {active ? <Ionicons name="checkmark-circle" size={20} color={colors.primary} /> : null}
                   </TouchableOpacity>

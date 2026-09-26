@@ -1,5 +1,6 @@
 import React from "react";
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from "react-native";
+import { View, ScrollView, TouchableOpacity, StyleSheet } from "react-native";
+import { Text } from "../i18n/AutoText";
 import { colors, spacing, radius } from "../theme/colors";
 import { toDdMmYyyy, addDays, startOfToday, isSameDay, relativeDayLabel, monthShort } from "../utils/dateFormat";
 

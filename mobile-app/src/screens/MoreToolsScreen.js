@@ -1,5 +1,7 @@
 import React, { useState, useCallback } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Linking } from "react-native";
+import { View, StyleSheet, ScrollView, TouchableOpacity, Linking } from "react-native";
+import { Text } from "../i18n/AutoText";
+import ScreenLanguageBar from "../components/ScreenLanguageBar";
 import NearbyStationMap from "../components/NearbyStationMap";
 import RoutePositionMap from "../components/RoutePositionMap";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -2132,11 +2134,14 @@ export default function MoreToolsScreen({ route }) {
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabScroll} contentContainerStyle={styles.tabScrollContent}>
         {TOOLS.map((t) => (
           <TouchableOpacity key={t.key} style={[styles.tab, active === t.key && styles.tabActive]} onPress={() => setActive(t.key)}>
-            <Text style={[styles.tabText, active === t.key && styles.tabTextActive]}>{t.label}</Text>
+            <Text style={[styles.tabText, active === t.key && styles.tabTextActive]} noSpeak={active !== t.key}>{t.label}</Text>
           </TouchableOpacity>
         ))}
       </ScrollView>
       <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
+        {/* FEATURE: 🌐 app language + 🔊 "Speak screen" (reads the open
+            tool — whatever it currently shows — in the chosen language). */}
+        <ScreenLanguageBar />
         {ActiveComponent && (
           <ActiveComponent
             apiBaseUrl={apiBaseUrl}

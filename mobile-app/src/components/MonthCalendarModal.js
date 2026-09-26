@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { Modal, View, Text, TouchableOpacity, StyleSheet } from "react-native";
+import { Modal, View, TouchableOpacity, StyleSheet } from "react-native";
+import { Text } from "../i18n/AutoText";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import { toDdMmYyyy, fromDdMmYyyy, startOfToday, isSameDay } from "../utils/dateFormat";

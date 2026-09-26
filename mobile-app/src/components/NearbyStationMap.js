@@ -2,6 +2,7 @@ import React from "react";
 import { View, StyleSheet } from "react-native";
 import MapView, { Marker, PROVIDER_GOOGLE } from "react-native-maps";
 import { radius, colors } from "../theme/colors";
+import { useT } from "../context/LanguageContext";
 
 /**
  * NearbyStationMap — single-marker map for a looked-up station (used by the
@@ -11,6 +12,7 @@ import { radius, colors } from "../theme/colors";
  * LiveTrackingScreen.web.js for the established pattern this follows.
  */
 export default function NearbyStationMap({ latitude, longitude, title }) {
+  const { t } = useT();
   if (latitude == null || longitude == null) return null;
   return (
     <View style={styles.mapBox}>
@@ -20,7 +22,7 @@ export default function NearbyStationMap({ latitude, longitude, title }) {
         initialRegion={{ latitude, longitude, latitudeDelta: 0.05, longitudeDelta: 0.05 }}
         region={{ latitude, longitude, latitudeDelta: 0.05, longitudeDelta: 0.05 }}
       >
-        <Marker coordinate={{ latitude, longitude }} title={title} />
+        <Marker coordinate={{ latitude, longitude }} title={title ? t(title) : title} />
       </MapView>
     </View>
   );

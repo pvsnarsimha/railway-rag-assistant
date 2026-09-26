@@ -1,5 +1,6 @@
 import React from "react";
-import { View, Text, Image, StyleSheet } from "react-native";
+import { View, Image, StyleSheet } from "react-native";
+import { Text } from "../i18n/AutoText";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import FeedbackBar from "./FeedbackBar";
@@ -23,7 +24,10 @@ export default function ChatBubble({ message }) {
           <Image source={{ uri: message.imageUri }} style={styles.attachedImage} resizeMode="cover" />
         ) : null}
 
-        <Text style={[styles.text, isUser ? styles.textUser : styles.textAssistant]}>{message.text}</Text>
+        <Text
+          style={[styles.text, isUser ? styles.textUser : styles.textAssistant]}
+          noTranslate={isUser || !mostlyEnglish(message.text)}
+        >{message.text}</Text>
 
         {!isUser && message.map && <RouteMapPreview map={message.map} />}
 
@@ -103,3 +107,14 @@ const styles = StyleSheet.create({
   },
   usedBadgeText: { fontSize: 10.5, color: colors.primary, fontWeight: "600" },
 });
+
+// What you typed stays as typed; an answer is translated only when it came
+// back in English (e.g. offline answers) — one already in your language
+// isn't sent through translation again.
+function mostlyEnglish(text) {
+  const s = String(text || "");
+  const letters = s.match(/\p{L}/gu) || [];
+  if (!letters.length) return false;
+  const latin = letters.filter((c) => /[A-Za-z]/.test(c)).length;
+  return latin / letters.length > 0.8;
+}
