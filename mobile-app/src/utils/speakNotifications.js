@@ -12,6 +12,7 @@
 
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { getLanguage, languageInfo } from "./notifyLanguage";
 
 // NATIVE (Android/iOS app build): speech uses expo-speech, and the setting
 // is kept in AsyncStorage so the background notification task
@@ -52,32 +53,72 @@ export function saveReadAloud(on) {
   try { localStorage.setItem(KEY, on ? "1" : "0"); } catch (e) { /* ignore */ }
 }
 
-function clean(text) {
-  return String(text || "")
+function clean(text, english = true) {
+  let t = String(text || "")
     .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, "") // emoji
     .replace(/·/g, ",")
-    .replace(/\s+/g, " ")
-    .replace(/\bkm\b/g, "kilometres")
-    .replace(/\bmin\b/g, "minutes")
-    .replace(/\bJn\b/gi, "Junction")
-    .trim();
+    .replace(/\s+/g, " ");
+  if (english) {
+    t = t.replace(/\bkm\b/g, "kilometres")
+      .replace(/\bmin\b/g, "minutes");
+  }
+  return t.replace(/\bJn\b/gi, "Junction").trim();
+}
+
+// FEATURE (multi-language read-aloud): which installed voice can read the
+// chosen language? Tries the language's own locale, then its fallback
+// (e.g. Maithili -> Hindi voice), else null (caller reads English).
+let nativeVoices = null;
+function loadNativeVoices() {
+  if (!NativeSpeech || nativeVoices) return Promise.resolve(nativeVoices);
+  return NativeSpeech.getAvailableVoicesAsync()
+    .then((v) => { nativeVoices = Array.isArray(v) ? v : []; return nativeVoices; })
+    .catch(() => { nativeVoices = []; return nativeVoices; });
+}
+if (!IS_WEB) loadNativeVoices();
+
+function prefix(locale) {
+  return String(locale || "").toLowerCase().split(/[-_]/)[0];
+}
+
+function voiceLocaleFor(lang, voices) {
+  const info = languageInfo(lang);
+  const wanted = [info.tts, info.fallback].filter(Boolean);
+  if (!voices || !voices.length) return wanted[0]; // unknown: let the engine try
+  for (const loc of wanted) {
+    const p = prefix(loc);
+    const v = voices.find((x) => prefix(x.language || x.lang) === p);
+    if (v) return v.language || v.lang || loc;
+  }
+  return null;
 }
 
 // Read ONLY the current notification, once: a newer message cuts off
 // anything still being read or queued (older updates are never read after
 // a newer one arrives), and the exact same text is never read twice.
-export function speak(text) {
+// opts.lang: language of `text` (default: the user's chosen language);
+// opts.fallbackText: the same message in English, read when the phone has
+// no voice for that language.
+export function speak(text, opts = {}) {
   if (!isSpeechSupported()) return false;
-  const t = clean(text);
+  const lang = opts.lang || getLanguage();
+  const t = clean(text, lang === "en");
   if (!t) return false;
   const now = Date.now();
   for (const [k, at] of recent) if (now - at > 6 * 3600 * 1000) recent.delete(k);
   if (recent.has(t)) return false;
   recent.set(t, now);
+  const english = opts.fallbackText ? clean(opts.fallbackText, true) : null;
   if (!IS_WEB) {
     try {
       NativeSpeech.stop();
-      NativeSpeech.speak(t, { language: "en-IN", rate: 0.95 });
+      loadNativeVoices().then((voices) => {
+        const loc = lang === "en" ? "en-IN" : voiceLocaleFor(lang, voices);
+        try {
+          if (loc) NativeSpeech.speak(t, { language: loc, rate: 0.95 });
+          else NativeSpeech.speak(english || t, { language: english ? "en-IN" : languageInfo(lang).tts, rate: 0.95 });
+        } catch (e) { /* ignore */ }
+      });
       return true;
     } catch (e) {
       return false;
@@ -85,11 +126,16 @@ export function speak(text) {
   }
   try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
   try {
-    const u = new SpeechSynthesisUtterance(t);
     const voices = window.speechSynthesis.getVoices() || [];
-    const v = voices.find((x) => /en[-_]IN/i.test(x.lang)) || voices.find((x) => /^en/i.test(x.lang));
+    let utterText = t;
+    let loc = lang === "en" ? "en-IN" : voiceLocaleFor(lang, voices);
+    if (!loc) { utterText = english || t; loc = english ? "en-IN" : languageInfo(lang).tts; }
+    const u = new SpeechSynthesisUtterance(utterText);
+    const p = prefix(loc);
+    const v = voices.find((x) => String(x.lang).replace("_", "-").toLowerCase() === String(loc).toLowerCase())
+      || voices.find((x) => prefix(x.lang) === p);
     if (v) u.voice = v;
-    u.lang = (v && v.lang) || "en-IN";
+    u.lang = (v && v.lang) || loc;
     u.rate = 0.95;
     window.speechSynthesis.speak(u);
     return true;

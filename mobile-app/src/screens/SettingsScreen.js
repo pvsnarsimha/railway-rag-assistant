@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { View, Text, StyleSheet, ScrollView } from "react-native";
+import React, { useEffect, useState } from "react";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
@@ -8,12 +8,19 @@ import PrimaryButton from "../components/PrimaryButton";
 import { useSettings } from "../context/SettingsContext";
 import { checkHealth } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
+import LanguagePickerModal from "../components/LanguagePickerModal";
+import { getLanguage, languageInfo, loadLanguage } from "../utils/notifyLanguage";
+import { applyNotifyLanguage } from "../services/backgroundTracking";
 
 export default function SettingsScreen() {
   const { apiBaseUrl, setApiBaseUrl, wsBaseUrl } = useSettings();
   const [draftUrl, setDraftUrl] = useState(apiBaseUrl);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null); // { ok, detail }
+  // FEATURE: notification language (English + 22 Indian languages).
+  const [lang, setLang] = useState(getLanguage());
+  const [langOpen, setLangOpen] = useState(false);
+  useEffect(() => { loadLanguage().then((c) => { if (c) setLang(c); }); }, []);
 
   async function handleSave() {
     await setApiBaseUrl(draftUrl);
@@ -73,6 +80,27 @@ export default function SettingsScreen() {
           <Text style={styles.currentValue}>{apiBaseUrl}</Text>
           <Text style={styles.currentValue}>{wsBaseUrl} (WebSocket, for Live Tracking)</Text>
         </View>
+      </SectionCard>
+
+      <SectionCard title="Notification language" subtitle="Train notifications are shown and read aloud in this language.">
+        <TouchableOpacity
+          onPress={() => setLangOpen(true)}
+          accessibilityRole="button"
+          style={{ flexDirection: "row", alignItems: "center", paddingVertical: 8 }}
+        >
+          <Ionicons name="language-outline" size={20} color={colors.primary} />
+          <Text style={{ flex: 1, marginLeft: 8, fontSize: 16, color: colors.text }}>
+            {languageInfo(lang).native}
+            {languageInfo(lang).native !== languageInfo(lang).name ? `  (${languageInfo(lang).name})` : ""}
+          </Text>
+          <Text style={{ color: colors.primary, fontWeight: "700" }}>Change</Text>
+        </TouchableOpacity>
+        <LanguagePickerModal
+          visible={langOpen}
+          selected={lang}
+          onSelect={(code) => { setLangOpen(false); setLang(code); applyNotifyLanguage(apiBaseUrl, code); }}
+          onClose={() => setLangOpen(false)}
+        />
       </SectionCard>
 
       <SectionCard title="Connecting from different devices">

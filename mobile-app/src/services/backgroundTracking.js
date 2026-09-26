@@ -13,7 +13,8 @@
 //      user presses Stop.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { registerPushToken, startBackgroundTracking, stopBackgroundTracking } from "../api/railwayApi";
+import { registerPushToken, setPushLanguage, startBackgroundTracking, stopBackgroundTracking } from "../api/railwayApi";
+import { getLanguage, hasChosenLanguage, saveLanguage } from "../utils/notifyLanguage";
 import { registerForPushNotifications, refreshWebPushToken } from "./pushNotifications";
 
 const PUSH_TOKEN_KEY = "moreTools.pushToken"; // shared with the rest of the app
@@ -95,7 +96,7 @@ async function getToken(apiBaseUrl, prompt) {
   }
   if (token) {
     try { await AsyncStorage.setItem(PUSH_TOKEN_KEY, token); } catch (e) { /* ignore */ }
-    try { await registerPushToken(apiBaseUrl, token, platform); } catch (e) { /* the tracking call self-registers too */ }
+    try { await registerPushToken(apiBaseUrl, token, platform, hasChosenLanguage() ? getLanguage() : null); } catch (e) { /* the tracking call self-registers too */ }
   }
   return { token, reason };
 }
@@ -108,7 +109,9 @@ export async function enableBackgroundTracking(apiBaseUrl, { trainNumber, date, 
   const { token, reason } = await getToken(apiBaseUrl, prompt);
   if (!token) return { ok: false, reason: reason || "Notifications are off — allow notifications to keep tracking after you close the app." };
   try {
-    await startBackgroundTracking(apiBaseUrl, token, { trainNumber, date, source, dest, intervalMinutes });
+    await startBackgroundTracking(apiBaseUrl, token, {
+      trainNumber, date, source, dest, intervalMinutes, lang: hasChosenLanguage() ? getLanguage() : null,
+    });
     return { ok: true };
   } catch (e) {
     return { ok: false, reason: "Couldn't reach the server to start background tracking — it'll retry next time the app opens." };
@@ -120,4 +123,25 @@ export async function disableBackgroundTracking(apiBaseUrl, { trainNumber, date 
   try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
   if (!token) return;
   try { await stopBackgroundTracking(apiBaseUrl, token, { trainNumber, date }); } catch (e) { /* best-effort */ }
+}
+
+/**
+ * FEATURE: notification language. Saves the choice on this device and tells
+ * the server (so pushes are built in that language), using the stored push
+ * token — never prompts. Returns the saved code.
+ */
+export async function applyNotifyLanguage(apiBaseUrl, code) {
+  const lang = await saveLanguage(code);
+  let token = null;
+  try {
+    const fresh = await refreshWebPushToken();
+    if (fresh && fresh.token) token = fresh.token;
+  } catch (e) { /* ignore */ }
+  if (!token) {
+    try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
+  }
+  if (token && apiBaseUrl) {
+    try { await setPushLanguage(apiBaseUrl, token, lang); } catch (e) { /* sent again with the next tracking call */ }
+  }
+  return lang;
 }

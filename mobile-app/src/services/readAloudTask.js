@@ -22,6 +22,7 @@ import * as TaskManager from "expo-task-manager";
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 import { loadReadAloudAsync, speak, shouldSpeakPush } from "../utils/speakNotifications";
+import { loadLanguage } from "../utils/notifyLanguage";
 
 export const READ_ALOUD_TASK = "railway-read-aloud-notification";
 
@@ -40,7 +41,8 @@ export function speakPushData(d) {
   const text = d.speak_text || [d.title, d.body].filter(Boolean).join(". ");
   if (!text) return;
   if (!shouldSpeakPush(d)) return;
-  speak(text);
+  // Pushes carry their language + an English copy (backend/i18n_notify.py).
+  speak(text, { lang: d.lang || undefined, fallbackText: d.speak_text_en || undefined });
 }
 
 // Must be defined at module scope (imported from App.js) so the OS can
@@ -50,6 +52,7 @@ if (Platform.OS !== "web") {
     if (error) return;
     try {
       if (!(await loadReadAloudAsync())) return;
+      await loadLanguage();
       speakPushData(extract(data));
     } catch (e) { /* never crash the headless task */ }
   });

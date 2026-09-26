@@ -23,9 +23,11 @@ import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 import OfflineTrackingCard from "../components/OfflineTrackingCard";
 import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
 import { isSpeechSupported, loadReadAloud, loadReadAloudAsync, saveReadAloud, speak, stopSpeaking, onTrainPush, shouldSpeakPush } from "../utils/speakNotifications";
+import { getLanguage, hasChosenLanguage, languageInfo, loadLanguage, SAMPLE } from "../utils/notifyLanguage";
+import LanguagePickerModal from "../components/LanguagePickerModal";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
-  loadStatusEvery, saveStatusEvery,
+  loadStatusEvery, saveStatusEvery, applyNotifyLanguage,
 } from "../services/backgroundTracking";
 
 // FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
@@ -816,15 +818,30 @@ export default function LiveTrackingScreen({ navigation }) {
   useEffect(() => { readAloudRef.current = readAloud; }, [readAloud]);
   useEffect(() => onTrainPush((m) => {
     if (!readAloudRef.current || !shouldSpeakPush(m)) return;
-    speak([m.title, m.body].filter(Boolean).join(". "));
+    speak([m.title, m.body].filter(Boolean).join(". "), { lang: m.lang || undefined, fallbackText: m.speak_text_en || undefined });
   }), []);
+  // FEATURE: notification language (English + 22 Indian languages) —
+  // asked the first time read-aloud is ticked, changeable any time.
+  const [notifyLang, setNotifyLang] = useState(getLanguage());
+  const [langOpen, setLangOpen] = useState(false);
+  useEffect(() => { loadLanguage().then((c) => { if (c) setNotifyLang(c); }); }, []);
+  const chooseLanguage = useCallback((code) => {
+    setLangOpen(false);
+    setNotifyLang(code);
+    applyNotifyLanguage(apiBaseUrl, code);
+    // Read a sample in that language (also unlocks speech on mobile web).
+    if (readAloudRef.current) speak(SAMPLE[code] || SAMPLE.en, { lang: code, fallbackText: SAMPLE.en });
+  }, [apiBaseUrl]);
   const toggleReadAloud = useCallback(() => {
     setReadAloud((on) => {
       const next = !on;
       saveReadAloud(next);
-      // Speaking once from the tap itself also unlocks speech on mobile.
-      if (next) speak("Read aloud is on. Train notifications and delay alerts will be read out.");
-      else stopSpeaking();
+      readAloudRef.current = next;
+      if (next) {
+        if (!hasChosenLanguage()) setLangOpen(true);
+        // Speaking once from the tap itself also unlocks speech on mobile.
+        else speak(SAMPLE[getLanguage()] || SAMPLE.en, { lang: getLanguage(), fallbackText: SAMPLE.en });
+      } else stopSpeaking();
       return next;
     });
   }, []);
@@ -2111,6 +2128,20 @@ export default function LiveTrackingScreen({ navigation }) {
               {isSpeechSupported() ? "🔊 Read notifications aloud" : "Read aloud isn't supported in this browser"}
             </Text>
           </TouchableOpacity>
+          <TouchableOpacity onPress={() => setLangOpen(true)} style={styles.everyRow} accessibilityRole="button">
+            <Ionicons name="language-outline" size={18} color={colors.primary} />
+            <Text style={styles.everyLabel}>
+              Notification language: {languageInfo(notifyLang).native}
+              {languageInfo(notifyLang).native !== languageInfo(notifyLang).name ? ` (${languageInfo(notifyLang).name})` : ""}
+              {"  "}<Text style={{ color: colors.primary, fontWeight: "700" }}>Change</Text>
+            </Text>
+          </TouchableOpacity>
+          <LanguagePickerModal
+            visible={langOpen}
+            selected={notifyLang}
+            onSelect={chooseLanguage}
+            onClose={() => setLangOpen(false)}
+          />
           {readAloud ? (
             <Text style={styles.bgTrackText}>
               Reads the status updates and bell/delay alerts while this app is open (also in a background tab). With the app fully closed, you'll still get the notification and sound.

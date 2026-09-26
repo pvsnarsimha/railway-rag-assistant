@@ -326,9 +326,16 @@ export async function checkDelayAlerts(baseUrl, watches) {
  * ------------------------------------------------------------------- */
 
 /** Registers this device's push token with the backend (push_store.py). */
-export async function registerPushToken(baseUrl, token, platform) {
+export async function registerPushToken(baseUrl, token, platform, lang) {
   const client = makeClient(baseUrl);
-  const { data } = await client.post("/api/push/register-token", { token, platform: platform || null });
+  const { data } = await client.post("/api/push/register-token", { token, platform: platform || null, lang: lang || null });
+  return data;
+}
+
+/** Notification language for this device's pushes (backend/i18n_notify.py). */
+export async function setPushLanguage(baseUrl, token, lang) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.post("/api/push/language", { token, lang });
   return data;
 }
 
@@ -814,10 +821,11 @@ export function buildTripShareUrl(apiBaseUrl, shareId) {
  * "Crossed X at HH:MM · N km to Y" notification after the app is closed.
  * See backend/alert_scheduler.py's run_tracking_check_once.
  */
-export async function startBackgroundTracking(baseUrl, token, { trainNumber, date, source, dest, intervalMinutes }) {
+export async function startBackgroundTracking(baseUrl, token, { trainNumber, date, source, dest, intervalMinutes, lang }) {
   const client = makeClient(baseUrl);
   const { data } = await client.post("/api/push/tracking", {
     token, train_number: trainNumber, date: date || null, source: source || null, dest: dest || null,
+    lang: lang || null,
     // "Notify me every N min" (0 = off); omitted keeps the server's setting.
     ...(intervalMinutes != null ? { interval_minutes: intervalMinutes } : {}),
   });

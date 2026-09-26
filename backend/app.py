@@ -785,6 +785,37 @@ def _stop_really_reached(stop: dict) -> bool:
     return False
 
 
+def _contiguous_reached_checker(timeline_json: list):
+    """BUGFIX (long trains: "12295 · Reached Danapur at 08:00" while the
+    train was still near Arakkonam on day 1). RailRadar gives several
+    far-downstream stops an undated HH:MM "actual" (really a projected
+    time, but not flagged as one). _stop_really_reached can only compare
+    that clock time with today's clock — 08:00 < 13:31 — so the day-3
+    destination looked "reached", the notification said so, and the
+    background tracking watch retired itself.
+
+    A train reaches stops in order, so an actual-time "reached" only counts
+    while it is CONTIGUOUS: from the last stop the provider marks
+    current/passed, every following halt must also be reached; the first
+    halt that isn't breaks the chain and nothing after it can be reached
+    on actual times alone. A genuinely stale status (the 20833 KHAMMAM
+    case: real recorded arrivals at the next few halts) still works — those
+    actuals are contiguous. Returns a predicate for running_status.build."""
+    ok = set()
+    broken = False
+    for s in timeline_json or []:
+        if s.get("status") in ("current", "passed"):
+            ok.add(id(s))
+            continue
+        if s.get("kind") == "intermediate":
+            continue
+        if not broken and _stop_really_reached(s):
+            ok.add(id(s))
+        else:
+            broken = True
+    return lambda stop: id(stop) in ok
+
+
 _RAIL_TS_RE = re.compile(r"(\d{1,2}):(\d{2})\s+(\d{1,2})-([A-Za-z]{3})")
 _RAIL_MONTHS = {m: i + 1 for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
@@ -862,8 +893,9 @@ def _last_really_reached_index(timeline_json: list, next_station_code: Optional[
     can be hours stale (the 20833 KHAMMAM case), so it can't veto a real
     recorded arrival further down the line."""
     last = -1
+    reached = _contiguous_reached_checker(timeline_json)
     for i, s in enumerate(timeline_json):
-        if s.get("kind") != "intermediate" and _stop_really_reached(s):
+        if s.get("kind") != "intermediate" and reached(s):
             last = i
     return last
 
@@ -1016,7 +1048,7 @@ def _predict_for_watch_station(train_number: str, date: Optional[str], label: Op
                 timeline_json,
                 delay_minutes=position.delay_minutes if position else None,
                 train_name=position.train_name if position else None,
-                speed_kmph=speed, is_really_reached=_stop_really_reached,
+                speed_kmph=speed, is_really_reached=_contiguous_reached_checker(timeline_json),
                 live_distance_km=_live_km(),
             )
         except Exception:  # noqa: BLE001 - a snapshot failure must never block an alert
@@ -5110,14 +5142,44 @@ def api_alerts_check(req: AlertsCheckRequest):
 class RegisterTokenRequest(BaseModel):
     token: str
     platform: Optional[str] = None  # "web" | "android" | "ios", informational only
+    lang: Optional[str] = None  # notification language code (i18n_notify.LANGUAGES)
+
+
+def _clean_lang(lang: Optional[str]) -> Optional[str]:
+    if not lang:
+        return None
+    import i18n_notify
+    return i18n_notify.normalize(lang)
 
 
 @app.post("/api/push/register-token")
 def api_push_register_token(req: RegisterTokenRequest):
     if not req.token.strip():
         return {"ok": False, "error": "Empty token."}
-    push_store.register_token(req.token.strip(), req.platform)
+    push_store.register_token(req.token.strip(), req.platform, _clean_lang(req.lang))
     return {"ok": True, "push_configured": push_notifications.status()["configured"]}
+
+
+class PushLanguageRequest(BaseModel):
+    token: str
+    lang: str
+
+
+@app.post("/api/push/language")
+def api_push_language(req: PushLanguageRequest):
+    """FEATURE: notifications (and read-aloud) in the user's language —
+    English + the 22 Eighth-Schedule languages (see i18n_notify.py)."""
+    if not req.token.strip():
+        return {"ok": False, "error": "Empty token."}
+    lang = _clean_lang(req.lang) or "en"
+    push_store.register_token(req.token.strip(), None, lang)
+    return {"ok": True, "lang": lang}
+
+
+@app.get("/api/push/languages")
+def api_push_languages():
+    import i18n_notify
+    return {"languages": [{"code": c, "name": n, "native": nat} for c, (n, nat) in i18n_notify.LANGUAGES.items()]}
 
 
 class UnregisterTokenRequest(BaseModel):
@@ -5354,6 +5416,7 @@ class TrackingWatchRequest(BaseModel):
     # "Notify me every N min" for this train (0 = off). None keeps the
     # current setting (default 10 for a new watch).
     interval_minutes: Optional[int] = None
+    lang: Optional[str] = None
 
 
 class TrackingWatchDeleteRequest(BaseModel):
@@ -5424,7 +5487,7 @@ def api_push_start_tracking(req: TrackingWatchRequest):
     token = req.token.strip()
     if not token or not req.train_number.strip():
         raise HTTPException(status_code=400, detail="token and train_number are required")
-    push_store.register_token(token)
+    push_store.register_token(token, None, _clean_lang(req.lang))
     push_store.upsert_tracking_watch(token, req.train_number.strip(), (req.date or "").strip() or None,
                                      req.source, req.dest, req.interval_minutes)
     return {"ok": True, "tracking": push_store.list_tracking_watches_for_token(token)}

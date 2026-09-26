@@ -79,6 +79,8 @@ def _init_db():
             "ALTER TABLE watches ADD COLUMN last_notified_at REAL",
             # FEATURE: one-shot "arriving in ~10 min, be alert" push per bell.
             "ALTER TABLE watches ADD COLUMN approach_notified_at REAL",
+            # FEATURE: notifications in the user's language (i18n_notify.py).
+            "ALTER TABLE device_tokens ADD COLUMN lang TEXT",
         ):
             try:
                 conn.execute(stmt)
@@ -210,19 +212,31 @@ def _connect():
         conn.close()
 
 
-def register_token(token: str, platform: Optional[str] = None) -> None:
-    """Insert or refresh a device token's last_seen_at (upsert)."""
+def register_token(token: str, platform: Optional[str] = None, lang: Optional[str] = None) -> None:
+    """Insert or refresh a device token's last_seen_at (upsert). `lang`
+    (notification language, see i18n_notify.py) is kept when omitted."""
     now = time.time()
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO device_tokens (token, platform, created_at, last_seen_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO device_tokens (token, platform, created_at, last_seen_at, lang)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(token) DO UPDATE SET last_seen_at = excluded.last_seen_at,
-                                              platform = COALESCE(excluded.platform, device_tokens.platform)
+                                              platform = COALESCE(excluded.platform, device_tokens.platform),
+                                              lang = COALESCE(excluded.lang, device_tokens.lang)
             """,
-            (token, platform, now, now),
+            (token, platform, now, now, lang or None),
         )
+
+
+def get_token_lang(token: str) -> str:
+    """The device's chosen notification language code ("en" by default)."""
+    try:
+        with _connect() as conn:
+            row = conn.execute("SELECT lang FROM device_tokens WHERE token = ?", (token,)).fetchone()
+        return (row[0] if row and row[0] else "en")
+    except Exception:  # noqa: BLE001 - language must never break a push
+        return "en"
 
 
 def unregister_token(token: str) -> None:

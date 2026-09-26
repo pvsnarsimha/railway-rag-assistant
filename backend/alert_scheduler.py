@@ -208,9 +208,19 @@ def _retire_reached_watch(w: dict, station: Optional[str], actual_time: Optional
         clock = running_status._hhmm(actual_time)
         name = running_status._title(station) or station or (w.get("label") or "your station")
         msg = f"Reached {name}" + (f" at {clock}" if clock else "") + " · this station's alert is now switched off."
+        localized = None
+        try:
+            import i18n_notify
+            lang = push_store.get_token_lang(w["token"])
+            if lang != "en":
+                localized = (i18n_notify.phrase(lang, "bell_off", st=name, t=clock) if clock
+                             else i18n_notify.phrase(lang, "bell_off_nt", st=name))
+        except Exception:  # noqa: BLE001
+            localized = None
         res = push_notifications.send_station_status_alert(
             token=w["token"], train_number=w["train_number"], label=None,
             station=station, message=msg, actual_time=actual_time, running=running,
+            localized_message=localized,
         )
         sent = bool(res.get("sent"))
     try:
