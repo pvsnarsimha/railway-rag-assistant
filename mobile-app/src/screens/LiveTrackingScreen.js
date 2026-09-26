@@ -2049,7 +2049,11 @@ export default function LiveTrackingScreen({ navigation }) {
             ) : null}
           </View>
         </SectionCard>
-      ) : (
+      ) : null}
+      {/* The train card (Live, Stop, Internet/GPS, Notify me, Read aloud,
+          notification language) stays on screen while the "change train"
+          form is open, so none of those features disappear. */}
+      {activeTrack ? (
         <View style={styles.ryHeader}>
           {/* REDESIGN (RailYatri-style header): "12728 - Godavari Sf Express",
               route, and a Today/Yesterday date switch — the form itself is
@@ -2214,7 +2218,7 @@ export default function LiveTrackingScreen({ navigation }) {
             </Text>
           ) : null}
         </View>
-      )}
+      ) : null}
 
       {modeNotice ? (
         <View style={styles.ryRedBanner}>
