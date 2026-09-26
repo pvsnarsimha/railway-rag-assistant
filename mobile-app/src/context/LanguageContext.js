@@ -37,6 +37,9 @@ import { useSettings } from "./SettingsContext";
 import { getLanguage, loadLanguage } from "../utils/notifyLanguage";
 import { applyNotifyLanguage } from "../services/backgroundTracking";
 import { makeClient } from "../api/client";
+// Fixed text of every screen (scripts/extract-ui-strings.js), sent for
+// translation as soon as a language is chosen.
+import UI_STRINGS from "../i18n/uiStrings.json";
 
 // v2: v1 caches could hold English "translations" saved after a failed
 // request — they're ignored.
@@ -304,11 +307,15 @@ export function LanguageProvider({ children }) {
     });
   }, [loadCache, request, absorb]);
 
-  /** Translate everything the app has shown before, in the background. */
+  /** Translate every screen's text in the background — what the app has
+   *  shown before plus the fixed text of all screens — so screens not opened
+   *  yet are already in the chosen language, from the very first choice.
+   *  Text on the open screen was queued first and goes out first. */
   const prewarm = useCallback((code) => {
     if (code === "en") return;
     const map = cacheRef.current[code] || {};
     seenRef.current.forEach((s) => { if (!map[s]) pendingRef.current.add(s); });
+    UI_STRINGS.forEach((s) => { if (!map[s]) pendingRef.current.add(s); });
     scheduleFlush(0);
   }, [scheduleFlush]);
 

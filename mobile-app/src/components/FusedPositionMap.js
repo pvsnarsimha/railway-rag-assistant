@@ -2,6 +2,7 @@ import React from "react";
 import { View, StyleSheet, Platform } from "react-native";
 import MapView, { Marker, Circle, PROVIDER_GOOGLE } from "react-native-maps";
 import { colors, radius } from "../theme/colors";
+import { useT } from "../context/LanguageContext";
 
 /**
  * FusedPositionMap — the "Fused position" map from CrowdPositionScreen.js,
@@ -10,6 +11,7 @@ import { colors, radius } from "../theme/colors";
  * LiveTrackingScreen.web.js for the established pattern.
  */
 export default function FusedPositionMap({ lat, lng, color, title, description, uncertaintyRadiusM }) {
+  const { t } = useT();
   if (lat == null || lng == null) return null;
   const markerColor = color || colors.primary;
   return (
@@ -19,7 +21,7 @@ export default function FusedPositionMap({ lat, lng, color, title, description, 
         provider={Platform.OS === "android" ? PROVIDER_GOOGLE : undefined}
         initialRegion={{ latitude: lat, longitude: lng, latitudeDelta: 0.08, longitudeDelta: 0.08 }}
       >
-        <Marker coordinate={{ latitude: lat, longitude: lng }} pinColor={markerColor} title={title} description={description} />
+        <Marker coordinate={{ latitude: lat, longitude: lng }} pinColor={markerColor} title={title ? t(title) : title} description={description ? t(description) : description} />
         {uncertaintyRadiusM ? (
           <Circle
             center={{ latitude: lat, longitude: lng }}

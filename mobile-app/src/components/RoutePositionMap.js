@@ -2,6 +2,7 @@ import React, { useRef, useEffect } from "react";
 import { View, StyleSheet } from "react-native";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import { colors, radius } from "../theme/colors";
+import { useT } from "../context/LanguageContext";
 
 /**
  * RoutePositionMap — the animated Route Time-Lapse map from
@@ -15,6 +16,7 @@ import { colors, radius } from "../theme/colors";
  *           train position (see _tlPositionAt in MoreToolsScreen.js)
  */
 export default function RoutePositionMap({ stops, pos }) {
+  const { t } = useT();
   const mapRef = useRef(null);
 
   useEffect(() => {
@@ -40,9 +42,9 @@ export default function RoutePositionMap({ stops, pos }) {
     >
       <Polyline coordinates={stops.map((s) => ({ latitude: s.lat, longitude: s.lng }))} strokeColor={colors.primary} strokeWidth={3} />
       {stops.map((s, i) => (
-        <Marker key={s.code + i} coordinate={{ latitude: s.lat, longitude: s.lng }} title={`${s.name} (${s.code})`} pinColor={colors.border} opacity={0.6} />
+        <Marker key={s.code + i} coordinate={{ latitude: s.lat, longitude: s.lng }} title={`${t(s.name)} (${s.code})`} pinColor={colors.border} opacity={0.6} />
       ))}
-      {pos && <Marker coordinate={{ latitude: pos.latitude, longitude: pos.longitude }} title="Train" pinColor={colors.accent} />}
+      {pos && <Marker coordinate={{ latitude: pos.latitude, longitude: pos.longitude }} title={t("Train")} pinColor={colors.accent} />}
     </MapView>
   );
 }

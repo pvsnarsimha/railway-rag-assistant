@@ -9,8 +9,10 @@ import React, { useEffect, useRef } from "react";
 import { StyleSheet } from "react-native";
 import MapView, { Marker, Polyline, Circle, PROVIDER_GOOGLE } from "react-native-maps";
 import { colors, radius } from "../theme/colors";
+import { useT } from "../context/LanguageContext";
 
 export default function LiveTrainMap({ timeline, lat, lng, trainLabel }) {
+  const { t } = useT();
   const mapRef = useRef(null);
   const fittedRef = useRef(false);
   const points = (timeline || []).filter((s) => s.lat != null && s.lng != null);
@@ -47,7 +49,7 @@ export default function LiveTrainMap({ timeline, lat, lng, trainLabel }) {
         />
       ))}
       {lat != null && lng != null ? (
-        <Marker coordinate={{ latitude: lat, longitude: lng }} title={trainLabel || "Train"} pinColor={colors.danger} />
+        <Marker coordinate={{ latitude: lat, longitude: lng }} title={trainLabel ? t(trainLabel) : t("Train")} pinColor={colors.danger} />
       ) : null}
     </MapView>
   );

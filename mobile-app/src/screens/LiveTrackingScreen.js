@@ -1203,7 +1203,7 @@ export default function LiveTrackingScreen({ navigation }) {
       L.circleMarker([s.lat, s.lng], {
         radius: s.kind === "intermediate" ? 3 : 5,
         color, fillColor: color, fillOpacity: 1, weight: 1,
-      }).bindTooltip(`${s.name} (${s.code})`).addTo(layer);
+      }).bindTooltip(`${t(s.name)} (${s.code})`).addTo(layer);
     });
     layer.addTo(leafletMapRef.current);
     routeLayerRef.current = layer;
@@ -1212,7 +1212,7 @@ export default function LiveTrackingScreen({ navigation }) {
       routeBoundsFitRef.current = true;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showMap, JSON.stringify(payload?.timeline || [])]);
+  }, [showMap, screenLang, JSON.stringify(payload?.timeline || [])]);
 
   // Move (or create) the live train-position marker — falls back to the
   // last passed/current station's own coordinate when the live fix is
@@ -1260,11 +1260,11 @@ export default function LiveTrackingScreen({ navigation }) {
     // position hadn't changed. Tapping the icon should only show its
     // popup, never move the view.
     trainMarkerRef.current.bindPopup(
-      `Train ${payload?.train_number || trainNumber}${payload?.current_station ? `<br>${payload.current_station}` : ""}`,
+      `${t("Train")} ${payload?.train_number || trainNumber}${payload?.current_station ? `<br>${t(payload.current_station)}` : ""}`,
       { autoPan: false }
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showMap, payload?.lat, payload?.lng, payload?.current_station, payload?.train_number, JSON.stringify(payload?.timeline || [])]);
+  }, [showMap, screenLang, payload?.lat, payload?.lng, payload?.current_station, payload?.train_number, JSON.stringify(payload?.timeline || [])]);
 
   // Fires once per train (see the autoScrolledRef reset in connect()).
   // Exactly ONE scrollIntoView call, preferring the current-station row
