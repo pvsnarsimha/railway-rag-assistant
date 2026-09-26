@@ -1,5 +1,6 @@
 import React, { useRef, useEffect } from "react";
-import { View, Text, StyleSheet } from "react-native";
+import { View, StyleSheet } from "react-native";
+import { Text } from "../i18n/AutoText";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import { colors, spacing, radius } from "../theme/colors";
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
+import { View, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
+import { Text } from "../i18n/AutoText";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
@@ -91,7 +92,7 @@ export default function SettingsScreen() {
           style={{ flexDirection: "row", alignItems: "center", paddingVertical: 8 }}
         >
           <Ionicons name="language-outline" size={20} color={colors.primary} />
-          <Text style={{ flex: 1, marginLeft: 8, fontSize: 16, color: colors.text }}>
+          <Text style={{ flex: 1, marginLeft: 8, fontSize: 16, color: colors.text }} noTranslate>
             {languageInfo(lang).native}
             {languageInfo(lang).native !== languageInfo(lang).name ? `  (${languageInfo(lang).name})` : ""}
           </Text>

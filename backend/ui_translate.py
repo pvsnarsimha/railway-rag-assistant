@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Callable, List, Optional, Tuple
 
 import requests
@@ -39,6 +40,8 @@ _lock = threading.Lock()
 _mem = {}  # (lang, text) -> translation
 MAX_TEXTS = 150
 MAX_LEN = 2000
+# Seconds to wait for the LLM before handing the rest to Google.
+LLM_BUDGET_S = float(os.environ.get("UI_TRANSLATE_LLM_BUDGET_S", "14"))
 
 # Google Translate language codes where they differ from ours.
 _GT_CODE = {"kok": "gom", "mni": "mni-Mtei"}
@@ -92,6 +95,12 @@ def _skip(text: str) -> bool:
     return (not t) or not re.search(r"[A-Za-z]{2,}", t) or bool(re.fullmatch(r"[A-Z]{2,5}", t))
 
 
+def _keeps_placeholders(src: str, dst: str) -> bool:
+    """The app masks numbers as {0}, {1}… (and uses {n}-style templates);
+    a translation that lost one would show a sentence with a hole in it."""
+    return all(p in dst for p in re.findall(r"\{\w+\}", src))
+
+
 def _llm_batch(lang: str, texts: List[str], llm: Callable) -> dict:
     name = i18n_notify.LANGUAGES[lang][0]
     system = (
@@ -117,7 +126,8 @@ def _llm_batch(lang: str, texts: List[str], llm: Callable) -> dict:
         return {}
     if not isinstance(arr, list) or len(arr) != len(texts):
         return {}
-    return {s: str(d) for s, d in zip(texts, arr) if isinstance(d, (str, int, float)) and str(d).strip()}
+    return {s: str(d) for s, d in zip(texts, arr)
+            if isinstance(d, (str, int, float)) and str(d).strip() and _keeps_placeholders(s, str(d))}
 
 
 def _google_one(lang: str, text: str) -> Optional[str]:
@@ -138,18 +148,40 @@ def _google_one(lang: str, text: str) -> Optional[str]:
 
 def translate(lang: str, texts: List[str], llm: Optional[Callable] = None) -> Tuple[List[str], str]:
     """Returns (translations in input order, source-of-new-ones)."""
+    out, source, _ok = translate_ex(lang, texts, llm)
+    return out, source
+
+
+def translate_ex(lang: str, texts: List[str], llm: Optional[Callable] = None) -> Tuple[List[str], str, List[bool]]:
+    """Like translate(), plus ok[i] = False when text i could NOT be
+    translated right now (every backend failed / timed out) and was returned
+    in English only as a stop-gap. The app must not remember those as the
+    final translation — it asks again later — otherwise one slow first
+    request would leave the screen in English for good.
+
+    Speed matters most the first time a language is chosen (a whole screen
+    of new strings): LLM batches run in parallel with a time budget, and
+    whatever is still missing goes to Google in parallel."""
     lang = i18n_notify.normalize(lang)
     texts = [str(t)[:MAX_LEN] for t in (texts or [])][:MAX_TEXTS]
     if lang == "en" or not texts:
-        return texts, "none"
+        return texts, "none", [True] * len(texts)
     todo = sorted({t for t in texts if not _skip(t)})
     have = _cache_get(lang, todo)
     missing = [t for t in todo if t not in have]
     source = "cache"
     if missing and llm is not None:
         got = {}
-        for i in range(0, len(missing), 30):
-            got.update(_llm_batch(lang, missing[i:i + 30], llm))
+        batches = [missing[i:i + 25] for i in range(0, len(missing), 25)]
+        pool = ThreadPoolExecutor(max_workers=min(6, len(batches)))
+        futures = [pool.submit(_llm_batch, lang, b, llm) for b in batches]
+        done, _pending = wait(futures, timeout=LLM_BUDGET_S)
+        for f in done:
+            try:
+                got.update(f.result() or {})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("translate llm batch failed: %s", e)
+        pool.shutdown(wait=False)  # late batches finish in the background and are dropped
         if got:
             _cache_put(lang, got)
             have.update(got)
@@ -157,12 +189,13 @@ def translate(lang: str, texts: List[str], llm: Optional[Callable] = None) -> Tu
         missing = [t for t in missing if t not in have]
     if missing:
         got = {}
-        for t in missing[:60]:
-            d = _google_one(lang, t)
-            if d:
-                got[t] = d
+        with ThreadPoolExecutor(max_workers=min(12, len(missing))) as pool:
+            for t, d in zip(missing, pool.map(lambda x: _google_one(lang, x), missing)):
+                if d and _keeps_placeholders(t, d):
+                    got[t] = d
         if got:
             _cache_put(lang, got)
             have.update(got)
             source = "google" if source == "cache" else source + "+google"
-    return [have.get(t, t) for t in texts], source
+    ok = [(t in have) or _skip(t) for t in texts]
+    return [have.get(t, t) for t in texts], source, ok

@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { NavigationContainer } from "@react-navigation/native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
@@ -7,7 +7,10 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 
 import { SettingsProvider } from "./src/context/SettingsContext";
-import { LanguageProvider, useT } from "./src/context/LanguageContext";
+import { LanguageProvider, useT, SpeakScope } from "./src/context/LanguageContext";
+import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
+import LanguagePickerModal from "./src/components/LanguagePickerModal";
+import { hasChosenLanguage, loadLanguage } from "./src/utils/notifyLanguage";
 import { colors } from "./src/theme/colors";
 import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell } from "./src/services/pushNotifications";
 // Registers the headless "read notifications aloud" task at module scope.
@@ -30,6 +33,12 @@ import StationSearchScreen from "./src/screens/StationSearchScreen";
 
 const Tab = createBottomTabNavigator();
 const HomeStack = createNativeStackNavigator();
+
+// FEATURE (app language): every screen is its own "Speak screen" scope —
+// its <Text>s register there, so the 🔊 button reads just that screen.
+const speakScopeLayout = ({ children, route }) => <SpeakScope id={route.key}>{children}</SpeakScope>;
+// Compact 🌐 + 🔊 in the header of screens without their own bar.
+const headerLanguageBar = (route) => () => <ScreenLanguageBar compact scopeId={route.key} />;
 
 const TAB_ICONS = {
   Home: "home-outline",
@@ -55,11 +64,14 @@ function HomeStackNavigator() {
   const { t } = useT();
   return (
     <HomeStack.Navigator
-      screenOptions={{
+      screenLayout={speakScopeLayout}
+      screenOptions={({ route }) => ({
         headerStyle: { backgroundColor: colors.primary },
         headerTintColor: colors.textInverse,
         headerTitleStyle: { fontWeight: "700" },
-      }}
+        // Home has the full bar in the page itself.
+        headerRight: route.name === "Home" ? undefined : headerLanguageBar(route),
+      })}
     >
       <HomeStack.Screen name="Home" component={HomeScreen} options={{ title: t("Train Enquiry Center") }} />
       <HomeStack.Screen name="LiveTrainStatus" component={LiveTrainStatusScreen} options={{ title: t("Live Train Status") }} />
@@ -121,11 +133,22 @@ export default function App() {
 // Tabs live in their own component so their titles can use the chosen
 // screen language (LanguageContext).
 function AppTabs() {
-  const { t } = useT();
+  const { t, setLang } = useT();
+  // FEATURE: first launch asks for the language right away, so the very
+  // first screens (and "Speak screen") are already in it.
+  const [askLanguage, setAskLanguage] = useState(false);
+  useEffect(() => { loadLanguage().then(() => { if (!hasChosenLanguage()) setAskLanguage(true); }); }, []);
   return (
     <NavigationContainer>
           <StatusBar style="light" />
+          <LanguagePickerModal
+            visible={askLanguage}
+            selected="en"
+            onSelect={(code) => { setAskLanguage(false); setLang(code); }}
+            onClose={() => { setAskLanguage(false); setLang("en"); }}
+          />
           <Tab.Navigator
+            screenLayout={speakScopeLayout}
             screenOptions={({ route }) => ({
               headerStyle: { backgroundColor: colors.primary },
               headerTintColor: colors.textInverse,
@@ -141,7 +164,7 @@ function AppTabs() {
             <Tab.Screen name="Chat" component={ChatScreen} options={{ title: t("Railway Assistant") }} />
             <Tab.Screen name="Track" component={LiveTrackingScreen} options={{ title: t("Live Tracking") }} />
             <Tab.Screen name="More" component={MoreToolsScreen} options={{ title: t("More Tools") }} />
-            <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: t("Settings") }} />
+            <Tab.Screen name="Settings" component={SettingsScreen} options={({ route }) => ({ title: t("Settings"), headerRight: headerLanguageBar(route) })} />
           </Tab.Navigator>
         </NavigationContainer>
   );
