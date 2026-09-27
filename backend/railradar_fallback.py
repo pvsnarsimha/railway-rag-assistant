@@ -191,9 +191,30 @@ def fetch_railradar_timeline(train_number: str, date_ddmmyyyy: Optional[str] = N
         data = _fetch_raw(train_number, _ddmmyyyy_to_iso(date_ddmmyyyy))
     except RailRadarFallbackError:
         return []
+    # BUGFIX (12295, a 2-day train: Today / Yesterday / Today all showed the
+    # run that started 2 days ago): RailRadar can answer a `date` request
+    # with a DIFFERENT run (its current one) when it has nothing for the
+    # asked-for day yet. That run's live position is not the requested
+    # run's — only its timetable is the same — so hand back just the
+    # timetable (nothing passed, no actual times) instead.
+    requested_iso = _ddmmyyyy_to_iso(date_ddmmyyyy)
+    schedule_only = bool(requested_iso) and not run_matches(data, requested_iso)
+    return parse_route(data, schedule_only=schedule_only)
 
+
+def run_matches(data: dict, requested_iso: Optional[str]) -> bool:
+    """True when RailRadar's answer is the run that starts on `requested_iso`
+    (YYYY-MM-DD), or when it doesn't say which run it is."""
+    start = str(data.get("startDate") or "")[:10]
+    return not requested_iso or not start or start == requested_iso
+
+
+def parse_route(data: dict, schedule_only: bool = False) -> List[TimelineStop]:
+    """RailRadar live-status `data` -> TimelineStop list. `schedule_only`
+    keeps just the timetable (every stop upcoming, no actual times / delays)
+    for a run RailRadar has no live data for yet."""
     start_date = data.get("startDate")
-    current_code = (data.get("currentLocation") or {}).get("stationCode")
+    current_code = None if schedule_only else (data.get("currentLocation") or {}).get("stationCode")
     route = data.get("route") or []
 
     stops: List[TimelineStop] = []
@@ -239,7 +260,9 @@ def fetch_railradar_timeline(train_number: str, date_ddmmyyyy: Optional[str] = N
         # `stops` already holds every earlier point in route order at
         # this point in the loop, so this never looks ahead.
         terminus_prev_stop_departed = is_terminus and bool(stops) and stops[-1].status == "passed"
-        if is_terminus and (terminus_has_real_arrival or terminus_status_says_done or terminus_prev_stop_departed):
+        if schedule_only:
+            status = "upcoming"
+        elif is_terminus and (terminus_has_real_arrival or terminus_status_says_done or terminus_prev_stop_departed):
             status = "passed"
         elif current_code and code == current_code:
             status = "current"
@@ -248,18 +271,23 @@ def fetch_railradar_timeline(train_number: str, date_ddmmyyyy: Optional[str] = N
         else:
             status = "upcoming"
 
+        live = not schedule_only
         arrival = StopTiming(
             scheduled=_hhmm_from_iso(point.get("scheduledArrival")),
-            actual=_hhmm_from_iso(point.get("actualArrival")),
-            delay_minutes=point.get("delayArrival"),
+            actual=_hhmm_from_iso(point.get("actualArrival")) if live else None,
+            delay_minutes=point.get("delayArrival") if live else None,
         )
         departure = StopTiming(
             scheduled=_hhmm_from_iso(point.get("scheduledDeparture")),
-            actual=_hhmm_from_iso(point.get("actualDeparture")),
-            delay_minutes=point.get("delayDeparture"),
+            actual=_hhmm_from_iso(point.get("actualDeparture")) if live else None,
+            delay_minutes=point.get("delayDeparture") if live else None,
         )
 
-        day_ref = point.get("actualDeparture") or point.get("actualArrival") or point.get("scheduledDeparture")
+        # Timetable days (schedule_only) count from the scheduled times of
+        # the run RailRadar returned — the same for every run of the train.
+        day_ref = (point.get("scheduledDeparture") or point.get("scheduledArrival")) if schedule_only else (
+            point.get("actualDeparture") or point.get("actualArrival") or point.get("scheduledDeparture")
+            or point.get("scheduledArrival"))  # the terminus has no departure
 
         # BUGFIX ("Coordinates: —, Position source: unavailable" for
         # "Vijayawada North Cabin" (VNC) while date_corrected_via_railradar

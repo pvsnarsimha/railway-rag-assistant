@@ -2385,7 +2385,7 @@ export default function LiveTrackingScreen({ navigation }) {
               uncertainty rather than present a guess as fact" rule this
               project applies everywhere else. */}
           {payload.date_reliability_warning && (
-            <SectionCard title="⚠️ This may be the wrong run">
+            <SectionCard title={payload.run_not_live ? "🕒 This run isn't live yet" : "⚠️ This may be the wrong run"}>
               <Text style={styles.rerouteNote}>{payload.date_reliability_warning}</Text>
             </SectionCard>
           )}

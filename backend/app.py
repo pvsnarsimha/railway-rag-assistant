@@ -6487,9 +6487,13 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     rr_primary = await asyncio.to_thread(
                         quick_live.railradar_primary, train_number, date_ddmmyyyy, this_poll_force_refresh,
                     )
+                rr_run_not_live = None
                 if rr_primary is not None:
                     live_source = "railradar"
                     timeline_stops, position, rr_run_start, rr_fetched_epoch = rr_primary
+                    # RailRadar had no live data for the picked day's run: only
+                    # its timetable is shown (see quick_live.RUN_NOT_LIVE).
+                    rr_run_not_live = quick_live.RUN_NOT_LIVE.get((str(train_number), date_ddmmyyyy))
                     live_data = None
                     train_info_data = quick_live.train_info_nonblocking(train_number)
                     if rr_fetched_epoch is not None:
@@ -7136,6 +7140,12 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                         )
                 else:
                     payload["date_reliability_warning"] = None
+                # RailRadar had no live data for the picked day's run (e.g.
+                # today's run of a 2-day train hasn't left yet): say so plainly
+                # rather than any of the RailKit wording above.
+                payload["run_not_live"] = bool(rr_run_not_live)
+                if rr_run_not_live:
+                    payload["date_reliability_warning"] = rr_run_not_live
 
                 # FEATURE: instant speed per GPS ping. TWO real sources,
                 # preferred in this order:
@@ -7157,7 +7167,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # single noisy ping doesn't spike the displayed figure.
                 now_ts = datetime.now()
                 try:
-                    live_gps_speed, live_gps_speed_note = await asyncio.to_thread(
+                    live_gps_speed, live_gps_speed_note = (None, None) if rr_run_not_live else await asyncio.to_thread(
                         railradar_fallback.get_live_speed_kmph, train_number,
                     )
                 except Exception:
@@ -7189,10 +7199,14 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                 # ever passes a date once date_corrected_via_railradar is
                 # already true; ordinary live polling still omits it and
                 # behaves exactly as before.
+                # RailRadar primary: its answer for date_ddmmyyyy IS the run on
+                # screen, so read segment progress from that same run (the
+                # blank auto-detect can be another, overlapping run of a long
+                # train). Nothing for a timetable-only run.
                 try:
-                    segment_info = await asyncio.to_thread(
+                    segment_info = {"segment_progress": None} if rr_run_not_live else await asyncio.to_thread(
                         railradar_fallback.get_segment_progress, train_number,
-                        date_ddmmyyyy if date_corrected_via_railradar else None,
+                        date_ddmmyyyy if (date_corrected_via_railradar or live_source == "railradar") else None,
                     )
                 except Exception:
                     segment_info = {"segment_progress": None}

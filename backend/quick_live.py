@@ -75,9 +75,11 @@ def build_quick_payload(train_number: str, date_ddmmyyyy: Optional[str] = None) 
 
     seg = {}
     speed = None
-    if source == "railradar":
+    # A run shown as timetable only has no live position / speed of its own.
+    not_live = RUN_NOT_LIVE.get((str(train_number), date_ddmmyyyy))
+    if source == "railradar" and not not_live:
         try:
-            seg = railradar_fallback.get_segment_progress(train_number) or {}
+            seg = railradar_fallback.get_segment_progress(train_number, date_ddmmyyyy) or {}
         except Exception:  # noqa: BLE001
             seg = {}
         try:
@@ -154,6 +156,8 @@ def build_quick_payload(train_number: str, date_ddmmyyyy: Optional[str] = None) 
         "distance_remaining_to_next_km": km_to_next,
         "next_station_live_eta": (nxt or {}).get("predicted_eta"),
         "status_updated_at": datetime.now(timezone.utc).isoformat(),
+        "run_not_live": bool(not_live),
+        "date_reliability_warning": not_live,
         "error": None,
     }
 
@@ -195,12 +199,11 @@ def railradar_primary(train_number: str, date_ddmmyyyy: Optional[str] = None, fo
     Returns (stops, position, run_start_ddmmyyyy, fetched_epoch) or None."""
     if not RAILRADAR_PRIMARY and not force_ignore_flag:
         return None
-    # Try the requested run first; when that's today (or blank), also try
-    # RailRadar's own "current run" auto-detect before giving up — an
-    # explicit today's date for a train that hasn't started yet can come
-    # back empty while the running train is right there.
+    # Try the requested run first; when that's today (or later) and
+    # RailRadar has nothing for it, ask for its current run too — only for
+    # the TIMETABLE (see below), never to show that other run as this one.
     attempts = [date_ddmmyyyy]
-    if date_ddmmyyyy and date_ddmmyyyy == _today_ddmmyyyy_ist():
+    if date_ddmmyyyy and _ddmmyyyy_to_date(date_ddmmyyyy) and _ddmmyyyy_to_date(date_ddmmyyyy) >= running_status.ist_now().date():
         attempts.append(None)
     data = stops = None
     used_date = None
@@ -213,21 +216,66 @@ def railradar_primary(train_number: str, date_ddmmyyyy: Optional[str] = None, fo
             last_err = str(e)
             data = None
             continue
-        stops = railradar_fallback.fetch_railradar_timeline(train_number, d)  # same cache entry
+        stops = railradar_fallback.parse_route(data)
         if stops:
             used_date = d
             break
         last_err = "RailRadar returned no route/stations for this train and date."
     if not stops:
         LAST_RAILRADAR_ERROR[str(train_number)] = last_err or railradar_fallback.get_last_error() or "RailRadar has no data."
+        RUN_NOT_LIVE.pop((str(train_number), date_ddmmyyyy), None)
         return None
     LAST_RAILRADAR_ERROR.pop(str(train_number), None)
     iso = railradar_fallback._ddmmyyyy_to_iso(used_date)
-    gps_tracking.finalize_timeline_stops(stops)
+    run_start = _iso_to_ddmmyyyy(data.get("startDate"))
     name = _first(data, "trainName", "train_name", "name") or _first(data.get("train") or {}, "name", "trainName")
-    position = gps_tracking.position_from_stops(train_number, stops, train_name=name)
+    note = None
+    if date_ddmmyyyy and not railradar_fallback.run_matches(data, railradar_fallback._ddmmyyyy_to_iso(date_ddmmyyyy)):
+        # BUGFIX (12295, a 2-day train: Today / Yesterday / Today all showed
+        # the run that started 2 days ago): RailRadar answered with ANOTHER
+        # run (its current one). Its position isn't the asked-for run's, so
+        # show only the timetable for the day the user picked, and say why.
+        stops = railradar_fallback.parse_route(data, schedule_only=True)
+        note = _run_not_live_note(date_ddmmyyyy, stops)
+        run_start = date_ddmmyyyy
+        RUN_NOT_LIVE[(str(train_number), date_ddmmyyyy)] = note
+    else:
+        RUN_NOT_LIVE.pop((str(train_number), date_ddmmyyyy), None)
+    gps_tracking.finalize_timeline_stops(stops)
+    position = gps_tracking.position_from_stops(train_number, stops, train_name=name, status_note=note)
     fetched = api_cache.entry_fetched_at("railradar_fallback_live", (train_number, iso), {})
-    return stops, position, _iso_to_ddmmyyyy(data.get("startDate")), fetched
+    return stops, position, run_start, fetched
+
+
+# (train_number, requested DD-MM-YYYY) -> why only the timetable is shown
+# for that run (RailRadar has no live data for it yet). Read by app.py for
+# the on-screen notice.
+RUN_NOT_LIVE: dict = {}
+
+
+def _ddmmyyyy_to_date(v: Optional[str]):
+    try:
+        return datetime.strptime(str(v).strip(), "%d-%m-%Y").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_not_live_note(date_ddmmyyyy: str, stops) -> str:
+    """Plain-language notice for a run shown as timetable only."""
+    first = stops[0] if stops else None
+    origin = (first.name or first.code) if first else "its origin"
+    dep = first.departure.scheduled if first else None
+    req = _ddmmyyyy_to_date(date_ddmmyyyy)
+    today = running_status.ist_now().date()
+    label = "Today's" if req == today else ("Tomorrow's" if req and (req - today).days == 1 else f"The {date_ddmmyyyy}")
+    now_hhmm = running_status.ist_now().strftime("%H:%M")
+    if req and (req > today or (req == today and dep and now_hhmm < dep)):
+        when = f" at {dep}" if dep else ""
+        return (f"{label} run of this train hasn't started yet — it leaves {origin}{when} on {date_ddmmyyyy}. "
+                "Showing its timetable; the live position appears once it departs. "
+                "(Pick an earlier day to see a run that's already on the way.)")
+    return (f"No live data for the run that started on {date_ddmmyyyy} yet. Showing its timetable "
+            "instead of another run's position.")
 
 
 _train_info_inflight: dict = {}
