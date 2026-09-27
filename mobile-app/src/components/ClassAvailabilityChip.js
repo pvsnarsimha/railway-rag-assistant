@@ -27,9 +27,11 @@ const TONES = {
 function toneFor(status, text) {
   if (status === "error") return TONES.err;
   if (status !== "done" || !text) return TONES.idle;
-  if (/\bAVAILABLE\b|\bAVL\b/i.test(text)) return TONES.avl;
-  if (/\bRAC\b/i.test(text)) return TONES.rac;
-  if (/\bWL\b|WAITLIST|REGRET/i.test(text)) return TONES.wl;
+  // Also matches glued-on counts like "AVL42", "RAC2", "RLWL5/WL4".
+  if (/NOT\s*AVAILABLE|REGRET/i.test(text)) return TONES.err;
+  if (/AVAILABLE|\bAVL/i.test(text)) return TONES.avl;
+  if (/\bRAC/i.test(text)) return TONES.rac;
+  if (/WL\s*\d|\bWL\b|WAITLIST|REGRET/i.test(text)) return TONES.wl;
   return TONES.idle;
 }
 

@@ -403,23 +403,36 @@ export default function TrainSearchScreen() {
               </>
             ) : (
               <>
-                {/* Toolbar — Sort By / Tatkal / in-results search / calendar / filter,
-                    matching the IRCTC results screen's own top row. */}
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.toolbar} contentContainerStyle={styles.toolbarContent}>
-                  <TouchableOpacity style={styles.toolbarBtn} onPress={() => setSortModalVisible(true)}>
-                    <Ionicons name="swap-vertical" size={14} color={colors.orange} />
-                    <Text style={[styles.toolbarBtnText, styles.toolbarBtnTextAccent]}>
-                      Sort: {SORT_OPTIONS.find((o) => o.key === sortBy)?.label.replace(/ Time$| \(.*\)$/, "") || "Departure"}
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.toolbarBtn, quota === "TQ" && styles.toolbarBtnActive]}
-                    onPress={toggleTatkal}
-                  >
-                    <Text style={[styles.toolbarBtnText, quota === "TQ" && styles.toolbarBtnTextActive]}>Tatkal</Text>
-                    <View style={[styles.radio, quota === "TQ" && styles.radioOn]} />
-                  </TouchableOpacity>
-                  <View style={styles.resultSearchBox}>
+                {/* Toolbar — Sort By / Tatkal / calendar / filter, then in-results
+                    search. Two fixed rows (not a sideways scroll) so Sort / Tatkal /
+                    Calendar / Filter are always on screen, even with longer
+                    translated labels on narrow phones. */}
+                <View style={styles.toolbar}>
+                  <View style={styles.toolbarRow}>
+                    <TouchableOpacity style={styles.toolbarBtn} onPress={() => setSortModalVisible(true)}>
+                      <Ionicons name="swap-vertical" size={14} color={colors.orange} />
+                      <Text style={[styles.toolbarBtnText, styles.toolbarBtnTextAccent]}>
+                        Sort: {SORT_OPTIONS.find((o) => o.key === sortBy)?.label.replace(/ Time$| \(.*\)$/, "") || "Departure"}
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.toolbarBtn, quota === "TQ" && styles.toolbarBtnActive]}
+                      onPress={toggleTatkal}
+                    >
+                      <Text style={[styles.toolbarBtnText, quota === "TQ" && styles.toolbarBtnTextActive]}>Tatkal</Text>
+                      <View style={[styles.radio, quota === "TQ" && styles.radioOn]} />
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.iconBtn} onPress={() => setCalendarVisible(true)}>
+                      <Ionicons name="calendar-outline" size={16} color={colors.text} />
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.toolbarBtn, activeFilterCount > 0 && styles.toolbarBtnActive]} onPress={() => setFilterVisible(true)}>
+                      <Ionicons name="options-outline" size={14} color={activeFilterCount > 0 ? colors.textInverse : colors.orange} />
+                      <Text style={[styles.toolbarBtnText, activeFilterCount > 0 ? styles.toolbarBtnTextActive : styles.toolbarBtnTextAccent]}>
+                        Filter{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View style={[styles.resultSearchBox, styles.resultSearchBoxFull]}>
                     <Ionicons name="search" size={13} color={colors.textMuted} />
                     <TextInput
                       style={styles.resultSearchInput}
@@ -430,16 +443,7 @@ export default function TrainSearchScreen() {
                     />
                     <Text style={styles.resultSearchCount}>{meta?.total ?? trains?.length ?? 0} trains</Text>
                   </View>
-                  <TouchableOpacity style={styles.iconBtn} onPress={() => setCalendarVisible(true)}>
-                    <Ionicons name="calendar-outline" size={16} color={colors.text} />
-                  </TouchableOpacity>
-                  <TouchableOpacity style={[styles.toolbarBtn, activeFilterCount > 0 && styles.toolbarBtnActive]} onPress={() => setFilterVisible(true)}>
-                    <Ionicons name="options-outline" size={14} color={activeFilterCount > 0 ? colors.textInverse : colors.orange} />
-                    <Text style={[styles.toolbarBtnText, activeFilterCount > 0 ? styles.toolbarBtnTextActive : styles.toolbarBtnTextAccent]}>
-                      Filter{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""}
-                    </Text>
-                  </TouchableOpacity>
-                </ScrollView>
+                </View>
 
                 <DateStrip selected={date} onSelect={pickDate} />
 
@@ -738,12 +742,14 @@ const styles = StyleSheet.create({
 
   // --- results toolbar ---
   toolbar: {
+    padding: 8,
     backgroundColor: colors.card,
     borderRadius: radius.lg,
     marginBottom: spacing.sm,
     ...CARD_SHADOW,
   },
   toolbarContent: { flexDirection: "row", alignItems: "center", gap: 6, padding: 8 },
+  toolbarRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8 },
   toolbarBtn: { flexDirection: "row", alignItems: "center", gap: 5, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: "#F5F6F9" },
   toolbarBtnActive: { backgroundColor: colors.orange },
   toolbarBtnText: { fontSize: 12, fontWeight: "800", color: colors.text },
@@ -752,6 +758,7 @@ const styles = StyleSheet.create({
   radio: { width: 11, height: 11, borderRadius: 6, borderWidth: 1.5, borderColor: colors.textMuted },
   radioOn: { borderColor: colors.textInverse, backgroundColor: colors.textInverse },
   resultSearchBox: { flexDirection: "row", alignItems: "center", gap: 5, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: "#F5F6F9", minWidth: 150 },
+  resultSearchBoxFull: { minWidth: 0, width: "100%" },
   resultSearchInput: { fontSize: 12, color: colors.text, flex: 1, padding: 0 },
   resultSearchCount: { fontSize: 11, color: colors.text, fontWeight: "800" },
   iconBtn: { borderRadius: radius.pill, padding: 7, backgroundColor: "#F5F6F9" },
