@@ -42,20 +42,25 @@ export default function DateStrip({ selected, onSelect }) {
 }
 
 const styles = StyleSheet.create({
-  scroll: { marginTop: spacing.xs, marginBottom: spacing.sm },
-  content: { gap: 6, paddingVertical: 2 },
+  scroll: { marginTop: spacing.xs, marginBottom: spacing.xs },
+  content: { gap: 8, paddingVertical: 4, paddingRight: spacing.sm },
   pill: {
-    minWidth: 58,
+    minWidth: 64,
     alignItems: "center",
-    paddingVertical: 6,
-    paddingHorizontal: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
     borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.card,
+    backgroundColor: "#F1F3F7",
   },
-  pillActive: { backgroundColor: colors.orange, borderColor: colors.orange },
-  pillTop: { fontSize: 10, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase" },
-  pillBottom: { fontSize: 12, fontWeight: "700", color: colors.text, marginTop: 1 },
+  pillActive: {
+    backgroundColor: colors.orange,
+    shadowColor: colors.orange,
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 3,
+  },
+  pillTop: { fontSize: 13, fontWeight: "800", color: colors.text },
+  pillBottom: { fontSize: 11, fontWeight: "600", color: colors.textMuted, marginTop: 1 },
   pillTextActive: { color: colors.textInverse },
 });

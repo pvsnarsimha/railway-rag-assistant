@@ -44,15 +44,17 @@ export default function RunningDaysRow({ runningDays }) {
 const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", marginTop: 4, marginBottom: 2 },
   letter: {
-    fontSize: 11,
-    fontWeight: "700",
-    width: 14,
+    fontSize: 10,
+    fontWeight: "800",
+    width: 16,
     textAlign: "center",
+    letterSpacing: 0.2,
   },
   letterActive: { color: colors.runDayActive },
   letterInactive: {
     color: colors.runDayInactive,
     textDecorationLine: "line-through",
+    fontWeight: "600",
   },
   unknownNote: { fontSize: 9, color: colors.textMuted, fontStyle: "italic", marginLeft: spacing.xs },
 });
