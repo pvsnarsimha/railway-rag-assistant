@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { Modal, View, TouchableOpacity, ScrollView, StyleSheet } from "react-native";
+import { Modal, View, TouchableOpacity, ScrollView, StyleSheet, Switch } from "react-native";
 import { Text } from "../i18n/Localized";
-import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 
 // IRCTC's own quick departure/arrival time bands — the backend
@@ -10,10 +9,10 @@ import { colors, spacing, radius } from "../theme/colors";
 // just the well-known IRCTC quick-picks mapped onto that same range API,
 // not a new filtering concept.
 const TIME_BANDS = [
-  { key: "00-06", label: "00:00 – 06:00", start: "00:00", end: "06:00" },
-  { key: "06-12", label: "06:00 – 12:00", start: "06:00", end: "12:00" },
-  { key: "12-18", label: "12:00 – 18:00", start: "12:00", end: "18:00" },
-  { key: "18-24", label: "18:00 – 24:00", start: "18:00", end: "23:59" },
+  { key: "00-06", label: "00:00 – 06:00", sub: "Early morning", start: "00:00", end: "06:00" },
+  { key: "06-12", label: "06:00 – 12:00", sub: "Morning", start: "06:00", end: "12:00" },
+  { key: "12-18", label: "12:00 – 18:00", sub: "Afternoon", start: "12:00", end: "18:00" },
+  { key: "18-24", label: "18:00 – 24:00", sub: "Night", start: "18:00", end: "23:59" },
 ];
 
 function BandRow({ title, selectedKey, onSelect }) {
@@ -30,6 +29,7 @@ function BandRow({ title, selectedKey, onSelect }) {
               onPress={() => onSelect(active ? null : band.key)}
             >
               <Text style={[styles.bandChipText, active && styles.bandChipTextActive]}>{band.label}</Text>
+              <Text style={[styles.bandChipSub, active && styles.bandChipTextActive]}>{band.sub}</Text>
             </TouchableOpacity>
           );
         })}
@@ -40,11 +40,15 @@ function BandRow({ title, selectedKey, onSelect }) {
 
 function CheckRow({ label, checked, onToggle }) {
   return (
-    <TouchableOpacity style={styles.checkRow} onPress={onToggle}>
-      <View style={[styles.checkbox, checked && styles.checkboxChecked]}>
-        {checked ? <Ionicons name="checkmark" size={14} color={colors.textInverse} /> : null}
-      </View>
+    <TouchableOpacity style={styles.checkRow} onPress={onToggle} activeOpacity={0.7}>
       <Text style={styles.checkLabel}>{label}</Text>
+      <Switch
+        value={!!checked}
+        onValueChange={onToggle}
+        trackColor={{ false: "#D5DAE3", true: colors.success }}
+        thumbColor={colors.card}
+        ios_backgroundColor="#D5DAE3"
+      />
     </TouchableOpacity>
   );
 }
@@ -94,7 +98,7 @@ export default function FilterSheetModal({ visible, initial, onApply, onClose })
       <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={onClose}>
         <TouchableOpacity activeOpacity={1} style={styles.sheet} onPress={() => {}}>
           <View style={styles.handle} />
-          <Text style={styles.title}>Filters</Text>
+          <Text style={styles.title}>Filter trains</Text>
           <ScrollView bounces={false} style={styles.body}>
             <BandRow title="Departure time" selectedKey={departureBand} onSelect={setDepartureBand} />
             <BandRow title="Arrival time" selectedKey={arrivalBand} onSelect={setArrivalBand} />
@@ -110,7 +114,7 @@ export default function FilterSheetModal({ visible, initial, onApply, onClose })
               <Text style={styles.clearBtnText}>Clear all</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.applyBtn} onPress={apply}>
-              <Text style={styles.applyBtnText}>Apply</Text>
+              <Text style={styles.applyBtnText}>Apply filters</Text>
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
@@ -120,29 +124,34 @@ export default function FilterSheetModal({ visible, initial, onApply, onClose })
 }
 
 const styles = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: "rgba(20,24,33,0.45)", justifyContent: "flex-end" },
+  backdrop: { flex: 1, backgroundColor: "rgba(20,24,33,0.5)", justifyContent: "flex-end" },
   sheet: {
-    backgroundColor: colors.card, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg,
-    paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.lg, maxHeight: "80%",
+    backgroundColor: colors.card, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: spacing.lg + 4, paddingTop: spacing.sm + 2, paddingBottom: spacing.lg + 4, maxHeight: "85%",
   },
-  handle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: spacing.md },
-  title: { fontSize: 17, fontWeight: "700", color: colors.text, marginBottom: spacing.sm, paddingBottom: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border },
+  handle: { alignSelf: "center", width: 44, height: 5, borderRadius: 3, backgroundColor: "#D5DAE3", marginBottom: spacing.md },
+  title: { fontSize: 20, fontWeight: "800", color: colors.text, marginBottom: spacing.md },
   body: { flexGrow: 0 },
-  section: { marginBottom: spacing.md },
-  sectionTitle: { fontSize: 12, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: spacing.sm },
-  bandGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  bandChip: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bg },
-  bandChipActive: { backgroundColor: colors.orange, borderColor: colors.orange },
-  bandChipText: { fontSize: 12, fontWeight: "600", color: colors.text },
-  bandChipTextActive: { color: colors.textInverse },
-  checkRow: { flexDirection: "row", alignItems: "center", paddingVertical: 8, gap: spacing.sm },
-  checkbox: { width: 20, height: 20, borderRadius: 5, borderWidth: 1.5, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
-  checkboxChecked: { backgroundColor: colors.orange, borderColor: colors.orange },
-  checkLabel: { fontSize: 14, color: colors.text },
-  hint: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  section: { marginBottom: spacing.lg },
+  sectionTitle: { fontSize: 11, fontWeight: "800", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: spacing.sm },
+  bandGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 10 },
+  bandChip: {
+    width: "48.5%", paddingHorizontal: 12, paddingVertical: 10, borderRadius: radius.md,
+    borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.card,
+  },
+  bandChipActive: { backgroundColor: "#FFF3EA", borderColor: colors.orange },
+  bandChipText: { fontSize: 13, fontWeight: "800", color: colors.text },
+  bandChipSub: { fontSize: 11, fontWeight: "600", color: colors.textMuted, marginTop: 2 },
+  bandChipTextActive: { color: colors.orangeDark },
+  checkRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 8 },
+  checkLabel: { fontSize: 15, fontWeight: "700", color: colors.text, flex: 1 },
+  hint: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
   footer: { flexDirection: "row", gap: spacing.md, marginTop: spacing.sm },
-  clearBtn: { flex: 1, alignItems: "center", paddingVertical: spacing.md, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border },
-  clearBtnText: { fontWeight: "700", color: colors.textMuted },
-  applyBtn: { flex: 1, alignItems: "center", paddingVertical: spacing.md, borderRadius: radius.pill, backgroundColor: colors.orange },
-  applyBtnText: { fontWeight: "700", color: colors.textInverse },
+  clearBtn: { flex: 1, alignItems: "center", justifyContent: "center", paddingVertical: 14, borderRadius: radius.lg, backgroundColor: "#F1F3F7" },
+  clearBtnText: { fontWeight: "800", fontSize: 15, color: colors.textMuted },
+  applyBtn: {
+    flex: 2, alignItems: "center", justifyContent: "center", paddingVertical: 14, borderRadius: radius.lg, backgroundColor: colors.orange,
+    shadowColor: colors.orange, shadowOpacity: 0.35, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 4,
+  },
+  applyBtnText: { fontWeight: "800", fontSize: 16, color: colors.textInverse, letterSpacing: 0.3 },
 });

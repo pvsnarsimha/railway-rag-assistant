@@ -1,11 +1,9 @@
 import React, { useState, useMemo } from "react";
-import { View, StyleSheet, FlatList, TouchableOpacity, ScrollView, Linking } from "react-native";
+import { View, StyleSheet, FlatList, TouchableOpacity, ScrollView, Linking, ActivityIndicator } from "react-native";
 import { Text, TextInput, Alert } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import * as Clipboard from "expo-clipboard";
 import { colors, spacing, radius } from "../theme/colors";
-import SectionCard from "../components/SectionCard";
-import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
 import StationField from "../components/StationField";
 import OptionSheetModal from "../components/OptionSheetModal";
@@ -17,7 +15,7 @@ import ClassAvailabilityChip from "../components/ClassAvailabilityChip";
 import { useSettings } from "../context/SettingsContext";
 import { searchTrains } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
-import { fromDdMmYyyy, formatLongLabel, hhmmToMinutes, addDays } from "../utils/dateFormat";
+import { fromDdMmYyyy, formatLongLabel, hhmmToMinutes, addDays, monthShort } from "../utils/dateFormat";
 
 const MIN_LIMIT = 1;
 const MAX_LIMIT = 50;
@@ -263,17 +261,33 @@ export default function TrainSearchScreen() {
         // diagonal gradient in the reference screenshots (see colors.js's
         // headerGradientFrom/To, kept defined for if one gets added later).
         <View style={styles.header}>
+          <View style={styles.headerGlow} pointerEvents="none" />
           <TouchableOpacity onPress={() => setFormCollapsed(false)} style={styles.backBtn}>
-            <Ionicons name="arrow-back" size={22} color={colors.textInverse} />
+            <Ionicons name="arrow-back" size={20} color={colors.textInverse} />
           </TouchableOpacity>
           <View style={styles.headerTextWrap}>
             <Text numberOfLines={1} style={styles.headerRoute}>
-              {(sourceName || source).toString().toUpperCase()} TO {(destName || dest).toString().toUpperCase()}
+              {source.trim().toUpperCase()} <Text style={styles.headerArrow}>→</Text> {dest.trim().toUpperCase()}
             </Text>
-            <Text style={styles.headerDate}>{headerDateLabel}</Text>
+            <Text numberOfLines={1} style={styles.headerDate}>
+              {headerDateLabel} · {travelClass === "Any" ? "All classes" : travelClass} · {QUOTA_OPTIONS.find((q) => q.key === quota)?.label || quota}
+            </Text>
+            {sourceName || destName ? (
+              <Text numberOfLines={1} style={styles.headerNames}>
+                {sourceName || source} → {destName || dest}
+              </Text>
+            ) : null}
           </View>
         </View>
-      ) : null}
+      ) : (
+        // Search-form hero — same orange as the results header so the whole
+        // flow reads as one "booking" surface (see colors.js orange tokens).
+        <View style={[styles.header, styles.heroHeader]}>
+          <View style={styles.headerGlow} pointerEvents="none" />
+          <Text style={styles.heroTitle}>Trains Between Stations</Text>
+          <Text style={styles.heroSub}>Plan your journey · live availability</Text>
+        </View>
+      )}
 
       <FlatList
         style={styles.flex}
@@ -296,82 +310,114 @@ export default function TrainSearchScreen() {
         ListHeaderComponent={
           <View style={styles.content}>
             {!formCollapsed ? (
-              <SectionCard
-                title="Search trains"
-                subtitle="Real-time filter by source, destination, date, class and quota — dropdowns and live suggestions, just like IRCTC."
-              >
-                <View style={styles.stationRow}>
+              <>
+                {/* From / To — stacked in one card with a round swap button,
+                    same StationField auto-suggest as before. */}
+                <View style={[styles.formCard, styles.stationCard]}>
                   <StationField
                     label="From" placeholder="e.g. NDLS or Delhi" icon="radio-button-on-outline"
                     value={source} resolvedName={sourceName}
                     onChangeText={(t) => { setSource(t); setSourceName(null); }}
                     onSelectStation={(m) => { setSource(m.code); setSourceName(m.name); }}
-                    apiBaseUrl={apiBaseUrl} style={styles.half}
+                    apiBaseUrl={apiBaseUrl} style={styles.stationField}
                   />
-                  <TouchableOpacity
-                    style={styles.swapBtn}
-                    activeOpacity={0.7}
-                    onPress={() => {
-                      const s = source, sn = sourceName, d = dest, dn = destName;
-                      setSource(d); setSourceName(dn);
-                      setDest(s); setDestName(sn);
-                    }}
-                  >
-                    <Ionicons name="swap-horizontal" size={16} color={colors.orange} />
-                  </TouchableOpacity>
+                  <View style={styles.stationDividerRow}>
+                    <View style={styles.stationDivider} />
+                    <TouchableOpacity
+                      style={styles.swapBtn}
+                      activeOpacity={0.7}
+                      onPress={() => {
+                        const s = source, sn = sourceName, d = dest, dn = destName;
+                        setSource(d); setSourceName(dn);
+                        setDest(s); setDestName(sn);
+                      }}
+                    >
+                      <Ionicons name="swap-vertical" size={18} color={colors.orange} />
+                    </TouchableOpacity>
+                  </View>
                   <StationField
                     label="To" placeholder="e.g. BCT or Mumbai" icon="flag-outline"
                     value={dest} resolvedName={destName}
                     onChangeText={(t) => { setDest(t); setDestName(null); }}
                     onSelectStation={(m) => { setDest(m.code); setDestName(m.name); }}
-                    apiBaseUrl={apiBaseUrl} style={styles.half}
+                    apiBaseUrl={apiBaseUrl} style={styles.stationField}
                   />
                 </View>
 
-                <Text style={styles.fieldLabel}>Departure date</Text>
-                <TouchableOpacity style={styles.dateRow} onPress={() => setCalendarVisible(true)}>
-                  <Ionicons name="calendar-outline" size={16} color={colors.orange} />
-                  <Text style={styles.dateRowText}>
-                    {selectedDateObj ? formatLongLabel(selectedDateObj) : "Any date (whole weekly timetable)"}
-                  </Text>
-                </TouchableOpacity>
-                <DateStrip selected={date} onSelect={pickDate} />
+                <View style={styles.formCard}>
+                  <View style={styles.cardHeadRow}>
+                    <Text style={styles.cardLabel}>Journey date</Text>
+                    <TouchableOpacity style={styles.calendarLink} onPress={() => setCalendarVisible(true)}>
+                      <Ionicons name="calendar-outline" size={14} color={colors.orange} />
+                      <Text numberOfLines={1} style={styles.calendarLinkText}>
+                        {selectedDateObj ? formatLongLabel(selectedDateObj) : "Any date"}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  <DateStrip selected={date} onSelect={pickDate} />
+                </View>
 
-                <View style={styles.row}>
-                  <TouchableOpacity style={[styles.pickerField, styles.half]} onPress={() => setClassModalVisible(true)}>
-                    <Text style={styles.fieldLabel}>Class</Text>
-                    <Text style={styles.pickerValue}>{classLabel(travelClass)}</Text>
+                <View style={[styles.formCard, styles.row]}>
+                  <TouchableOpacity style={styles.half} onPress={() => setClassModalVisible(true)}>
+                    <Text style={styles.cardLabel}>Class</Text>
+                    <View style={styles.pickerValueRow}>
+                      <Text numberOfLines={1} style={styles.pickerValue}>{classLabel(travelClass)}</Text>
+                      <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
+                    </View>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[styles.pickerField, styles.half]} onPress={() => setQuotaModalVisible(true)}>
-                    <Text style={styles.fieldLabel}>Quota</Text>
-                    <Text style={styles.pickerValue}>{quotaLabel(quota)}</Text>
+                  <View style={styles.vDivider} />
+                  <TouchableOpacity style={styles.half} onPress={() => setQuotaModalVisible(true)}>
+                    <Text style={styles.cardLabel}>Quota</Text>
+                    <View style={styles.pickerValueRow}>
+                      <Text numberOfLines={1} style={styles.pickerValue}>{quotaLabel(quota)}</Text>
+                      <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
+                    </View>
                   </TouchableOpacity>
                 </View>
 
-                <LabeledInput
-                  label={`Results per page (${MIN_LIMIT}-${MAX_LIMIT})`}
-                  placeholder={String(DEFAULT_LIMIT)}
-                  value={limitText}
-                  onChangeText={setLimitText}
-                  keyboardType="number-pad"
-                />
-                <PrimaryButton title="Search" onPress={() => runSearch(1)} loading={loading} />
+                <View style={[styles.formCard, styles.limitRow]}>
+                  <Text style={styles.limitLabel}>Results per page ({MIN_LIMIT}-{MAX_LIMIT})</Text>
+                  <TextInput
+                    style={styles.limitInput}
+                    placeholder={String(DEFAULT_LIMIT)}
+                    placeholderTextColor={colors.textMuted}
+                    value={limitText}
+                    onChangeText={setLimitText}
+                    keyboardType="number-pad"
+                  />
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.searchBtn, loading && styles.searchBtnDisabled]}
+                  onPress={() => runSearch(1)}
+                  disabled={loading}
+                  activeOpacity={0.85}
+                >
+                  {loading ? (
+                    <ActivityIndicator color={colors.textInverse} />
+                  ) : (
+                    <Text style={styles.searchBtnText}>Search Trains →</Text>
+                  )}
+                </TouchableOpacity>
                 {error ? <Text style={styles.error}>{error}</Text> : null}
-              </SectionCard>
+              </>
             ) : (
               <>
                 {/* Toolbar — Sort By / Tatkal / in-results search / calendar / filter,
                     matching the IRCTC results screen's own top row. */}
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.toolbar} contentContainerStyle={styles.toolbarContent}>
                   <TouchableOpacity style={styles.toolbarBtn} onPress={() => setSortModalVisible(true)}>
-                    <Ionicons name="swap-vertical" size={14} color={colors.text} />
-                    <Text style={styles.toolbarBtnText}>Sort By</Text>
+                    <Ionicons name="swap-vertical" size={14} color={colors.orange} />
+                    <Text style={[styles.toolbarBtnText, styles.toolbarBtnTextAccent]}>
+                      Sort: {SORT_OPTIONS.find((o) => o.key === sortBy)?.label.replace(/ Time$| \(.*\)$/, "") || "Departure"}
+                    </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.toolbarBtn, quota === "TQ" && styles.toolbarBtnActive]}
                     onPress={toggleTatkal}
                   >
                     <Text style={[styles.toolbarBtnText, quota === "TQ" && styles.toolbarBtnTextActive]}>Tatkal</Text>
+                    <View style={[styles.radio, quota === "TQ" && styles.radioOn]} />
                   </TouchableOpacity>
                   <View style={styles.resultSearchBox}>
                     <Ionicons name="search" size={13} color={colors.textMuted} />
@@ -382,16 +428,16 @@ export default function TrainSearchScreen() {
                       placeholder="Train name/number"
                       placeholderTextColor={colors.textMuted}
                     />
-                    <Text style={styles.resultSearchCount}>({meta?.total ?? trains?.length ?? 0})</Text>
+                    <Text style={styles.resultSearchCount}>{meta?.total ?? trains?.length ?? 0} trains</Text>
                   </View>
                   <TouchableOpacity style={styles.iconBtn} onPress={() => setCalendarVisible(true)}>
-                    <Ionicons name="calendar-outline" size={18} color={colors.text} />
+                    <Ionicons name="calendar-outline" size={16} color={colors.text} />
                   </TouchableOpacity>
-                  <TouchableOpacity style={styles.iconBtn} onPress={() => setFilterVisible(true)}>
-                    <Ionicons name="filter" size={18} color={colors.text} />
-                    {activeFilterCount > 0 ? (
-                      <View style={styles.filterBadge}><Text style={styles.filterBadgeText}>{activeFilterCount}</Text></View>
-                    ) : null}
+                  <TouchableOpacity style={[styles.toolbarBtn, activeFilterCount > 0 && styles.toolbarBtnActive]} onPress={() => setFilterVisible(true)}>
+                    <Ionicons name="options-outline" size={14} color={activeFilterCount > 0 ? colors.textInverse : colors.orange} />
+                    <Text style={[styles.toolbarBtnText, activeFilterCount > 0 ? styles.toolbarBtnTextActive : styles.toolbarBtnTextAccent]}>
+                      Filter{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""}
+                    </Text>
                   </TouchableOpacity>
                 </ScrollView>
 
@@ -421,31 +467,39 @@ export default function TrainSearchScreen() {
         renderItem={({ item }) => {
           const depMin = hhmmToMinutes(item.source_departure);
           const wrapsToNextDay = depMin != null && item.duration_minutes != null && depMin + item.duration_minutes >= 1440;
+          // Compact "28 Sep" under each time — the header already carries the full date.
+          const shortDate = (d) => `${d.getDate()} ${monthShort(d)}`;
           const arrivalDateLabel = selectedDateObj
-            ? formatLongLabel(wrapsToNextDay ? addDays(selectedDateObj, 1) : selectedDateObj)
+            ? shortDate(wrapsToNextDay ? addDays(selectedDateObj, 1) : selectedDateObj)
             : null;
-          const departureDateLabel = selectedDateObj ? formatLongLabel(selectedDateObj) : null;
+          const departureDateLabel = selectedDateObj ? shortDate(selectedDateObj) : null;
 
           return (
             <View style={styles.trainCard}>
               <View style={styles.trainHeaderRow}>
-                <Text style={styles.trainName}>{item.train_name}</Text>
-                <Text style={styles.trainNumber}>({item.train_number})</Text>
+                <Text numberOfLines={1} style={styles.trainName}>
+                  <Text style={styles.trainNumber}>{item.train_number} </Text>
+                  {item.train_name}
+                </Text>
               </View>
               <RunningDaysRow runningDays={item.running_days} />
 
               <View style={styles.timingRow}>
                 <View style={styles.timingCol}>
                   <Text style={styles.timeText}>{item.source_departure || "--:--"}</Text>
-                  {departureDateLabel ? <Text style={styles.dateSubText}>{departureDateLabel}</Text> : null}
+                  <Text numberOfLines={1} style={styles.dateSubText}>
+                    {source.trim().toUpperCase()}{departureDateLabel ? ` · ${departureDateLabel}` : ""}
+                  </Text>
                 </View>
                 <View style={styles.timingMid}>
-                  <View style={styles.timingLine} />
                   <Text style={styles.durationText}>{item.duration || "duration n/a"}</Text>
+                  <View style={styles.timingLine} />
                 </View>
                 <View style={[styles.timingCol, { alignItems: "flex-end" }]}>
                   <Text style={styles.timeText}>{item.dest_arrival || "--:--"}</Text>
-                  {arrivalDateLabel ? <Text style={styles.dateSubText}>{arrivalDateLabel}</Text> : null}
+                  <Text numberOfLines={1} style={styles.dateSubText}>
+                    {dest.trim().toUpperCase()}{arrivalDateLabel ? ` · ${arrivalDateLabel}` : ""}
+                  </Text>
                 </View>
               </View>
 
@@ -462,6 +516,7 @@ export default function TrainSearchScreen() {
                       quota={quota}
                       apiBaseUrl={apiBaseUrl}
                       initialStatusText={cls === travelClass ? item.availability_status : null}
+                      fare={cls === travelClass ? item.fare : null}
                       onNeedDate={() => {
                         Alert.alert("Pick a date first", "Live availability needs a travel date — pick one from the calendar.", [
                           { text: "Pick date", onPress: () => setCalendarVisible(true) },
@@ -492,7 +547,8 @@ export default function TrainSearchScreen() {
                 })}
                 style={styles.bookBtn}
               >
-                <Text style={styles.bookBtnText}>🎫 Book on IRCTC</Text>
+                <Ionicons name="ticket-outline" size={14} color={colors.orange} />
+                <Text style={styles.bookBtnText}>Book on IRCTC</Text>
               </TouchableOpacity>
             </View>
           );
@@ -563,104 +619,197 @@ export default function TrainSearchScreen() {
   );
 }
 
+const CARD_SHADOW = {
+  shadowColor: "#1A2233",
+  shadowOpacity: 0.07,
+  shadowRadius: 12,
+  shadowOffset: { width: 0, height: 4 },
+  elevation: 2,
+};
+
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  content: { padding: spacing.lg, paddingBottom: 0 },
+  content: { paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: 0 },
   row: { flexDirection: "row", gap: spacing.md },
-  half: { flex: 1 },
-  stationRow: { flexDirection: "row", alignItems: "flex-end", gap: spacing.sm },
+  half: { flex: 1, minWidth: 0 },
+  listContent: { paddingBottom: spacing.xl },
+  error: { color: colors.danger, fontSize: 13, fontWeight: "600", marginTop: spacing.sm, textAlign: "center" },
+  note: { color: colors.textMuted, fontSize: 12, marginTop: spacing.sm, lineHeight: 17 },
+
+  // --- search form ---
+  formCard: {
+    backgroundColor: colors.card,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    marginBottom: spacing.md,
+    ...CARD_SHADOW,
+  },
+  stationCard: { paddingVertical: spacing.md },
+  stationField: { width: "100%" },
+  stationDividerRow: { flexDirection: "row", alignItems: "center", marginVertical: 2 },
+  stationDivider: { flex: 1, height: 1, backgroundColor: colors.border },
   swapBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: colors.card,
+    backgroundColor: "#FFF3EA",
     borderWidth: 1.5,
     borderColor: colors.orange,
-    marginBottom: 10,
+    marginLeft: spacing.sm,
   },
-  listContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.lg },
-  error: { color: colors.danger, fontSize: 12, marginTop: spacing.sm },
-  note: { color: colors.textMuted, fontSize: 12, marginTop: spacing.sm },
+  cardHeadRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm },
+  cardLabel: { fontSize: 10, fontWeight: "800", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 },
+  calendarLink: { flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1, marginBottom: 4 },
+  calendarLinkText: { fontSize: 12, fontWeight: "700", color: colors.orange },
+  pickerValueRow: { flexDirection: "row", alignItems: "center", gap: 4 },
+  pickerValue: { fontSize: 15, fontWeight: "800", color: colors.text, flexShrink: 1 },
+  vDivider: { width: 1, backgroundColor: colors.border, alignSelf: "stretch" },
+  limitRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: spacing.md },
+  limitLabel: { fontSize: 13, fontWeight: "700", color: colors.textMuted, flex: 1 },
+  limitInput: {
+    width: 64,
+    textAlign: "center",
+    fontSize: 15,
+    fontWeight: "800",
+    color: colors.text,
+    backgroundColor: "#F1F3F7",
+    borderRadius: radius.sm,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  searchBtn: {
+    backgroundColor: colors.orange,
+    borderRadius: radius.lg,
+    paddingVertical: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: spacing.xs,
+    marginBottom: spacing.md,
+    shadowColor: colors.orange,
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 5,
+  },
+  searchBtnDisabled: { opacity: 0.6 },
+  searchBtnText: { color: colors.textInverse, fontSize: 17, fontWeight: "800", letterSpacing: 0.3 },
 
-  fieldLabel: { fontSize: 11, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4, marginTop: spacing.sm },
-  dateRow: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.bg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm + 2 },
-  dateRowText: { fontSize: 13, color: colors.text, fontWeight: "600" },
-  pickerField: { backgroundColor: colors.bg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, marginBottom: spacing.md },
-  pickerValue: { fontSize: 13, fontWeight: "700", color: colors.text },
-
-  // --- IRCTC-style results header ---
+  // --- orange header (form hero + results) ---
   header: {
     backgroundColor: colors.orange,
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: spacing.lg,
     paddingTop: spacing.md,
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.lg,
     gap: spacing.sm,
+    overflow: "hidden",
   },
-  backBtn: { padding: 4 },
-  headerTextWrap: { flex: 1 },
-  headerRoute: { color: colors.textInverse, fontWeight: "700", fontSize: 15 },
-  headerDate: { color: colors.orangeLight, fontSize: 11, marginTop: 2 },
+  // A lighter wash in the top-left corner stands in for the diagonal
+  // headerGradientFrom → headerGradientTo gradient (no gradient lib).
+  headerGlow: {
+    position: "absolute",
+    top: -80,
+    left: -60,
+    width: 240,
+    height: 200,
+    borderRadius: 120,
+    backgroundColor: colors.headerGradientFrom,
+    opacity: 0.7,
+  },
+  heroHeader: { flexDirection: "column", alignItems: "flex-start", gap: 2, paddingTop: spacing.lg },
+  heroTitle: { color: colors.textInverse, fontSize: 22, fontWeight: "800", letterSpacing: 0.2 },
+  heroSub: { color: "#FFE3D2", fontSize: 13, fontWeight: "600" },
+  backBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.18)",
+  },
+  headerTextWrap: { flex: 1, minWidth: 0 },
+  headerRoute: { color: colors.textInverse, fontWeight: "800", fontSize: 22, letterSpacing: 0.5 },
+  headerArrow: { color: "#FFE3D2", fontWeight: "700" },
+  headerDate: { color: "#FFE3D2", fontSize: 13, fontWeight: "600", marginTop: 2 },
+  headerNames: { color: "rgba(255,255,255,0.75)", fontSize: 11, marginTop: 2 },
 
-  toolbar: { marginTop: spacing.sm },
-  toolbarContent: { flexDirection: "row", alignItems: "center", gap: 8, paddingRight: spacing.md },
-  toolbarBtn: { flexDirection: "row", alignItems: "center", gap: 4, borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: colors.card },
-  toolbarBtnActive: { backgroundColor: colors.orange, borderColor: colors.orange },
-  toolbarBtnText: { fontSize: 12, fontWeight: "700", color: colors.text },
+  // --- results toolbar ---
+  toolbar: {
+    backgroundColor: colors.card,
+    borderRadius: radius.lg,
+    marginBottom: spacing.sm,
+    ...CARD_SHADOW,
+  },
+  toolbarContent: { flexDirection: "row", alignItems: "center", gap: 6, padding: 8 },
+  toolbarBtn: { flexDirection: "row", alignItems: "center", gap: 5, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: "#F5F6F9" },
+  toolbarBtnActive: { backgroundColor: colors.orange },
+  toolbarBtnText: { fontSize: 12, fontWeight: "800", color: colors.text },
+  toolbarBtnTextAccent: { color: colors.orange },
   toolbarBtnTextActive: { color: colors.textInverse },
-  resultSearchBox: { flexDirection: "row", alignItems: "center", gap: 4, borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: colors.card, minWidth: 140 },
+  radio: { width: 11, height: 11, borderRadius: 6, borderWidth: 1.5, borderColor: colors.textMuted },
+  radioOn: { borderColor: colors.textInverse, backgroundColor: colors.textInverse },
+  resultSearchBox: { flexDirection: "row", alignItems: "center", gap: 5, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: "#F5F6F9", minWidth: 150 },
   resultSearchInput: { fontSize: 12, color: colors.text, flex: 1, padding: 0 },
-  resultSearchCount: { fontSize: 11, color: colors.textMuted, fontWeight: "600" },
-  iconBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill, padding: 8, backgroundColor: colors.card },
-  filterBadge: { position: "absolute", top: -4, right: -4, backgroundColor: colors.orange, borderRadius: radius.pill, minWidth: 16, height: 16, alignItems: "center", justifyContent: "center", paddingHorizontal: 3 },
-  filterBadgeText: { color: colors.textInverse, fontSize: 9, fontWeight: "700" },
+  resultSearchCount: { fontSize: 11, color: colors.text, fontWeight: "800" },
+  iconBtn: { borderRadius: radius.pill, padding: 7, backgroundColor: "#F5F6F9" },
 
   summaryRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.xs, marginBottom: spacing.xs },
-  summaryText: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
-  modifyLink: { fontSize: 12, color: colors.orange, fontWeight: "700" },
+  summaryText: { fontSize: 12, color: colors.textMuted, fontWeight: "700", flexShrink: 1 },
+  modifyLink: { fontSize: 12, color: colors.orange, fontWeight: "800" },
 
   // --- train result card ---
   trainCard: {
     backgroundColor: colors.card,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+    ...CARD_SHADOW,
   },
-  trainHeaderRow: { flexDirection: "row", alignItems: "baseline", gap: 6 },
-  trainName: { fontSize: 14, fontWeight: "700", color: colors.text, flexShrink: 1 },
-  trainNumber: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
-  trainMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  trainHeaderRow: { flexDirection: "row", alignItems: "center" },
+  trainName: { fontSize: 15, fontWeight: "800", color: colors.text, flexShrink: 1 },
+  trainNumber: { fontSize: 15, fontWeight: "800", color: colors.text },
+  trainMeta: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
 
-  timingRow: { flexDirection: "row", alignItems: "center", marginTop: spacing.sm, marginBottom: spacing.sm },
-  timingCol: { minWidth: 64 },
-  timeText: { fontSize: 18, fontWeight: "700", color: colors.text },
-  dateSubText: { fontSize: 10, color: colors.textMuted, marginTop: 1 },
+  timingRow: { flexDirection: "row", alignItems: "center", marginTop: spacing.md, marginBottom: spacing.md },
+  timingCol: { minWidth: 64, maxWidth: "38%" },
+  timeText: { fontSize: 22, fontWeight: "800", color: colors.text, letterSpacing: 0.3 },
+  dateSubText: { fontSize: 10, fontWeight: "600", color: colors.textMuted, marginTop: 2 },
   timingMid: { flex: 1, alignItems: "center", paddingHorizontal: spacing.sm },
-  timingLine: { height: 1, backgroundColor: colors.border, width: "100%", marginBottom: 4 },
-  durationText: { fontSize: 11, color: colors.textMuted, fontWeight: "600" },
+  timingLine: { borderTopWidth: 1.5, borderStyle: "dashed", borderColor: "#C9CFDA", width: "100%", marginTop: 4, height: 0 },
+  durationText: { fontSize: 11, color: colors.textMuted, fontWeight: "700" },
 
-  classRow: { marginBottom: spacing.sm },
-  availabilityBadge: { fontSize: 11, color: colors.primary, marginTop: 3, fontWeight: "700" },
-  fareBadge: { fontSize: 11, color: colors.text, marginTop: 3, fontWeight: "600" },
+  classRow: { marginBottom: spacing.xs },
+  availabilityBadge: { fontSize: 11, color: colors.primary, marginTop: 6, fontWeight: "800" },
+  fareBadge: { fontSize: 11, color: colors.textMuted, marginTop: 4, fontWeight: "600" },
   bookBtn: {
-    marginTop: 8, alignSelf: "flex-start", backgroundColor: colors.accent,
-    paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.pill,
+    marginTop: spacing.md,
+    alignSelf: "flex-end",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderWidth: 1.5,
+    borderColor: colors.orange,
+    backgroundColor: "#FFF3EA",
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: radius.pill,
   },
-  bookBtnText: { fontSize: 11, fontWeight: "700", color: colors.primaryDark },
+  bookBtnText: { fontSize: 12, fontWeight: "800", color: colors.orange },
 
-  emptyText: { textAlign: "center", color: colors.textMuted, marginTop: spacing.lg },
+  emptyText: { textAlign: "center", color: colors.textMuted, marginTop: spacing.lg, fontWeight: "600" },
   pagination: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginTop: spacing.sm,
+    marginTop: spacing.md,
     marginBottom: spacing.lg,
+    marginHorizontal: spacing.lg,
   },
   pageBtn: { flex: 0, paddingHorizontal: spacing.lg },
-  pageInfo: { fontSize: 13, color: colors.textMuted, fontWeight: "600" },
+  pageInfo: { fontSize: 13, color: colors.textMuted, fontWeight: "700" },
 });
