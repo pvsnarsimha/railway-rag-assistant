@@ -65,8 +65,7 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
             # speak_text* only ride on the data-only "speak" message below
             # (keeps the visible push well under Expo's 4 KB limit).
             json={k: v for k, v in {"to": token, "title": title, "body": body,
-                                    "data": {k2: v2 for k2, v2 in (data or {}).items()
-                                             if k2 not in ("speak_text", "speak_text_en")},
+                                    "data": _visible_expo_data(data, title, body),
                                     "sound": sound}.items() if v is not None},
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=10,
@@ -84,6 +83,17 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
         return {"sent": True, "error": None}
     except requests.exceptions.RequestException as e:
         return {"sent": False, "error": f"Expo push API request failed: {e}"}
+
+
+def _visible_expo_data(data: Optional[dict], title: str, body: str) -> dict:
+    """The visible Expo push carries the announcement text too (so the open
+    app reads the same announcement), unless that would crowd Expo's 4 KB
+    limit; the English copy only rides on the data-only "speak" message."""
+    d = {k: v for k, v in (data or {}).items() if k not in ("speak_text", "speak_text_en")}
+    say = (data or {}).get("speak_text")
+    if say and len((title + body + say).encode("utf-8")) < 3000:
+        d["speak_text"] = say
+    return d
 
 
 def _send_via_expo_speak(token: str, title: str, body: str, data: dict) -> None:
@@ -114,11 +124,27 @@ def _lang_for(token: str) -> str:
         return "en"
 
 
-def _localize(data: dict, lang: str, title_en: str, body_en: str, title: str, body: str) -> None:
-    """Adds the language + English fallback the phone's read-aloud needs."""
+def _localize(data: dict, lang: str, title_en: str, body_en: str, title: str, body: str,
+              speak=None) -> None:
+    """Adds the language + English fallback the phone's read-aloud needs.
+    FEATURE: what is READ ALOUD is a railway-station style announcement
+    (announcer.py) — numbers, times and "8.3 km" spelled for speech and
+    station names in the language's own script. `speak(lang) -> str`
+    builds it; without one the notification text itself is announced."""
     data["lang"] = lang
-    data["speak_text"] = f"{title}. {body}"
-    data["speak_text_en"] = f"{title_en}. {body_en}"
+    try:
+        import announcer
+        if speak is None:
+            data["speak_text"] = announcer.generic(title, body, lang)
+            data["speak_text_en"] = announcer.generic(title_en, body_en, "en")
+        else:
+            data["speak_text"] = speak(lang)
+            data["speak_text_en"] = speak("en")
+    except Exception:  # noqa: BLE001 - speech text must never block a push
+        import logging
+        logging.getLogger(__name__).warning("announcer failed", exc_info=True)
+        data["speak_text"] = f"{title}. {body}"
+        data["speak_text_en"] = f"{title_en}. {body_en}"
 
 
 def _ensure_initialized() -> bool:
@@ -320,6 +346,13 @@ def send_delay_alert(
         "next_station": (running or {}).get("next_station") or "",
     }
 
+    def _speak(lg):
+        import announcer
+        return announcer.delay_alert(train_number, lg, predicted_delay_minutes, predicted_for_station,
+                                     running=running, eta_text=eta_text, minutes=minutes_to_arrival,
+                                     km=km_to_station)
+    _localize(data, _lang_for(token), title, body, title, body, speak=_speak)
+
     if _is_expo_token(token):
         return _send_via_expo(token, title, body, data)
 
@@ -427,6 +460,11 @@ def send_alarm_alert(
         "sent_at": str(int(time.time())),
     }
 
+    def _speak(lg):
+        import announcer
+        return announcer.approach(train_number, station, lead_minutes, lg, eta_text=eta_text)
+    _localize(data, _lang_for(token), title, body, title, body, speak=_speak)
+
     if _is_expo_token(token):
         return _send_via_expo(token, title, body, data)
 
@@ -507,7 +545,12 @@ def send_approach_alert(
         "checked_at": checked_at.strftime("%H:%M"),
         "sent_at": str(int(time.time())),
     }
-    _localize(data, lang, title_en, body_en, title, body)
+
+    def _speak(lg):
+        import announcer
+        return announcer.approach(train_number, name, minutes, lg, eta_text=eta_text, km=km,
+                                  delay_minutes=delay_minutes, train_name=(running or {}).get("train_name"))
+    _localize(data, lang, title_en, body_en, title, body, speak=_speak)
     if _is_expo_token(token):
         return _send_via_expo(token, title, body, data, sound="default")
     if not _ensure_initialized():
@@ -618,6 +661,9 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
     if lang != "en":
         import i18n_notify
         title, body = i18n_notify.running_texts(train_number, running, lang, checked_at.strftime("%H:%M"))
+    def _speak(lg, _tn=train_number, _rs=running):
+        import announcer
+        return announcer.running_status(_tn, _rs, lg)
     data = {
         "type": "running_status",
         "train_number": str(train_number),
@@ -634,7 +680,7 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
         "checked_at": checked_at.strftime("%H:%M"),
         "sent_at": str(int(time.time())),
     }
-    _localize(data, lang, title_en, body_en, title, body)
+    _localize(data, lang, title_en, body_en, title, body, speak=_speak)
 
     if _is_expo_token(token):
         return _send_via_expo(token, title, body, data, sound="default" if (final or alert) else None)

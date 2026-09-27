@@ -832,6 +832,16 @@ export async function startBackgroundTracking(baseUrl, token, { trainNumber, dat
   return data;
 }
 
+/** "Notify me every N min" (0 = off) for every train this device tracks,
+ *  under its current AND earlier push tokens (web tokens rotate). */
+export async function setTrackingInterval(baseUrl, token, previousTokens, intervalMinutes) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.post("/api/push/tracking/interval", {
+    token, previous_tokens: previousTokens || [], interval_minutes: intervalMinutes,
+  });
+  return data;
+}
+
 export async function stopBackgroundTracking(baseUrl, token, { trainNumber, date } = {}) {
   const client = makeClient(baseUrl);
   const { data } = await client.post("/api/push/tracking/stop", {

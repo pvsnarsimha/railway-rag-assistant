@@ -197,6 +197,10 @@ async function registerForWebPushNotifications({ prompt = true } = {}) {
           train_number: payload.data?.train_number || "",
           alert: payload.data?.alert || "",
           sent_at: payload.data?.sent_at || "",
+          // Railway-announcer style text to READ (backend/announcer.py).
+          speak_text: payload.data?.speak_text || "",
+          speak_text_en: payload.data?.speak_text_en || "",
+          lang: payload.data?.lang || "",
         } }));
       } catch (e) { /* ignore */ }
       // The silent background running-status update is for when the app is

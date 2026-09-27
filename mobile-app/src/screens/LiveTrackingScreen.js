@@ -30,7 +30,7 @@ import ScreenLanguageBar from "../components/ScreenLanguageBar";
 import { useT } from "../context/LanguageContext";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
-  loadStatusEvery, saveStatusEvery, applyNotifyLanguage,
+  loadStatusEvery, saveStatusEvery, applyNotifyLanguage, applyStatusEveryOnServer,
 } from "../services/backgroundTracking";
 
 // FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
@@ -824,7 +824,9 @@ export default function LiveTrackingScreen({ navigation }) {
   useEffect(() => { readAloudRef.current = readAloud; }, [readAloud]);
   useEffect(() => onTrainPush((m) => {
     if (!readAloudRef.current || !shouldSpeakPush(m)) return;
-    speak([m.title, m.body].filter(Boolean).join(". "), { lang: m.lang || undefined, fallbackText: m.speak_text_en || undefined });
+    // The push carries a railway-announcer style script (backend/announcer.py);
+    // older pushes without one fall back to the notification text.
+    speak(m.speak_text || [m.title, m.body].filter(Boolean).join(". "), { lang: m.lang || undefined, fallbackText: m.speak_text_en || undefined });
   }), []);
   // FEATURE: notification language (English + 22 Indian languages) —
   // asked the first time read-aloud is ticked, changeable any time.
@@ -1648,6 +1650,12 @@ export default function LiveTrackingScreen({ navigation }) {
     statusEveryRef.current = n;
     setStatusEvery(n);
     saveStatusEvery(n);
+    // BUGFIX ("Off" kept sending notifications): apply the new interval to
+    // EVERY train this device tracks on the server — including watches
+    // under an older push token or another run date — not just the one on
+    // screen, and even when nothing is being tracked on screen right now.
+    applyStatusEveryOnServer(apiBaseUrl, n);
+    if (n === 0) stopSpeaking();
     const params = activeParamsRef.current;
     if (params && params.trainNumber && !manualStopRef.current) {
       setBgTracking({ state: "pending" });
@@ -2167,7 +2175,7 @@ export default function LiveTrackingScreen({ navigation }) {
           />
           {readAloud ? (
             <Text style={styles.bgTrackText}>
-              Reads the status updates and bell/delay alerts while this app is open (also in a background tab). With the app fully closed, you'll still get the notification and sound.
+              Reads each status update and bell/delay alert like a station announcer — in your notification language, with station names and distances (e.g. "8 point 3 kilometres") spoken properly — while this app is open (also in a background tab). With the app fully closed, you'll still get the notification and sound.
             </Text>
           ) : null}
           {statusEveryCustomOpen ? (

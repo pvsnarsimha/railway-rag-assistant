@@ -5513,6 +5513,21 @@ def api_push_start_tracking(req: TrackingWatchRequest):
     return {"ok": True, "tracking": push_store.list_tracking_watches_for_token(token)}
 
 
+class TrackingIntervalRequest(BaseModel):
+    token: str
+    # Earlier push tokens of this same device (web push tokens rotate).
+    previous_tokens: Optional[List[str]] = None
+    interval_minutes: int
+
+
+@app.post("/api/push/tracking/interval")
+def api_push_tracking_interval(req: TrackingIntervalRequest):
+    """"Notify me every N min" / Off for every train this device tracks."""
+    tokens = [req.token] + list(req.previous_tokens or [])[:10]
+    changed = push_store.set_tracking_interval(tokens, req.interval_minutes)
+    return {"ok": True, "updated": changed}
+
+
 @app.post("/api/push/tracking/stop")
 def api_push_stop_tracking(req: TrackingWatchDeleteRequest):
     removed = push_store.delete_tracking_watch(
