@@ -1,0 +1,399 @@
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.js b/mobile-app/src/screens/LiveTrackingScreen.js
+index 799f796..72cedb9 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.js
+@@ -2033,7 +2033,25 @@ export default function LiveTrackingScreen({ navigation }) {
+         }}
+       />
+       {(!activeTrack || formOpen) ? (
+-        <SectionCard title={t("Track a train")} subtitle={t("Shows the live position instantly and keeps it updating every few seconds.")}>
++        <>
++        {/* REDESIGN (premium hero): kicker + big title + a simple drawn
++            train, then the same form fields in a rounded card below. */}
++        <View style={styles.pxHero}>
++          <Text style={styles.pxKicker}>{t("LIVE TRACKING")}</Text>
++          <Text style={styles.pxHeroTitle}>{t("Every journey, beautifully tracked.")}</Text>
++          <Text style={styles.pxHeroSub}>{t("Shows the live position instantly and keeps it updating every few seconds.")}</Text>
++          <View style={styles.pxTrain} pointerEvents="none">
++            <View style={styles.pxTrainBody}>
++              {[0, 1, 2, 3, 4].map((i) => <View key={i} style={styles.pxTrainWindow} />)}
++              <View style={styles.pxTrainNose} />
++            </View>
++            <View style={styles.pxTrainStripe} />
++            <View style={styles.pxTrainStripeOrange} />
++          </View>
++          <View style={styles.pxTrack} />
++        </View>
++        <View style={styles.pxFormCard}>
++          <Text style={styles.pxFormTitle}>{t("Track a train")}</Text>
+           <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
+           <Text style={styles.fieldLabel}>{"Date (optional \u2014 defaults to today)"}</Text>
+           <TouchableOpacity style={styles.dateField} onPress={() => { datePickForHeaderRef.current = false; setDayPickerVisible(true); }} activeOpacity={0.7}>
+@@ -2051,14 +2069,17 @@ export default function LiveTrackingScreen({ navigation }) {
+             {/* No spinner / "Connecting…" state: tracking starts at once —
+                 the last known position is shown instantly and the live
+                 feed takes over the moment it answers. */}
+-            <PrimaryButton title={t("Start tracking")} onPress={connect} style={styles.half} />
++            <PrimaryButton title={t("Start tracking")} onPress={connect} style={[styles.half, styles.pxStartBtn]} />
+             {activeTrack ? (
+               <PrimaryButton title="Cancel" variant="secondary" onPress={() => setFormOpen(false)} style={styles.half} />
+             ) : null}
+           </View>
+-        </SectionCard>
++        </View>
++        </>
+       ) : (
++        <>
+         <View style={styles.ryHeader}>
++          <View style={styles.pxGlow} pointerEvents="none" />
+           {/* REDESIGN (RailYatri-style header): "12728 - Godavari Sf Express",
+               route, and a Today/Yesterday date switch — the form itself is
+               tucked away behind "Change" once a train is being tracked. */}
+@@ -2083,16 +2104,16 @@ export default function LiveTrackingScreen({ navigation }) {
+             <LiveBadge connection={connection} hasPayload={!!payload} gpsOn={gpsOn} />
+             {payload?.status_updated_at ? (
+               <TouchableOpacity onPress={refreshNow} style={styles.refreshRow}>
+-                <Ionicons name="refresh" size={13} color={colors.primary} />
++                <Ionicons name="refresh" size={13} color="#C9B8FF" />
+                 <Text style={styles.refreshText}>{gpsOn ? "GPS fix" : "Position"} {formatAsOfAgo(payload.status_updated_at)}</Text>
+               </TouchableOpacity>
+             ) : null}
+             <View style={{ flex: 1 }} />
+             <TouchableOpacity onPress={shareTrackingLink} style={styles.ryIconBtn} accessibilityLabel="Share link">
+-              <Ionicons name="share-social-outline" size={16} color={colors.primary} />
++              <Ionicons name="share-social-outline" size={16} color="#fff" />
+             </TouchableOpacity>
+             <TouchableOpacity onPress={() => setFormOpen(true)} style={styles.ryIconBtn} accessibilityLabel="Change train">
+-              <Ionicons name="create-outline" size={16} color={colors.primary} />
++              <Ionicons name="create-outline" size={16} color="#fff" />
+             </TouchableOpacity>
+             <TouchableOpacity onPress={stopTracking} style={styles.ryStopBtn}>
+               <Text style={styles.ryStopBtnText}>Stop</Text>
+@@ -2105,18 +2126,22 @@ export default function LiveTrackingScreen({ navigation }) {
+               style={[styles.modeBtn, !gpsOn && styles.modeBtnActive]}
+               onPress={() => { if (gpsOn) stopGps(); }}
+             >
+-              <Ionicons name="globe-outline" size={14} color={!gpsOn ? "#fff" : colors.primary} />
++              <Ionicons name="globe-outline" size={14} color={!gpsOn ? "#2A0E5C" : "#E4DAFF"} />
+               <Text style={[styles.modeBtnText, !gpsOn && styles.modeBtnTextActive]}>Internet</Text>
+             </TouchableOpacity>
+             <TouchableOpacity
+               style={[styles.modeBtn, gpsOn && styles.modeBtnActive]}
+               onPress={() => { if (!gpsOn) askGps("manual"); }}
+             >
+-              <Ionicons name="navigate-outline" size={14} color={gpsOn ? "#fff" : colors.primary} />
++              <Ionicons name="navigate-outline" size={14} color={gpsOn ? "#2A0E5C" : "#E4DAFF"} />
+               <Text style={[styles.modeBtnText, gpsOn && styles.modeBtnTextActive]}>GPS · I'm on this train</Text>
+             </TouchableOpacity>
+           </View>
++        </View>
+ 
++        {/* Alerts & notification settings — same controls, own light card. */}
++        <View style={styles.pxSettingsCard}>
++          <Text style={styles.pxSettingsTitle}>{t("Alerts & notifications")}</Text>
+           {/* "Notify me every" — live position + prediction as a notification
+               at the user's own interval, app open or closed. */}
+           <View style={styles.everyRow}>
+@@ -2222,6 +2247,7 @@ export default function LiveTrackingScreen({ navigation }) {
+             </Text>
+           ) : null}
+         </View>
++        </>
+       )}
+ 
+       {modeNotice ? (
+@@ -2288,10 +2314,39 @@ export default function LiveTrackingScreen({ navigation }) {
+ 
+       {activeTrack ? (
+         <>
+-          <TouchableOpacity onPress={toggleMap} style={styles.mapToggleBtn}>
+-            <Ionicons name="map-outline" size={14} color={colors.primary} />
+-            <Text style={styles.mapToggleBtnText}>{showMap ? "Hide train on map" : "🗺️ Train on map"}</Text>
+-          </TouchableOpacity>
++          {/* REDESIGN (bold action tiles): the map toggle plus shortcuts that
++              already exist elsewhere on this screen (share link, bottom-bar
++              Coach layout / Time Table) — same handlers, same navigation. */}
++          <View style={styles.pxTiles}>
++            <TouchableOpacity onPress={toggleMap} style={[styles.pxTile, { backgroundColor: "#E4570F" }]} activeOpacity={0.85}>
++              <Ionicons name="map" size={22} color="#fff" />
++              <Text style={styles.pxTileTitle}>{showMap ? "Hide train on map" : "Train on map"}</Text>
++              <Text style={styles.pxTileSub}>{t("Live position")}</Text>
++            </TouchableOpacity>
++            <TouchableOpacity onPress={shareTrackingLink} style={[styles.pxTile, { backgroundColor: "#2E7D32" }]} activeOpacity={0.85}>
++              <Ionicons name="people" size={22} color="#fff" />
++              <Text style={styles.pxTileTitle}>{t("Share trip")}</Text>
++              <Text style={styles.pxTileSub}>{t("Family sees you live")}</Text>
++            </TouchableOpacity>
++            <TouchableOpacity
++              onPress={() => navigation?.navigate?.("More", { initialTab: "coach", trainNumber: trainNumber.trim() })}
++              style={[styles.pxTile, { backgroundColor: "#1565C0" }]}
++              activeOpacity={0.85}
++            >
++              <Ionicons name="grid" size={22} color="#fff" />
++              <Text style={styles.pxTileTitle}>{t("Coach layout")}</Text>
++              <Text style={styles.pxTileSub}>{t("Find your coach")}</Text>
++            </TouchableOpacity>
++            <TouchableOpacity
++              onPress={() => navigation?.navigate?.("Home", { screen: "TrainSchedule", params: { trainNumber: trainNumber.trim() } })}
++              style={[styles.pxTile, { backgroundColor: "#6A1B9A" }]}
++              activeOpacity={0.85}
++            >
++              <Ionicons name="time" size={22} color="#fff" />
++              <Text style={styles.pxTileTitle}>{t("Time Table")}</Text>
++              <Text style={styles.pxTileSub}>{t("Full schedule")}</Text>
++            </TouchableOpacity>
++          </View>
+           {mapError && <Text style={styles.errorText}>{mapError}</Text>}
+         </>
+       ) : null}
+@@ -2410,14 +2465,37 @@ export default function LiveTrackingScreen({ navigation }) {
+               next halt's live ETA underneath. On GPS it's the phone's own
+               position on the route. */}
+           <View ref={quickBarRef} style={styles.ryStatusCard}>
+-            <View style={[styles.ryStatusIcon, gpsOn && { backgroundColor: colors.accent }]}>
+-              <Ionicons name={gpsOn ? "navigate" : "train"} size={20} color="#fff" />
++            <View style={styles.pxLiveTopRow}>
++              <View style={[styles.pxLivePill, gpsOn && { backgroundColor: colors.accent }]}>
++                <Ionicons name={gpsOn ? "navigate" : "radio"} size={11} color="#111" />
++                <Text style={styles.pxLivePillText}>{gpsOn ? "GPS" : ltJourneyLikelyComplete ? t("COMPLETED") : t("LIVE NOW")}</Text>
++              </View>
++              <Text style={styles.pxLiveTrainNo}>{activeTrack?.trainNumber}</Text>
+             </View>
+-            <View style={{ flex: 1 }}>
+-              <Text style={styles.ryStatusText}>{ltStatus.headline}</Text>
+-              {ltStatus.sub ? <Text style={styles.ryStatusSub}>{ltStatus.sub}</Text> : null}
++            <Text style={styles.ryStatusText}>{ltStatus.headline}</Text>
++            {ltStatus.sub ? <Text style={styles.ryStatusSub}>{ltStatus.sub}</Text> : null}
++            {(() => {
++              // Display only: share of reported stops already passed.
++              const total = timeline.length;
++              const passed = timeline.filter((x) => x.status === "passed").length;
++              const frac = ltJourneyLikelyComplete ? 1 : total > 1 ? Math.min(1, passed / (total - 1)) : 0;
++              return (
++                <View style={styles.pxProgressWrap}>
++                  <View style={styles.pxProgressTrack} />
++                  <View style={[styles.pxProgressFill, { width: `${Math.round(frac * 100)}%` }]} />
++                  <View style={[styles.pxProgressDot, { left: `${Math.round(frac * 100)}%` }]} />
++                  {total >= 2 ? (
++                    <View style={styles.pxProgressEnds}>
++                      <Text style={styles.pxProgressEndText}>{timeline[0].code || ""}</Text>
++                      <Text style={styles.pxProgressEndText}>{timeline[total - 1].code || ""}</Text>
++                    </View>
++                  ) : null}
++                </View>
++              );
++            })()}
++            <View style={styles.pxLiveBottomRow}>
++              <DelayPill minutes={ltEffectiveDelay} />
+             </View>
+-            <DelayPill minutes={ltEffectiveDelay} />
+           </View>
+ 
+           <TouchableOpacity onPress={() => setShowMoreStats((v) => !v)} style={styles.moreStatsToggle}>
+@@ -2634,14 +2712,14 @@ export default function LiveTrackingScreen({ navigation }) {
+             style={styles.bottomBarBtn}
+             onPress={() => navigation?.navigate?.("More", { initialTab: "coach", trainNumber: trainNumber.trim() })}
+           >
+-            <Ionicons name="grid-outline" size={13} color={colors.primary} />
++            <Ionicons name="grid-outline" size={13} color="#fff" />
+             <Text style={styles.bottomBarBtnText}>{t("Coach layout")}</Text>
+           </TouchableOpacity>
+           <TouchableOpacity
+             style={styles.bottomBarBtn}
+             onPress={() => navigation?.navigate?.("Home", { screen: "TrainSchedule", params: { trainNumber: trainNumber.trim() } })}
+           >
+-            <Ionicons name="time-outline" size={13} color={colors.primary} />
++            <Ionicons name="time-outline" size={13} color="#fff" />
+             <Text style={styles.bottomBarBtnText}>{t("Time Table")}</Text>
+           </TouchableOpacity>
+         </View>
+@@ -3295,7 +3373,7 @@ const styles = StyleSheet.create({
+   },
+   dateFieldText: { flex: 1, fontSize: 15, color: colors.text, fontWeight: "600" },
+   refreshRow: { flexDirection: "row", alignItems: "center", gap: 4 },
+-  refreshText: { fontSize: 12, color: colors.primary, fontWeight: "600" },
++  refreshText: { fontSize: 12, color: "#C9B8FF", fontWeight: "600" },
+ 
+   // REDESIGN (RailYatri-style quick bar + running-status timeline).
+   routeHeaderText: { fontSize: 12.5, fontWeight: "600", color: colors.textMuted, marginBottom: 6 },
+@@ -3485,26 +3563,26 @@ const styles = StyleSheet.create({
+ 
+   // REDESIGN (RailYatri-style bottom sticky bar): "Next: X in N mins" +
+   // Coach layout / Time Table quick-action buttons pinned to the bottom.
+-  contentWithBar: { paddingBottom: 76 },
++  contentWithBar: { paddingBottom: 96 },
+   bottomBar: {
++    position: "absolute", left: spacing.md, right: spacing.md, bottom: spacing.md,
+     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+-    gap: 8, backgroundColor: "#fff", borderTopWidth: 1, borderTopColor: colors.border,
+-    paddingVertical: 10, paddingHorizontal: spacing.lg,
+-    shadowColor: "#000", shadowOpacity: 0.1, shadowRadius: 6, shadowOffset: { width: 0, height: -2 }, elevation: 6,
++    gap: 8, backgroundColor: "#1B1530", borderRadius: 20,
++    paddingVertical: 12, paddingHorizontal: spacing.lg,
++    shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 8,
+   },
+   bottomBarInfo: { flexShrink: 1 },
+-  bottomBarLabel: { fontSize: 12.5, color: colors.text, fontWeight: "600" },
+-  bottomBarStation: { color: colors.primary, fontWeight: "700" },
+-  bottomBarDelay: { fontSize: 11, fontWeight: "700", marginTop: 1 },
+-  bottomBarDelayLate: { color: colors.danger },
+-  bottomBarDelayOnTime: { color: colors.success },
++  bottomBarLabel: { fontSize: 12.5, color: "#C9C3DA", fontWeight: "600" },
++  bottomBarStation: { color: "#fff", fontWeight: "800" },
++  bottomBarDelay: { fontSize: 11, fontWeight: "800", marginTop: 1 },
++  bottomBarDelayLate: { color: "#FF8A80" },
++  bottomBarDelayOnTime: { color: "#C6F432" },
+   bottomBarActions: { flexDirection: "row", gap: 6 },
+   bottomBarBtn: {
+     flexDirection: "row", alignItems: "center", gap: 4,
+-    borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill,
+-    paddingVertical: 6, paddingHorizontal: 10, backgroundColor: colors.chip,
++    borderRadius: radius.pill, paddingVertical: 7, paddingHorizontal: 10, backgroundColor: "rgba(255,255,255,0.14)",
+   },
+-  bottomBarBtnText: { fontSize: 11, fontWeight: "600", color: colors.primary },
++  bottomBarBtnText: { fontSize: 11, fontWeight: "700", color: "#fff" },
+ 
+   // Delay Alert / Smart Alarm (moved here from MoreToolsScreen.js)
+   resultLine: { fontSize: 13, color: colors.text, marginTop: spacing.sm, lineHeight: 18 },
+@@ -3542,34 +3620,40 @@ const styles = StyleSheet.create({
+   everySetBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+ 
+   // REDESIGN (RailYatri-style header / status / banners / GPS prompt).
++  // REDESIGN (night-journey card): deep purple card with a soft glow.
+   ryHeader: {
+-    backgroundColor: "#fff", borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
+-    padding: spacing.md, marginBottom: spacing.sm,
++    backgroundColor: "#2A0E5C", borderRadius: 22,
++    padding: spacing.lg, marginBottom: spacing.md, overflow: "hidden",
++    shadowColor: "#2A0E5C", shadowOpacity: 0.3, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 5,
++  },
++  pxGlow: {
++    position: "absolute", top: -90, right: -70, width: 240, height: 240, borderRadius: 120,
++    backgroundColor: "#5B21B6", opacity: 0.55,
+   },
+   ryHeaderTop: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+-  ryTrainTitle: { fontSize: 16, fontWeight: "700", color: colors.text },
+-  ryTrainSub: { fontSize: 12.5, color: colors.textMuted, marginTop: 2 },
++  ryTrainTitle: { fontSize: 18, fontWeight: "800", color: "#fff" },
++  ryTrainSub: { fontSize: 13, color: "#C9B8FF", marginTop: 3, fontWeight: "600" },
+   ryDateBtn: {
+-    flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.primary,
+-    borderRadius: 6, paddingVertical: 6, paddingHorizontal: 12,
++    flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "rgba(255,255,255,0.16)",
++    borderRadius: radius.pill, paddingVertical: 6, paddingHorizontal: 12,
+   },
+   ryDateBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+-  ryHeaderRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: spacing.sm, flexWrap: "wrap" },
++  ryHeaderRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: spacing.md, flexWrap: "wrap" },
+   ryIconBtn: {
+-    width: 30, height: 30, borderRadius: 15, borderWidth: 1, borderColor: "#cfe0f3",
+-    backgroundColor: "#eef4fb", alignItems: "center", justifyContent: "center",
++    width: 32, height: 32, borderRadius: 16,
++    backgroundColor: "rgba(255,255,255,0.14)", alignItems: "center", justifyContent: "center",
+   },
+-  ryStopBtn: { paddingVertical: 5, paddingHorizontal: 12, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.danger },
+-  ryStopBtnText: { color: colors.danger, fontWeight: "700", fontSize: 12 },
++  ryStopBtn: { paddingVertical: 6, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: "#F2453D" },
++  ryStopBtnText: { color: "#fff", fontWeight: "800", fontSize: 12 },
+   badgeRowInline: { flexDirection: "row", alignItems: "center", gap: 5 },
+   modeSwitch: {
+-    flexDirection: "row", marginTop: spacing.sm, borderRadius: radius.pill, borderWidth: 1,
+-    borderColor: colors.primary, overflow: "hidden",
++    flexDirection: "row", marginTop: spacing.md, borderRadius: radius.pill, padding: 3,
++    backgroundColor: "rgba(255,255,255,0.12)",
+   },
+-  modeBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingVertical: 7, backgroundColor: "#fff" },
+-  modeBtnActive: { backgroundColor: colors.primary },
+-  modeBtnText: { fontSize: 12.5, fontWeight: "600", color: colors.primary },
+-  modeBtnTextActive: { color: "#fff" },
++  modeBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingVertical: 8, borderRadius: radius.pill },
++  modeBtnActive: { backgroundColor: "#fff" },
++  modeBtnText: { fontSize: 12.5, fontWeight: "700", color: "#E4DAFF" },
++  modeBtnTextActive: { color: "#2A0E5C" },
+   ryRedBanner: {
+     flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#F2453D",
+     borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: spacing.sm,
+@@ -3589,18 +3673,78 @@ const styles = StyleSheet.create({
+     borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm,
+   },
+   ryLoadingText: { fontSize: 13, color: colors.textMuted },
++  // REDESIGN ("LIVE NOW" card): black card, lime live pill, a progress
++  // line with a glowing dot for how far along the reported route it is.
+   ryStatusCard: {
+-    flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fff",
+-    borderRadius: 10, borderWidth: 1, borderColor: "#dbe6f5", paddingVertical: 12, paddingHorizontal: 12,
++    backgroundColor: "#111214", borderRadius: 22, padding: spacing.lg,
+     marginTop: spacing.sm, marginBottom: spacing.sm,
+-    shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 4, shadowOffset: { width: 0, height: 1 }, elevation: 1,
++    shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 5,
+   },
+   ryStatusIcon: {
+     width: 40, height: 40, borderRadius: 20, backgroundColor: colors.primary,
+     alignItems: "center", justifyContent: "center",
+   },
+-  ryStatusText: { fontSize: 15, fontWeight: "700", color: colors.text, lineHeight: 20 },
+-  ryStatusSub: { fontSize: 12.5, color: colors.textMuted, marginTop: 2 },
++  ryStatusText: { fontSize: 20, fontWeight: "800", color: "#fff", lineHeight: 26, marginTop: spacing.sm },
++  ryStatusSub: { fontSize: 13, color: "#A8ACB5", marginTop: 3 },
++  pxLiveTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
++  pxLivePill: {
++    flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "#C6F432",
++    borderRadius: radius.pill, paddingVertical: 4, paddingHorizontal: 10,
++  },
++  pxLivePillText: { fontSize: 11, fontWeight: "900", color: "#111", letterSpacing: 0.5 },
++  pxLiveTrainNo: { fontSize: 12, color: "#A8ACB5", fontWeight: "700" },
++  pxProgressWrap: { marginTop: spacing.lg, height: 34, justifyContent: "flex-start" },
++  pxProgressTrack: { position: "absolute", top: 6, left: 0, right: 0, height: 4, borderRadius: 2, backgroundColor: "#34363C" },
++  pxProgressFill: { position: "absolute", top: 6, left: 0, height: 4, borderRadius: 2, backgroundColor: "#C6F432" },
++  pxProgressDot: {
++    position: "absolute", top: 0, marginLeft: -8, width: 16, height: 16, borderRadius: 8,
++    backgroundColor: "#C6F432", borderWidth: 3, borderColor: "#111214",
++    shadowColor: "#C6F432", shadowOpacity: 0.9, shadowRadius: 8, shadowOffset: { width: 0, height: 0 }, elevation: 4,
++  },
++  pxProgressEnds: { position: "absolute", top: 18, left: 0, right: 0, flexDirection: "row", justifyContent: "space-between" },
++  pxProgressEndText: { fontSize: 11, color: "#A8ACB5", fontWeight: "700" },
++  pxLiveBottomRow: { flexDirection: "row", alignItems: "center" },
++
++  // REDESIGN (premium hero) — shown while no train is tracked.
++  pxHero: {
++    backgroundColor: "#E8F2FF", borderRadius: 22, padding: spacing.lg, paddingBottom: 0,
++    marginBottom: spacing.md, overflow: "hidden",
++  },
++  pxKicker: { fontSize: 11, fontWeight: "800", color: "#1565C0", letterSpacing: 2, marginBottom: 6 },
++  pxHeroTitle: { fontSize: 26, fontWeight: "800", color: "#0B1F4B", lineHeight: 32 },
++  pxHeroSub: { fontSize: 13, color: colors.textMuted, marginTop: 6, lineHeight: 18 },
++  pxTrain: { marginTop: spacing.lg, marginLeft: 24, marginRight: -30 },
++  pxTrainBody: {
++    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#fff",
++    borderTopLeftRadius: 10, borderTopRightRadius: 60, borderBottomRightRadius: 30,
++    paddingVertical: 12, paddingLeft: 16, paddingRight: 40,
++    borderWidth: 1.5, borderColor: "#C9DBF5",
++  },
++  pxTrainWindow: { width: 30, height: 12, borderRadius: 3, backgroundColor: "#8EC5FF" },
++  pxTrainNose: { width: 40, height: 16, borderTopRightRadius: 16, backgroundColor: "#0B1F4B", marginLeft: 4 },
++  pxTrainStripe: { height: 5, backgroundColor: "#1565C0", marginTop: -14, marginHorizontal: 2, borderRadius: 3 },
++  pxTrainStripeOrange: { height: 3, backgroundColor: "#F59E0B", marginTop: 3, marginHorizontal: 2, marginBottom: 10, borderRadius: 2 },
++  pxTrack: { height: 4, backgroundColor: "#B7C6DB", marginHorizontal: -spacing.lg },
++  pxFormCard: {
++    backgroundColor: "#fff", borderRadius: 22, padding: spacing.lg, marginBottom: spacing.md,
++    shadowColor: "#0B3D91", shadowOpacity: 0.08, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 3,
++  },
++  pxFormTitle: { fontSize: 17, fontWeight: "800", color: colors.text, marginBottom: spacing.md },
++  pxStartBtn: {
++    backgroundColor: "#F59E0B", shadowColor: "#F59E0B",
++  },
++  pxSettingsCard: {
++    backgroundColor: "#fff", borderRadius: 20, padding: spacing.lg, paddingTop: spacing.md, marginBottom: spacing.md,
++    shadowColor: "#0B3D91", shadowOpacity: 0.06, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2,
++  },
++  pxSettingsTitle: { fontSize: 13, fontWeight: "800", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 1 },
++  pxTiles: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 10, marginTop: spacing.sm, marginBottom: spacing.xs },
++  pxTile: {
++    width: "48.5%", borderRadius: 18, padding: spacing.md, minHeight: 84, justifyContent: "flex-end",
++    shadowColor: "#000", shadowOpacity: 0.12, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 3,
++  },
++  pxTileTitle: { color: "#fff", fontSize: 15, fontWeight: "800", marginTop: spacing.sm },
++  pxTileSub: { color: "rgba(255,255,255,0.8)", fontSize: 11, fontWeight: "600", marginTop: 2 },
+   tlGpsBadge: { borderColor: colors.accent, backgroundColor: "#FFF4E5" },
+   tlPredictedMuted: { fontSize: 10.5, color: colors.textMuted, marginTop: 2 },
+   askBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center", padding: 24 },
