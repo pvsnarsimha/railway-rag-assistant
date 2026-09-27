@@ -74,21 +74,72 @@ export default function HomeScreen({ navigation }) {
     navigation.getParent()?.navigate(key);
   }
 
+  // Greeting follows the phone's own clock — display only.
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
       <ScreenLanguageBar
+        style={styles.langBar}
         getSpeech={() => [
           "Train Enquiry Center",
-          "Real-time status, schedules, availability and fares.",
-          "Options on this screen: " + TILES.map((x) => x.label.replace(/\n/g, " ")).join(", "),
-          "Track any train live.",
+          "Where to today? Search trains between stations.",
+          "Quick services: " + TILES.map((x) => x.label.replace(/\n/g, " ")).join(", "),
+          "AI delay prediction. Know delays before you leave.",
+          "Ask anything about your train journey.",
         ]}
       />
-      <View style={styles.heroBanner}>
-        <Text style={styles.heroTitle}>{t("Train Enquiry Center")}</Text>
+
+      {/* Blue hero with a rounded bottom edge; the search card below
+          overlaps it, like the reference home-screen design. */}
+      <View style={styles.hero}>
+        <View style={styles.heroGlow} pointerEvents="none" />
+        <Text style={styles.heroGreeting}>{t(greeting)} 👋</Text>
+        <Text style={styles.heroTitle}>{t("Where to today?")}</Text>
         <Text style={styles.heroSubtitle}>{t("Real-time status, schedules, availability and fares — no fabricated data, ever.")}</Text>
       </View>
 
+      {/* Search card — a shortcut into the existing Trains Between Stations
+          screen (the From/To/date/class form itself lives there). */}
+      <TouchableOpacity style={styles.searchCard} activeOpacity={0.9} onPress={() => openTile("TrainsBetween")}>
+        <View style={styles.searchRow}>
+          <View style={[styles.searchDot, { borderColor: colors.primary }]} />
+          <View style={styles.searchRowText}>
+            <Text style={styles.searchLabel}>{t("From")}</Text>
+            <Text style={styles.searchValue}>{t("Choose station")}</Text>
+          </View>
+        </View>
+        <View style={styles.searchDividerRow}>
+          <View style={styles.searchDivider} />
+          <View style={styles.swapCircle}>
+            <Ionicons name="swap-vertical" size={16} color={colors.textInverse} />
+          </View>
+        </View>
+        <View style={styles.searchRow}>
+          <Ionicons name="location" size={16} color={colors.orange} style={styles.searchPin} />
+          <View style={styles.searchRowText}>
+            <Text style={styles.searchLabel}>{t("To")}</Text>
+            <Text style={styles.searchValue}>{t("Choose station")}</Text>
+          </View>
+        </View>
+        <View style={styles.searchChipRow}>
+          <View style={styles.searchChipBlue}>
+            <Ionicons name="calendar-outline" size={13} color={colors.primary} />
+            <Text style={styles.searchChipBlueText}>{t("Any date")}</Text>
+          </View>
+          <View style={styles.searchChipGrey}>
+            <Text style={styles.searchChipGreyText}>{t("All Classes")}</Text>
+            <Ionicons name="chevron-down" size={12} color={colors.text} />
+          </View>
+        </View>
+        <View style={styles.searchBtn}>
+          <Text style={styles.searchBtnText}>{t("Search Trains")}</Text>
+          <Ionicons name="arrow-forward" size={16} color={colors.textInverse} />
+        </View>
+      </TouchableOpacity>
+
+      <Text style={styles.sectionTitle}>{t("Quick Services")}</Text>
       <View style={styles.grid}>
         {TILES.map((tile) => (
           <TouchableOpacity key={tile.key} style={styles.tile} onPress={() => openTile(tile.key)} activeOpacity={0.75}>
@@ -100,22 +151,48 @@ export default function HomeScreen({ navigation }) {
         ))}
       </View>
 
+      {/* Same destination as before (Live Tracking tab, which carries the
+          GPS position + ML delay prediction). */}
       <TouchableOpacity style={styles.promoCard} activeOpacity={0.85} onPress={() => navigation.getParent()?.navigate("Track")}>
+        <View style={styles.promoGlow} pointerEvents="none" />
+        <View style={styles.promoTextWrap}>
+          <Text style={styles.promoKicker}>{t("AI Delay Prediction")}</Text>
+          <Text style={styles.promoTitle}>{t("Know delays before you leave")}</Text>
+          <Text style={styles.promoSubtitle}>{t("Real GPS position + station-by-station ML delay prediction, updated every few seconds.")}</Text>
+        </View>
         <View style={styles.promoIconWrap}>
           <Ionicons name="navigate-circle" size={30} color={colors.textInverse} />
         </View>
-        <View style={styles.promoTextWrap}>
-          <Text style={styles.promoTitle}>{t("Track any train live")}</Text>
-          <Text style={styles.promoSubtitle}>{t("Real GPS position + station-by-station ML delay prediction, updated every few seconds.")}</Text>
-        </View>
-        <Ionicons name="chevron-forward" size={20} color={colors.textInverse} style={{ opacity: 0.85 }} />
       </TouchableOpacity>
 
-      <Text style={styles.sectionLabel}>{t("Quick Launch")}</Text>
+      {/* Railway Assistant shortcut — examples show what can be asked;
+          tapping opens the existing chat tab. */}
+      <TouchableOpacity style={styles.askCard} activeOpacity={0.85} onPress={() => openQuickLaunch("Chat")}>
+        <View style={styles.askHeadRow}>
+          <Text style={styles.askSpark}>✨</Text>
+          <Text style={styles.askTitle}>{t("Ask anything about your train journey")}</Text>
+        </View>
+        <Text style={styles.askExample}>“{t("Is 12785 running late today?")}”</Text>
+        <View style={styles.askChipRow}>
+          {["Platform no.?", "PNR status", "Trains to Hyderabad"].map((c) => (
+            <View key={c} style={styles.askChip}>
+              <Text style={styles.askChipText}>{t(c)}</Text>
+            </View>
+          ))}
+        </View>
+        <View style={styles.askCta}>
+          <Text style={styles.askCtaText}>{t("Ask the assistant")}</Text>
+          <Ionicons name="arrow-forward" size={14} color="#5B4BDB" />
+        </View>
+      </TouchableOpacity>
+
+      <Text style={styles.sectionTitle}>{t("Quick Launch")}</Text>
       <View style={styles.quickRow}>
         {QUICK_LAUNCH.map((item) => (
           <TouchableOpacity key={item.key} style={styles.quickItem} onPress={() => openQuickLaunch(item.key)} activeOpacity={0.75}>
-            <Ionicons name={item.icon} size={22} color={colors.primary} />
+            <View style={styles.quickIconWrap}>
+              <Ionicons name={item.icon} size={22} color={colors.primary} />
+            </View>
             <Text style={styles.quickLabel}>{t(item.label)}</Text>
           </TouchableOpacity>
         ))}
@@ -128,80 +205,162 @@ export default function HomeScreen({ navigation }) {
   );
 }
 
-const TILE_WIDTH = "23%";
+const CARD_SHADOW = {
+  shadowColor: "#0B3D91",
+  shadowOpacity: 0.08,
+  shadowRadius: 14,
+  shadowOffset: { width: 0, height: 6 },
+  elevation: 3,
+};
+const GUTTER = spacing.lg;
 
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  content: { padding: spacing.lg, paddingBottom: spacing.xl },
-  heroBanner: {
+  content: { paddingBottom: spacing.xl },
+  langBar: { paddingHorizontal: GUTTER, paddingTop: spacing.md, marginBottom: spacing.md },
+
+  // --- hero ---
+  hero: {
     backgroundColor: colors.primary,
-    borderRadius: radius.lg,
-    padding: spacing.lg,
-    marginBottom: spacing.lg,
+    paddingHorizontal: GUTTER + 4,
+    paddingTop: spacing.lg,
+    paddingBottom: 64, // room for the overlapping search card
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+    overflow: "hidden",
   },
-  heroTitle: { color: colors.textInverse, fontSize: 19, fontWeight: "700", marginBottom: 4 },
-  heroSubtitle: { color: colors.textInverse, opacity: 0.85, fontSize: 12, lineHeight: 17 },
+  heroGlow: {
+    position: "absolute", top: -90, right: -70, width: 240, height: 240, borderRadius: 120,
+    backgroundColor: "#1467D1", opacity: 0.55,
+  },
+  heroGreeting: { color: "#CFE0FF", fontSize: 13, fontWeight: "600", marginBottom: 2 },
+  heroTitle: { color: colors.textInverse, fontSize: 26, fontWeight: "800", letterSpacing: 0.2, marginBottom: 6 },
+  heroSubtitle: { color: colors.textInverse, opacity: 0.8, fontSize: 12, lineHeight: 17, maxWidth: "92%" },
+
+  // --- search card ---
+  searchCard: {
+    backgroundColor: colors.card,
+    borderRadius: 22,
+    marginHorizontal: GUTTER,
+    marginTop: -46,
+    padding: spacing.lg,
+    ...CARD_SHADOW,
+  },
+  searchRow: { flexDirection: "row", alignItems: "center", gap: spacing.md },
+  searchDot: { width: 14, height: 14, borderRadius: 7, borderWidth: 3, marginHorizontal: 1 },
+  searchPin: { width: 16 },
+  searchRowText: { flex: 1 },
+  searchLabel: { fontSize: 10, fontWeight: "800", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 1 },
+  searchValue: { fontSize: 17, fontWeight: "800", color: colors.text, marginTop: 1 },
+  searchDividerRow: { flexDirection: "row", alignItems: "center", marginVertical: 6, paddingLeft: 30 },
+  searchDivider: { flex: 1, height: 1, backgroundColor: colors.border },
+  swapCircle: {
+    width: 34, height: 34, borderRadius: 17, backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center", marginLeft: spacing.sm,
+  },
+  searchChipRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: spacing.md },
+  searchChipBlue: {
+    flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#E9F1FF",
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: radius.pill,
+  },
+  searchChipBlueText: { fontSize: 12, fontWeight: "700", color: colors.primary },
+  searchChipGrey: {
+    flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "#F1F3F7",
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: radius.pill,
+  },
+  searchChipGreyText: { fontSize: 12, fontWeight: "700", color: colors.text },
+  searchBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    backgroundColor: colors.orange, borderRadius: radius.md + 2, paddingVertical: 14, marginTop: spacing.md,
+    shadowColor: colors.orange, shadowOpacity: 0.35, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 3,
+  },
+  searchBtnText: { color: colors.textInverse, fontSize: 16, fontWeight: "800", letterSpacing: 0.3 },
+
+  sectionTitle: {
+    fontSize: 17, fontWeight: "800", color: colors.text,
+    marginTop: spacing.xl, marginBottom: spacing.md, paddingHorizontal: GUTTER + 2,
+  },
+
+  // --- quick services grid ---
   grid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    justifyContent: "space-between",
-    backgroundColor: colors.card,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.md,
-    // Subtle elevation so the enquiry-center card reads as a distinct,
-    // "raised" surface — the same visual language RailYatri's own home
-    // screen uses for its Train Enquiry Center panel.
-    shadowColor: "#0B3D91",
-    shadowOpacity: 0.06,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
+    justifyContent: "flex-start",
+    paddingHorizontal: GUTTER - 4,
   },
   tile: {
-    width: TILE_WIDTH,
+    width: "33.333%", // 9 tiles → a neat 3×3 grid
     alignItems: "center",
-    paddingVertical: spacing.md,
-    marginBottom: spacing.sm,
+    paddingHorizontal: 4,
+    marginBottom: spacing.md,
   },
   tileIconWrap: {
-    width: 52, height: 52, borderRadius: 26,
+    width: 58, height: 58, borderRadius: 18,
     alignItems: "center", justifyContent: "center",
     marginBottom: 6,
   },
-  tileLabel: { fontSize: 11, fontWeight: "600", color: colors.text, textAlign: "center" },
+  tileLabel: { fontSize: 11, fontWeight: "700", color: colors.text, textAlign: "center", lineHeight: 14 },
+
+  // --- AI delay prediction promo ---
   promoCard: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: colors.primaryDark,
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    marginTop: spacing.lg,
+    backgroundColor: "#0F8A7E",
+    borderRadius: 20,
+    padding: spacing.lg,
+    marginHorizontal: GUTTER,
+    marginTop: spacing.sm,
     gap: spacing.md,
+    overflow: "hidden",
+  },
+  promoGlow: {
+    position: "absolute", top: -60, left: -40, width: 200, height: 160, borderRadius: 100,
+    backgroundColor: "#16A394", opacity: 0.8,
   },
   promoIconWrap: {
-    width: 48, height: 48, borderRadius: 24,
-    backgroundColor: "rgba(255,255,255,0.15)",
+    width: 52, height: 52, borderRadius: 16,
+    backgroundColor: "rgba(255,255,255,0.18)",
     alignItems: "center", justifyContent: "center",
   },
   promoTextWrap: { flex: 1 },
-  promoTitle: { color: colors.textInverse, fontSize: 14, fontWeight: "700", marginBottom: 2 },
+  promoKicker: { color: "#C9F2EC", fontSize: 11, fontWeight: "700", marginBottom: 2 },
+  promoTitle: { color: colors.textInverse, fontSize: 16, fontWeight: "800", marginBottom: 4 },
   promoSubtitle: { color: colors.textInverse, opacity: 0.85, fontSize: 11, lineHeight: 15 },
-  sectionLabel: {
-    fontSize: 11, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase",
-    letterSpacing: 0.4, marginTop: spacing.lg, marginBottom: spacing.sm, paddingHorizontal: 2,
+
+  // --- ask the assistant ---
+  askCard: {
+    backgroundColor: colors.card,
+    borderRadius: 20,
+    padding: spacing.lg,
+    marginHorizontal: GUTTER,
+    marginTop: spacing.md,
+    ...CARD_SHADOW,
   },
+  askHeadRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 },
+  askSpark: { fontSize: 18 },
+  askTitle: { flex: 1, fontSize: 15, fontWeight: "800", color: colors.text },
+  askExample: { fontSize: 13, color: colors.textMuted, marginBottom: spacing.sm },
+  askChipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  askChip: { backgroundColor: "#EEF0FF", paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill },
+  askChipText: { fontSize: 12, fontWeight: "700", color: "#5B4BDB" },
+  askCta: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: spacing.md },
+  askCtaText: { fontSize: 13, fontWeight: "800", color: "#5B4BDB" },
+
+  // --- quick launch ---
   quickRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     backgroundColor: colors.card,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
+    borderRadius: 20,
+    marginHorizontal: GUTTER,
     paddingVertical: spacing.md,
+    ...CARD_SHADOW,
   },
-  quickItem: { flex: 1, alignItems: "center", gap: 4 },
-  quickLabel: { fontSize: 10, fontWeight: "600", color: colors.textMuted, textAlign: "center" },
-  footNote: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: spacing.lg, paddingHorizontal: spacing.md },
+  quickItem: { flex: 1, alignItems: "center", gap: 6 },
+  quickIconWrap: {
+    width: 42, height: 42, borderRadius: 14, backgroundColor: "#E9F1FF",
+    alignItems: "center", justifyContent: "center",
+  },
+  quickLabel: { fontSize: 11, fontWeight: "700", color: colors.textMuted, textAlign: "center" },
+  footNote: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: spacing.lg, paddingHorizontal: spacing.xl },
 });
