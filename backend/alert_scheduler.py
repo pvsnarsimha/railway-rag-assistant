@@ -708,6 +708,13 @@ def run_tracking_check_once(status_fn: Callable[[str, Optional[str]], dict]) -> 
             last_alert is None or now - last_alert >= interval * 60 - _REPEAT_SLACK_SECONDS
         )
         silent_refresh = (not is_expo) and changed and interval > 0
+        if interval <= 0:
+            # "Off" means off: no status push at all, not even the final
+            # "Reached <destination>" one — the watch just retires quietly.
+            if final:
+                push_store.delete_tracking_watch_by_id(w["id"])
+                retired += 1
+            continue
         if not (interval_due or silent_refresh or final):
             continue
         alert = interval_due or final

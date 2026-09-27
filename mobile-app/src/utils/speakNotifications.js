@@ -115,8 +115,8 @@ export function speak(text, opts = {}) {
       loadNativeVoices().then((voices) => {
         const loc = lang === "en" ? "en-IN" : voiceLocaleFor(lang, voices);
         try {
-          if (loc) NativeSpeech.speak(t, { language: loc, rate: 0.95 });
-          else NativeSpeech.speak(english || t, { language: english ? "en-IN" : languageInfo(lang).tts, rate: 0.95 });
+          if (loc) NativeSpeech.speak(t, { language: loc, rate: 0.9 });
+          else NativeSpeech.speak(english || t, { language: english ? "en-IN" : languageInfo(lang).tts, rate: 0.9 });
         } catch (e) { /* ignore */ }
       });
       return true;
@@ -136,7 +136,7 @@ export function speak(text, opts = {}) {
       || voices.find((x) => prefix(x.lang) === p);
     if (v) u.voice = v;
     u.lang = (v && v.lang) || loc;
-    u.rate = 0.95;
+    u.rate = 0.9; // unhurried, like a station announcement
     window.speechSynthesis.speak(u);
     return true;
   } catch (e) {

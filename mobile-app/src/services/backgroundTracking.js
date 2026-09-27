@@ -13,11 +13,32 @@
 //      user presses Stop.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { registerPushToken, setPushLanguage, startBackgroundTracking, stopBackgroundTracking } from "../api/railwayApi";
+import { registerPushToken, setPushLanguage, setTrackingInterval, startBackgroundTracking, stopBackgroundTracking } from "../api/railwayApi";
 import { getLanguage, hasChosenLanguage, saveLanguage } from "../utils/notifyLanguage";
 import { registerForPushNotifications, refreshWebPushToken } from "./pushNotifications";
 
 const PUSH_TOKEN_KEY = "moreTools.pushToken"; // shared with the rest of the app
+// Earlier push tokens of this device. Web push tokens rotate; a tracking
+// watch the server still holds under an old token must still obey "Off"
+// and "Stop" (BUGFIX: tapping Off kept the notifications coming).
+const PAST_TOKENS_KEY = "moreTools.pastPushTokens";
+
+async function loadPastTokens() {
+  try {
+    const v = JSON.parse((await AsyncStorage.getItem(PAST_TOKENS_KEY)) || "[]");
+    return Array.isArray(v) ? v.filter(Boolean) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+async function rememberPastToken(token) {
+  if (!token) return;
+  const list = (await loadPastTokens()).filter((t) => t !== token);
+  list.unshift(token);
+  try { await AsyncStorage.setItem(PAST_TOKENS_KEY, JSON.stringify(list.slice(0, 5))); } catch (e) { /* ignore */ }
+}
+
 export const ACTIVE_TRACK_KEY = "liveTracking.active"; // web screen: one train
 export const NATIVE_TRACKED_KEY = "liveTracking.nativeTracked"; // native screen: list
 export const STATUS_EVERY_KEY = "liveTracking.statusEveryMinutes"; // "notify me every N min" (0 = off)
@@ -81,13 +102,13 @@ async function getToken(apiBaseUrl, prompt) {
   let token = null;
   let platform = null;
   let reason = null;
+  let stored = null;
+  try { stored = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
   try {
     const fresh = await refreshWebPushToken(); // web: current (possibly rotated) token, no prompt
     if (fresh && fresh.token) { token = fresh.token; platform = fresh.platform; }
   } catch (e) { /* ignore */ }
-  if (!token) {
-    try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
-  }
+  if (!token) token = stored;
   if (!token && prompt) {
     const r = await registerForPushNotifications();
     token = r.token || null;
@@ -95,6 +116,7 @@ async function getToken(apiBaseUrl, prompt) {
     reason = r.reason || null;
   }
   if (token) {
+    if (stored && stored !== token) await rememberPastToken(stored);
     try { await AsyncStorage.setItem(PUSH_TOKEN_KEY, token); } catch (e) { /* ignore */ }
     try { await registerPushToken(apiBaseUrl, token, platform, hasChosenLanguage() ? getLanguage() : null); } catch (e) { /* the tracking call self-registers too */ }
   }
@@ -121,8 +143,34 @@ export async function enableBackgroundTracking(apiBaseUrl, { trainNumber, date, 
 export async function disableBackgroundTracking(apiBaseUrl, { trainNumber, date } = {}) {
   let token = null;
   try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
-  if (!token) return;
-  try { await stopBackgroundTracking(apiBaseUrl, token, { trainNumber, date }); } catch (e) { /* best-effort */ }
+  const tokens = [token, ...(await loadPastTokens())].filter(Boolean);
+  // Stop removes the train from EVERY token this device has had, and for
+  // any run date (a leftover row for another date kept notifying).
+  await Promise.all(tokens.map((t) => stopBackgroundTracking(apiBaseUrl, t, { trainNumber }).catch(() => {})));
+}
+
+/**
+ * "Notify me every N min" / Off, applied on the server to every train this
+ * device tracks (under its current and earlier push tokens). Never prompts,
+ * never throws. Returns true when the server accepted it.
+ */
+export async function applyStatusEveryOnServer(apiBaseUrl, minutes) {
+  let token = null;
+  try {
+    const fresh = await refreshWebPushToken();
+    if (fresh && fresh.token) token = fresh.token;
+  } catch (e) { /* ignore */ }
+  let stored = null;
+  try { stored = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
+  if (!token) token = stored;
+  if (!token) return false;
+  const past = (await loadPastTokens()).concat(stored && stored !== token ? [stored] : []).filter((t) => t !== token);
+  try {
+    await setTrackingInterval(apiBaseUrl, token, past, minutes);
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 /**

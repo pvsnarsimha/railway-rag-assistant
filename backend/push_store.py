@@ -606,12 +606,36 @@ def upsert_tracking_watch(token: str, train_number: str, date: Optional[str],
             (token, train_number, date or None, source or None, dest or None, now,
              10 if interval_minutes is None else max(0, int(interval_minutes)), interval_minutes),
         )
+        if interval_minutes is not None:
+            # BUGFIX ("Off" didn't stop the notifications): the same train
+            # can have more than one row for this device (a blank-date row
+            # plus a dated one, or yesterday's run). Updating only the row
+            # for this date left the others pushing every 10 min.
+            conn.execute(
+                "UPDATE tracking_watches SET interval_minutes = ? WHERE token = ? AND train_number = ?",
+                (max(0, int(interval_minutes)), token, train_number),
+            )
         # Keep only the most recent few per device.
         rows = conn.execute(
             "SELECT id FROM tracking_watches WHERE token = ? ORDER BY created_at DESC", (token,)
         ).fetchall()
         for r in rows[MAX_TRACKING_PER_DEVICE:]:
             conn.execute("DELETE FROM tracking_watches WHERE id = ?", (r["id"],))
+
+
+def set_tracking_interval(tokens: List[str], interval_minutes: int) -> int:
+    """"Notify me every N min" (0 = off) for EVERY train this device is
+    tracking. `tokens` = the device's current push token plus any it had
+    before (web push tokens rotate; a watch left under an old token would
+    otherwise keep notifying after the user tapped Off). Returns rows changed."""
+    tokens = [t.strip() for t in (tokens or []) if t and t.strip()]
+    if not tokens:
+        return 0
+    n = max(0, min(720, int(interval_minutes)))
+    marks = ",".join("?" for _ in tokens)
+    with _connect() as conn:
+        cur = conn.execute(f"UPDATE tracking_watches SET interval_minutes = ? WHERE token IN ({marks})", (n, *tokens))
+        return cur.rowcount
 
 
 def delete_tracking_watch(token: str, train_number: Optional[str] = None, date: Optional[str] = None) -> int:
