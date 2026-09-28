@@ -44,7 +44,7 @@ const TILES = [
 // of Tools' screens now reachable from this grid, the Tools tab itself is
 // gone from App.js — one less item cluttering the bottom bar for
 // something a passenger would only reach for occasionally.
-// No "Trains B/W Stations" tile: the "Plan my journey" search card above
+// No "Trains B/W Stations" tile: the "Plan your journey" search card above
 // the grid already opens that screen, so a tile would be a duplicate.
 
 const QUICK_LAUNCH = [
@@ -85,7 +85,7 @@ export default function HomeScreen({ navigation }) {
         style={styles.langBar}
         getSpeech={() => [
           "Train Enquiry Center",
-          "Plan my journey. Search trains between stations.",
+          "Plan your journey. Search trains between stations.",
           "Quick services: " + TILES.map((x) => x.label.replace(/\n/g, " ")).join(", "),
           "AI delay prediction. Know delays before you leave.",
           "Ask anything about your train journey.",
@@ -97,7 +97,7 @@ export default function HomeScreen({ navigation }) {
       <View style={styles.hero}>
         <View style={styles.heroGlow} pointerEvents="none" />
         <Text style={styles.heroGreeting}>{t(greeting)} 👋</Text>
-        <Text style={styles.heroTitle}>{t("Plan my journey")}</Text>
+        <Text style={styles.heroTitle}>{t("Plan your journey")}</Text>
         <Text style={styles.heroSubtitle}>{t("Real-time status, schedules, availability and fares — no fabricated data, ever.")}</Text>
       </View>
 

@@ -606,6 +606,7 @@ def station_map(station_code: str, platform: Optional[int] = None, train_number:
             "arrives_in_minutes": located["arrives_in_minutes"],
             "expected_arrival": located["expected_arrival"],
             "platform_confirmed": located["platform_confirmed"],
+            "rake": located.get("rake") or [],
         } if located else None),
         "concourse_facilities": concourse,
         "facilities_confirmed": known,
