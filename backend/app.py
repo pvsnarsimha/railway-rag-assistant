@@ -8559,6 +8559,25 @@ def home_page(request: Request):
     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
+# FIX (redesigns "not showing" after a deploy): StaticFiles sends no
+# Cache-Control, so browsers heuristically cached /mobile-app/index.html
+# (and the offline service worker's fetch() went through that same HTTP
+# cache) — phones kept loading the OLD index.html, which points at the OLD
+# hashed JS bundle, so new screens never appeared. The page, the service
+# worker and metadata now always revalidate; the content-hashed bundles
+# under _expo/static never change, so they can be cached forever.
+@app.middleware("http")
+async def _mobile_web_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/mobile-app"):
+        if path.startswith("/mobile-app/_expo/static/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 if os.path.isdir(MOBILE_WEB_DIR):
     app.mount("/mobile-app", StaticFiles(directory=MOBILE_WEB_DIR, html=True), name="mobile_web")
 

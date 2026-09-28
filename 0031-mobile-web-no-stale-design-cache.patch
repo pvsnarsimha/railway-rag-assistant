@@ -1,0 +1,75 @@
+diff --git a/backend/app.py b/backend/app.py
+index f9cdcc2..1401ba0 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -8559,6 +8559,25 @@ def home_page(request: Request):
+     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+ 
+ 
++# FIX (redesigns "not showing" after a deploy): StaticFiles sends no
++# Cache-Control, so browsers heuristically cached /mobile-app/index.html
++# (and the offline service worker's fetch() went through that same HTTP
++# cache) — phones kept loading the OLD index.html, which points at the OLD
++# hashed JS bundle, so new screens never appeared. The page, the service
++# worker and metadata now always revalidate; the content-hashed bundles
++# under _expo/static never change, so they can be cached forever.
++@app.middleware("http")
++async def _mobile_web_cache_headers(request: Request, call_next):
++    response = await call_next(request)
++    path = request.url.path
++    if path == "/" or path.startswith("/mobile-app"):
++        if path.startswith("/mobile-app/_expo/static/"):
++            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
++        else:
++            response.headers["Cache-Control"] = "no-cache"
++    return response
++
++
+ if os.path.isdir(MOBILE_WEB_DIR):
+     app.mount("/mobile-app", StaticFiles(directory=MOBILE_WEB_DIR, html=True), name="mobile_web")
+ 
+diff --git a/mobile-app/public/firebase-messaging-sw.js b/mobile-app/public/firebase-messaging-sw.js
+index 32b5b55..8264309 100644
+--- a/mobile-app/public/firebase-messaging-sw.js
++++ b/mobile-app/public/firebase-messaging-sw.js
+@@ -87,7 +87,7 @@ if (messaging) messaging.onBackgroundMessage((payload) => {
+ // Live Tracking can still open on a train with no mobile data. Network-
+ // first: online you always get the latest deploy; the cache is only the
+ // fallback. API calls (/api, /ws) are never cached.
+-var SHELL_CACHE = "railway-shell-v1";
++var SHELL_CACHE = "railway-shell-v2";
+ self.addEventListener("install", function (event) {
+   self.skipWaiting();
+   event.waitUntil(
+@@ -95,7 +95,14 @@ self.addEventListener("install", function (event) {
+   );
+ });
+ self.addEventListener("activate", function (event) {
+-  event.waitUntil(self.clients.claim());
++  // Drop older shell caches (they may hold a stale index.html).
++  event.waitUntil(
++    caches.keys().then(function (keys) {
++      return Promise.all(keys.filter(function (k) {
++        return k.indexOf("railway-shell-") === 0 && k !== SHELL_CACHE;
++      }).map(function (k) { return caches.delete(k); }));
++    }).then(function () { return self.clients.claim(); })
++  );
+ });
+ self.addEventListener("fetch", function (event) {
+   var req = event.request;
+@@ -106,8 +113,14 @@ self.addEventListener("fetch", function (event) {
+   var p = url.pathname;
+   var cacheable = p.indexOf("/mobile-app/") === 0 || p.indexOf("/assets/") === 0;
+   if (!cacheable || p.indexOf("/api/") === 0 || p.indexOf("/ws/") === 0) return;
++  // Pages always revalidate with the server (never the browser's HTTP
++  // cache), so a new deploy's index.html -> new JS bundle shows up on the
++  // next open instead of the old design lingering.
++  var net = req.mode === "navigate" || p === "/mobile-app/" || /\.html$/.test(p)
++    ? fetch(url.href, { cache: "no-cache", credentials: "same-origin" })
++    : fetch(req);
+   event.respondWith(
+-    fetch(req).then(function (res) {
++    net.then(function (res) {
+       if (res && res.ok) {
+         var copy = res.clone();
+         caches.open(SHELL_CACHE).then(function (c) { c.put(req, copy); });
