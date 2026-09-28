@@ -33,7 +33,6 @@ const TILES = [
   { key: "PnrStatus", label: "PNR\nStatus", icon: "ticket", bg: "#FFF1E3", fg: "#D97A1B" },
   { key: "TrainSchedule", label: "Time\nTable", icon: "time", bg: "#E8F8F0", fg: "#1E8E3E" },
   { key: "SeatAvailability", label: "Seat\nAvailability", icon: "grid", bg: "#F3EAFB", fg: "#7B2FBF" },
-  { key: "TrainsBetween", label: "Trains B/W\nStations", icon: "swap-horizontal", bg: "#E9F3FF", fg: "#1467D1" },
   { key: "StationSearch", label: "Station\nSearch", icon: "search", bg: "#FFF1E3", fg: "#D97A1B" },
   { key: "FareEnquiry", label: "Fare\nCalculator", icon: "calculator", bg: "#E8F8F0", fg: "#1E8E3E" },
   { key: "LiveTracking", label: "Live GPS\nTracking", icon: "navigate-circle", bg: "#FDECEC", fg: "#D93025" },
@@ -45,6 +44,8 @@ const TILES = [
 // of Tools' screens now reachable from this grid, the Tools tab itself is
 // gone from App.js — one less item cluttering the bottom bar for
 // something a passenger would only reach for occasionally.
+// No "Trains B/W Stations" tile: the "Plan my journey" search card above
+// the grid already opens that screen, so a tile would be a duplicate.
 
 const QUICK_LAUNCH = [
   { key: "Chat", label: "Assistant", icon: "chatbubble-ellipses-outline" },
@@ -84,7 +85,7 @@ export default function HomeScreen({ navigation }) {
         style={styles.langBar}
         getSpeech={() => [
           "Train Enquiry Center",
-          "Where to today? Search trains between stations.",
+          "Plan my journey. Search trains between stations.",
           "Quick services: " + TILES.map((x) => x.label.replace(/\n/g, " ")).join(", "),
           "AI delay prediction. Know delays before you leave.",
           "Ask anything about your train journey.",
@@ -96,7 +97,7 @@ export default function HomeScreen({ navigation }) {
       <View style={styles.hero}>
         <View style={styles.heroGlow} pointerEvents="none" />
         <Text style={styles.heroGreeting}>{t(greeting)} 👋</Text>
-        <Text style={styles.heroTitle}>{t("Where to today?")}</Text>
+        <Text style={styles.heroTitle}>{t("Plan my journey")}</Text>
         <Text style={styles.heroSubtitle}>{t("Real-time status, schedules, availability and fares — no fabricated data, ever.")}</Text>
       </View>
 
@@ -289,7 +290,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: GUTTER - 4,
   },
   tile: {
-    width: "33.333%", // 9 tiles → a neat 3×3 grid
+    width: "25%", // 8 tiles → a neat 4×2 grid
     alignItems: "center",
     paddingHorizontal: 4,
     marginBottom: spacing.md,
