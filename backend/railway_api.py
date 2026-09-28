@@ -206,9 +206,11 @@ def search_trains_between_stations(source_code: str, dest_code: str, date_ddmmyy
         raise RailwayAPIError(str(exc))
 
 
-@cached(ttl_seconds=300, prefix="live_at_station")
+@cached(ttl_seconds=60, prefix="live_at_station")
 def get_live_at_station(station_code: str, hours: int = 2) -> dict:
-    """Upcoming/passing trains at a station in the next `hours` (2, 4, or 8)."""
+    """Upcoming/passing trains at a station in the next `hours` (2, 4, or 8).
+    60s cache (was 300s): the Live Departures board refreshes every 30s, so
+    a 5-minute-old board would show stale platforms/delays."""
     return _call(f"/live-station/{station_code.upper()}", {"hours": hours})
 
 
