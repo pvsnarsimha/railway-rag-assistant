@@ -9,7 +9,7 @@ import { scheduleLocalAlarm, ensureLocalNotificationPermission } from "../../ser
 import {
   st, useTrip, ToolHeader, TripForm, Pill, CoachStrip, SectionLabel, Note, formatIn,
 } from "./stationShared";
-import { PlatformScene, CoachSeatMap } from "./stationScenes";
+import { PlatformScene, CoachSeatMap, CoachPositionScene } from "./stationScenes";
 
 const SEEN_KEY = "stationTools.platformSeen";
 const POLL_MS = 60 * 1000;
@@ -183,20 +183,22 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
     </View>
   );
 
+  const pickCoach = (code) => { const t = { ...trip, coach: code }; setTrip({ coach: code }); run(t, { quiet: true }); };
+
   const coachSection = data && (
     <View style={{ marginHorizontal: 16 }}>
       <Text style={styles.coachHead}>COACH POSITION · ENGINE → REAR</Text>
       {data.rake?.length ? (
         <>
-          <CoachStrip
-            rake={data.rake}
-            coach={coachLabel}
-            onPickCoach={(code) => { const t = { ...trip, coach: code }; setTrip({ coach: code }); run(t, { quiet: true }); }}
-          />
+          {isCoach ? (
+            <CoachPositionScene rake={data.rake} coach={coachLabel} onPickCoach={pickCoach} />
+          ) : (
+            <CoachStrip rake={data.rake} coach={coachLabel} onPickCoach={pickCoach} />
+          )}
           {coachLabel && data.coach_found_in_rake === false ? (
             <Text style={styles.warnText}>Coach {coachLabel} isn't in today's formation — tap your coach above.</Text>
           ) : !coachLabel ? (
-            <Text style={styles.hint}>Tap your coach to see where to stand.</Text>
+            <Text style={styles.hint}>Tap your coach to see where to stand{isCoach ? " and its seat layout" : ""}.</Text>
           ) : null}
         </>
       ) : (

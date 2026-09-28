@@ -5,6 +5,7 @@ import { Text } from "../../i18n/Localized";
 import { getStationMap } from "../../api/railwayApi";
 import { describeApiError } from "../../api/client";
 import { st, useTrip, ToolHeader, TripForm, Pill, Note, formatIn } from "./stationShared";
+import { PlatformScene } from "./stationScenes";
 
 const FACILITY = {
   booking: { icon: "🎫", label: "Booking" },
@@ -164,6 +165,23 @@ export default function StationNavigatorView({ apiBaseUrl, onBack, initialTarget
                 </TouchableOpacity>
               ))}
             </ScrollView>
+
+            {/* The platform as you'll see it on arrival: PF board, station
+                board, LED display and the train (when one was entered). */}
+            <PlatformScene
+              stationName={data.station_name}
+              stationCode={data.station}
+              platform={target}
+              trainNumber={data.train?.train_number}
+              trainName={data.train?.train_name}
+              time={data.train?.expected_arrival}
+              status={data.train
+                ? (data.train.arrives_in_minutes != null && data.train.arrives_in_minutes <= 0 && data.train.arrives_in_minutes > -5
+                  ? "Arriving" : data.train.arrives_in_minutes != null ? formatIn(data.train.arrives_in_minutes) : "Expected")
+                : "Welcome"}
+              rake={data.train?.rake}
+              coach={coachLabel}
+            />
 
             <View style={[styles.map, { height: mapH }]} onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
               {width > 0 && (

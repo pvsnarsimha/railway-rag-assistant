@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, StyleSheet, ScrollView, ActivityIndicator } from "react-native";
+import { View, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity } from "react-native";
 import Svg, {
   Rect, Circle, Line, Path, G, Defs, LinearGradient, RadialGradient, Stop, Text as SvgText,
 } from "react-native-svg";
@@ -174,8 +174,8 @@ export function PlatformScene({ stationName, stationCode, platform, trainNumber,
 
   const name = String(stationName || stationCode || "Station").toUpperCase();
   const nameSize = Math.min(50, Math.floor(520 / Math.max(name.length * 0.66, 1)));
-  const led1 = trimTo(`${trainNumber || ""} ${String(trainName || "").toUpperCase()}`.trim(), 19);
-  const led2 = `${time ? `EXP ${time}` : "EXP --:--"} PF ${platform || "-"}`;
+  const led1 = trainNumber ? trimTo(`${trainNumber} ${String(trainName || "").toUpperCase()}`.trim(), 19) : "NEXT TRAIN";
+  const led2 = `${time ? `EXP ${time} ` : ""}PF ${platform || "-"}`;
 
   return (
     <View style={styles.sceneWrap}>
@@ -265,6 +265,126 @@ export function PlatformScene({ stationName, stationCode, platform, trainNumber,
           ) : null}
         </G>
       </Svg>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Coach position board (Coach Position tool)
+// ---------------------------------------------------------------------------
+const SLOT = 100;
+const LEAD = 116; // room for the FOB stairs before the engine
+const SCENE_H = 360;
+
+function ccLook(code, cls, engine) {
+  if (engine) return { body: "#C8322B", stripe: "#F4E9D8", label: "#FFFFFF", win: "#DCE7F7" };
+  if (/^SLR|^EOG|^PC/i.test(code) || cls === "GEN" || cls === "OTHER") return { body: "#8B2E2E", stripe: "#F1E6D8", label: "#FFFFFF", win: "#DCE7F7" };
+  if (AC.has(cls)) return { body: "#ECEBE6", stripe: "#C62828", label: "#C62828", win: "#26324A", ac: true };
+  return { body: "#2354B0", stripe: "#EEF2FA", label: "#FFFFFF", win: "#DCE7F7" };
+}
+
+/**
+ * Station-style coach indicator: a numbered LED board over each coach
+ * position (01 ENG, 02 SLR, 03 GEN, 04 S1 …) with the train standing
+ * under the boards, as on Indian platforms. The rider's coach is lit up;
+ * tapping any coach selects it. Scrolls sideways for long rakes.
+ */
+export function CoachPositionScene({ rake, coach, onPickCoach }) {
+  const scrollRef = useRef(null);
+  const [viewW, setViewW] = useState(0);
+  const coaches = (rake || []).filter((c) => !isEngine(c));
+  const slots = [{ code: "ENG", engine: true }, ...coaches.map((c) => ({ code: String(c.code || "?"), category: c.category }))];
+  const mine = slots.findIndex((c, i) => i > 0 && c.code.toUpperCase() === String(coach || "").toUpperCase());
+  const W = LEAD + slots.length * SLOT + 16;
+
+  useEffect(() => {
+    if (mine < 0 || !viewW || !scrollRef.current) return;
+    const x = LEAD + mine * SLOT + SLOT / 2 - viewW / 2;
+    scrollRef.current.scrollTo({ x: Math.max(0, Math.min(x, W - viewW)), animated: false });
+  }, [mine, viewW, W]);
+
+  if (!coaches.length) return null;
+  return (
+    <View style={styles.cpWrap} onLayout={(e) => setViewW(e.nativeEvent.layout.width)}>
+      <ScrollView ref={scrollRef} horizontal showsHorizontalScrollIndicator={false}>
+        <View style={{ width: W, height: SCENE_H }}>
+          <Svg width={W} height={SCENE_H}>
+            <Rect x={0} y={0} width={W} height={SCENE_H} fill="#2F3452" />
+            <Rect x={0} y={0} width={W} height={34} fill="#46495A" />
+            <Rect x={0} y={34} width={W} height={6} fill="#9B2C2C" />
+            {/* track, yellow edge, tactile strip, platform */}
+            <Rect x={0} y={232} width={W} height={10} fill="#595448" />
+            <Line x1={0} y1={236} x2={W} y2={236} stroke="#9CA3AF" strokeWidth={2} />
+            <Rect x={0} y={244} width={W} height={8} fill="#F2C318" />
+            <Rect x={0} y={252} width={W} height={SCENE_H - 252} fill="#8C8378" />
+            <Rect x={0} y={260} width={W} height={12} fill="#D9B31E" />
+            {Array.from({ length: Math.ceil(W / 16) }).map((_, i) => (
+              <Circle key={i} cx={8 + i * 16} cy={266} r={1.8} fill="#A8871A" />
+            ))}
+            {/* FOB stairs */}
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Rect key={i} x={20} y={282 + i * 10} width={80} height={6} fill="#D6D3D1" />
+            ))}
+            <SvgText x={60} y={352} fontSize={11} fontFamily={FONT} fill="#F5F5F4" textAnchor="middle">From FOB</SvgText>
+
+            {slots.map((c, i) => {
+              const x = LEAD + i * SLOT;
+              const on = i === mine;
+              const cls = c.engine ? null : coachClass(c.code, c.category);
+              const look = ccLook(c.code, cls, c.engine);
+              const num = String(i + 1).padStart(2, "0");
+              return (
+                <G key={`${c.code}-${i}`}>
+                  <Line x1={x + 24} y1={40} x2={x + 24} y2={56} stroke="#1F2937" strokeWidth={3} />
+                  <Line x1={x + 76} y1={40} x2={x + 76} y2={56} stroke="#1F2937" strokeWidth={3} />
+                  <Rect x={x + 6} y={56} width={88} height={62} rx={4} fill="#0B0B0F" stroke={on ? "#FACC15" : "#374151"} strokeWidth={on ? 4 : 2} />
+                  <SvgText x={x + 50} y={76} fontSize={12} fontFamily="Courier New, monospace" fontWeight="bold" fill="#F87171" textAnchor="middle">{num}</SvgText>
+                  <SvgText x={x + 50} y={105} fontSize={c.code.length > 4 ? 16 : 22} fontFamily="Courier New, monospace" fontWeight="bold" fill={on ? "#FACC15" : "#F59E0B"} textAnchor="middle">{trimTo(c.code, 6)}</SvgText>
+
+                  {on ? <Rect x={x} y={140} width={SLOT - 2} height={94} rx={10} fill="none" stroke="#FACC15" strokeWidth={4} /> : null}
+                  {c.engine ? (
+                    <>
+                      <Path d={`M${x + 20} 148 H${x + 96} V222 H${x + 4} V166 Q${x + 4} 148 ${x + 20} 148 Z`} fill={look.body} />
+                      <Rect x={x + 10} y={154} width={22} height={20} rx={2} fill={look.win} />
+                      <Rect x={x + 4} y={188} width={92} height={7} fill={look.stripe} />
+                    </>
+                  ) : (
+                    <>
+                      <Rect x={x + 4} y={148} width={92} height={74} rx={6} fill={look.body} />
+                      {look.ac ? (
+                        <Rect x={x + 16} y={158} width={68} height={16} rx={3} fill={look.win} />
+                      ) : [0, 1, 2, 3].map((k) => (
+                        <Rect key={k} x={x + 14 + k * 19} y={158} width={14} height={18} rx={2} fill={look.win} />
+                      ))}
+                      <Rect x={x + 4} y={186} width={92} height={5} fill={look.stripe} />
+                      <SvgText x={x + 50} y={214} fontSize={15} fontFamily={FONT} fontWeight="bold" fill={look.label} textAnchor="middle">{trimTo(c.code, 6)}</SvgText>
+                    </>
+                  )}
+                  <Circle cx={x + 22} cy={226} r={6} fill="#1F2937" />
+                  <Circle cx={x + 78} cy={226} r={6} fill="#1F2937" />
+
+                  {on ? (
+                    <G>
+                      <Path d={`M${x + 50} 276 l-10 14 h20 z`} fill="#FACC15" />
+                      <Rect x={x + 2} y={290} width={96} height={26} rx={13} fill="#FACC15" />
+                      <SvgText x={x + 50} y={308} fontSize={12} fontFamily={FONT} fontWeight="bold" fill="#1A1300" textAnchor="middle">STAND HERE</SvgText>
+                    </G>
+                  ) : null}
+                </G>
+              );
+            })}
+          </Svg>
+          {/* tap targets over each coach (not the engine) */}
+          {onPickCoach ? slots.map((c, i) => (i === 0 ? null : (
+            <TouchableOpacity
+              key={`t-${c.code}-${i}`}
+              accessibilityLabel={`Coach ${c.code}`}
+              onPress={() => onPickCoach(c.code)}
+              style={{ position: "absolute", left: LEAD + i * SLOT, top: 50, width: SLOT, height: 190 }}
+            />
+          ))) : null}
+        </View>
+      </ScrollView>
     </View>
   );
 }
@@ -427,6 +547,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 16, marginBottom: 14, borderRadius: 22, overflow: "hidden",
     aspectRatio: 1200 / 720, backgroundColor: "#2B2E4F",
   },
+  cpWrap: { borderRadius: 20, overflow: "hidden", backgroundColor: "#2F3452", marginTop: 6 },
   card: {
     backgroundColor: st.card, marginHorizontal: 16, marginTop: 16, borderRadius: 18, padding: 14,
     shadowColor: "#0F1B33", shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1,
