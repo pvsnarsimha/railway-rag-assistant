@@ -1,0 +1,2377 @@
+diff --git a/backend/app.py b/backend/app.py
+index 2734a4a..f9cdcc2 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -60,6 +60,7 @@ import crowd_position_tracking
+ import station_search
+ import analytics
+ import advanced_features
++import station_tools
+ import journey_planner
+ import historical_delay
+ import pnr_tracking
+@@ -4525,6 +4526,46 @@ def api_station_navigator(station_code: str):
+     return advanced_features.station_navigator(station_code)
+ 
+ 
++# =============================================================================
++# FEATURE: redesigned "At the station" tools (mobile More Tools tab) —
++# Live Departures board, Platform Locator (+ Coach Position) and the
++# Station Navigator's schematic route. See station_tools.py for the source
++# priority (RailKit board -> RapidAPI board -> RailRadar -> estimate).
++# =============================================================================
++@app.get("/api/station/live-board/{station_code}")
++def api_station_live_board(station_code: str, mode: str = "departures", hours: int = 2):
++    code = _resolve_station_code(station_code) or station_code.strip().upper()
++    return station_tools.live_board(code, mode, hours)
++
++
++@app.get("/api/station/platform-locate")
++def api_station_platform_locate(
++    train_number: str, station: str, date: Optional[str] = None,
++    coach: Optional[str] = None, berth: Optional[int] = None,
++):
++    train_number = (train_number or "").strip()
++    if not re.fullmatch(r"\d{5}", train_number):
++        raise HTTPException(status_code=400, detail="Enter a valid 5-digit train number.")
++    code = _resolve_station_code(station)
++    if not code:
++        raise HTTPException(status_code=400, detail=f"Unknown station '{station}'.")
++    return station_tools.locate_platform(train_number, code, date, coach, berth)
++
++
++@app.get("/api/station/map/{station_code}")
++def api_station_map(
++    station_code: str, platform: Optional[int] = None, train_number: Optional[str] = None,
++    coach: Optional[str] = None, date: Optional[str] = None, step_free: bool = False,
++):
++    code = _resolve_station_code(station_code)
++    if not code:
++        raise HTTPException(status_code=400, detail=f"Unknown station '{station_code}'.")
++    train_number = (train_number or "").strip() or None
++    if train_number and not re.fullmatch(r"\d{5}", train_number):
++        raise HTTPException(status_code=400, detail="Enter a valid 5-digit train number.")
++    return station_tools.station_map(code, platform, train_number, coach, date, step_free)
++
++
+ @app.get("/api/advanced/coach-layout/{travel_class}")
+ def api_coach_layout(
+     travel_class: str, train_number: Optional[str] = None,
+diff --git a/backend/railway_api.py b/backend/railway_api.py
+index 7a9fbb8..26bff37 100644
+--- a/backend/railway_api.py
++++ b/backend/railway_api.py
+@@ -206,9 +206,11 @@ def search_trains_between_stations(source_code: str, dest_code: str, date_ddmmyy
+         raise RailwayAPIError(str(exc))
+ 
+ 
+-@cached(ttl_seconds=300, prefix="live_at_station")
++@cached(ttl_seconds=60, prefix="live_at_station")
+ def get_live_at_station(station_code: str, hours: int = 2) -> dict:
+-    """Upcoming/passing trains at a station in the next `hours` (2, 4, or 8)."""
++    """Upcoming/passing trains at a station in the next `hours` (2, 4, or 8).
++    60s cache (was 300s): the Live Departures board refreshes every 30s, so
++    a 5-minute-old board would show stale platforms/delays."""
+     return _call(f"/live-station/{station_code.upper()}", {"hours": hours})
+ 
+ 
+diff --git a/backend/rapidapi_provider.py b/backend/rapidapi_provider.py
+index 4d63a38..8e5964d 100644
+--- a/backend/rapidapi_provider.py
++++ b/backend/rapidapi_provider.py
+@@ -162,3 +162,14 @@ def get_seat_availability(train_number: str, source_code: str, dest_code: str,
+     params = {k: v for k, v in params.items() if v is not None}
+     return _get("/api/v1/checkSeatAvailability", params)
+ 
++
++
++def get_live_station(station_code: str, hours: int = 2) -> dict:
++    """Trains due at a station in the next `hours`, via RapidAPI's
++    /api/v3/getLiveStation. Used by station_tools.py only as the fallback
++    when RailKit's live-at-station board has nothing for the station.
++    Returned raw - station_tools.normalize_board_row handles the row shape."""
++    return _get("/api/v3/getLiveStation", {
++        "fromStationCode": station_code.upper(),
++        "hours": hours if hours in (1, 2, 4, 8) else 2,
++    })
+diff --git a/backend/station_tools.py b/backend/station_tools.py
+new file mode 100644
+index 0000000..8728a3e
+--- /dev/null
++++ b/backend/station_tools.py
+@@ -0,0 +1,619 @@
++"""
++station_tools.py
++----------------
++Data layer behind the redesigned "At the station" tools in the mobile app's
++More Tools tab: Live Departures, Platform Locator, Coach Position and
++Station Navigator.
++
++Sources, in the order they are trusted (same honesty rule as the rest of
++this project — every value says where it came from, nothing is invented):
++
++  1. RailKit "live at station" board (railkit-service /live-station) —
++     the station's own running board: platform, expected time, delay.
++  2. RapidAPI IRCTC "getLiveStation" — the same kind of board, used only
++     when RailKit has nothing for the station.
++  3. RailRadar live-status route (api.railradar.in /live) — per-station
++     scheduled/actual times, delay and platform for ONE train.
++  4. RailRadar coach composition (/coaches/{station}) — the real rake,
++     aligned for this station.
++  5. advanced_features.predict_platform — a clearly-labelled estimate,
++     only when none of the above has a platform.
++
++The provider row shapes differ (camelCase / snake_case / nested
++arrival{} objects), so every field is looked up through a list of known
++aliases. A field no provider sent stays None.
++"""
++
++import re
++from datetime import datetime, timedelta, timezone
++from typing import Optional
++
++import advanced_features
++from api_cache import cached
++import gps_tracking
++import railradar_fallback
++import railway_api
++import rapidapi_provider
++
++_HHMM = re.compile(r"(\d{1,2}):(\d{2})")
++
++# Rough physical constants for the walking estimate (Indian station norms):
++# platforms are ~12 m apart centre-to-centre, a walking pace of ~1.2 m/s,
++# and a lift adds about 90 s of waiting/ride time.
++_PLATFORM_SPACING_M = 12
++_WALK_M_PER_MIN = 72
++_LIFT_EXTRA_MIN = 1.5
++
++
++def ist_now() -> datetime:
++    return (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).replace(tzinfo=None)
++
++
++# ---------------------------------------------------------------------------
++# Generic field helpers
++# ---------------------------------------------------------------------------
++def _pick(row: dict, keys) -> Optional[object]:
++    for k in keys:
++        v = row.get(k) if isinstance(row, dict) else None
++        if v not in (None, "", "-", "--"):
++            return v
++    return None
++
++
++def to_hhmm(value) -> Optional[str]:
++    """'10:22', '10:22:00', '2026-09-28T10:22:00+05:30', '10:22, 28 Sep' -> '10:22'."""
++    if value in (None, ""):
++        return None
++    if isinstance(value, dict):
++        value = _pick(value, ("scheduled", "expected", "actual", "time"))
++        if value is None:
++            return None
++    m = _HHMM.search(str(value))
++    if not m:
++        return None
++    h, mi = int(m.group(1)), int(m.group(2))
++    if 0 <= h <= 23 and 0 <= mi <= 59:
++        return f"{h:02d}:{mi:02d}"
++    return None
++
++
++def _minutes(hhmm: Optional[str]) -> Optional[int]:
++    if not hhmm:
++        return None
++    h, m = hhmm.split(":")
++    return int(h) * 60 + int(m)
++
++
++def _add_minutes(hhmm: Optional[str], delta: Optional[int]) -> Optional[str]:
++    base = _minutes(hhmm)
++    if base is None or delta is None:
++        return None
++    t = (base + int(delta)) % 1440
++    return f"{t // 60:02d}:{t % 60:02d}"
++
++
++def parse_delay_minutes(value) -> Optional[int]:
++    """12 / '12' / '+12 min' / '12 Min Late' / '01:05 hrs late' / 'Right Time' -> minutes."""
++    if value is None or value == "":
++        return None
++    if isinstance(value, bool):
++        return None
++    if isinstance(value, (int, float)):
++        return int(round(value))
++    text = str(value).strip().lower()
++    if any(w in text for w in ("right time", "on time", "ontime", "no delay")):
++        return 0
++    hm = re.search(r"(\d{1,2}):(\d{2})\s*(hrs?|hours?)?", text)
++    if hm and ("hr" in text or "hour" in text or ":" in text):
++        mins = int(hm.group(1)) * 60 + int(hm.group(2))
++    else:
++        num = re.search(r"-?\d+", text)
++        if not num:
++            return None
++        mins = int(num.group(0))
++        if "hr" in text or "hour" in text:
++            mins *= 60
++    if "early" in text or text.startswith("-"):
++        mins = -abs(mins)
++    return mins
++
++
++def _minutes_until(hhmm: Optional[str], now: Optional[datetime] = None) -> Optional[int]:
++    """Minutes from now (IST) to a clock time, treating anything more than
++    3 h in the past as tomorrow (a board lists the next few hours)."""
++    t = _minutes(hhmm)
++    if t is None:
++        return None
++    now = now or ist_now()
++    diff = t - (now.hour * 60 + now.minute)
++    if diff < -180:
++        diff += 1440
++    elif diff > 1260:
++        diff -= 1440
++    return diff
++
++
++# ---------------------------------------------------------------------------
++# Live station board
++# ---------------------------------------------------------------------------
++_ROW_LIST_KEYS = ("trains", "trainList", "liveTrains", "results", "list", "data")
++
++
++def _board_rows(payload) -> list:
++    if isinstance(payload, list):
++        return payload
++    if isinstance(payload, dict):
++        for key in _ROW_LIST_KEYS:
++            inner = payload.get(key)
++            if isinstance(inner, list):
++                return inner
++            if isinstance(inner, dict):
++                rows = _board_rows(inner)
++                if rows:
++                    return rows
++    return []
++
++
++def _timing(row: dict, kind: str):
++    """(scheduled, expected, delay) for kind 'arr' or 'dep' out of a board row."""
++    nested = row.get("arrival" if kind == "arr" else "departure")
++    sched = exp = delay = None
++    if isinstance(nested, dict):
++        sched = to_hhmm(_pick(nested, ("scheduled", "sch", "time", "std", "sta")))
++        exp = to_hhmm(_pick(nested, ("expected", "actual", "eta", "etd")))
++        delay = parse_delay_minutes(_pick(nested, ("delay", "delay_minutes", "delayMinutes", "late")))
++    elif nested not in (None, ""):
++        sched = to_hhmm(nested)
++
++    if kind == "arr":
++        sched = sched or to_hhmm(_pick(row, (
++            "scheduledArrival", "schArrival", "sch_arr", "sta", "arrivalTime", "arrival_time",
++            "scheduled_arrival", "arr", "arrTime", "schArrTime")))
++        exp = exp or to_hhmm(_pick(row, (
++            "expectedArrival", "expected_arrival", "eta", "actualArrival", "actual_arrival",
++            "expArrival", "expected_arrival_time", "expArrTime", "actArrTime")))
++        if delay is None:
++            delay = parse_delay_minutes(_pick(row, ("delayArrival", "delay_arrival", "arrDelay", "delayArr")))
++    else:
++        sched = sched or to_hhmm(_pick(row, (
++            "scheduledDeparture", "schDeparture", "sch_dep", "std", "departureTime", "departure_time",
++            "scheduled_departure", "dep", "depTime", "schDepTime")))
++        exp = exp or to_hhmm(_pick(row, (
++            "expectedDeparture", "expected_departure", "etd", "actualDeparture", "actual_departure",
++            "expDeparture", "expected_departure_time", "expDepTime", "actDepTime")))
++        if delay is None:
++            delay = parse_delay_minutes(_pick(row, ("delayDeparture", "delay_departure", "depDelay", "delayDep")))
++    return sched, exp, delay
++
++
++def normalize_board_row(row: dict) -> Optional[dict]:
++    if not isinstance(row, dict):
++        return None
++    number = _pick(row, ("trainNumber", "train_number", "trainNo", "train_no", "number", "train_num"))
++    if number is None:
++        return None
++    number = str(number).strip()
++
++    sch_arr, exp_arr, delay_arr = _timing(row, "arr")
++    sch_dep, exp_dep, delay_dep = _timing(row, "dep")
++    generic_delay = parse_delay_minutes(_pick(row, ("delay", "delayInMinutes", "delay_in_min", "late_by", "lateBy", "delayMinutes")))
++    delay_arr = delay_arr if delay_arr is not None else generic_delay
++    delay_dep = delay_dep if delay_dep is not None else generic_delay
++    # A train running late into a station leaves it late too (and a late
++    # departure implies the arrival was late) — share the one known value.
++    if delay_dep is None and delay_arr is not None and sch_dep and not exp_dep:
++        delay_dep = delay_arr
++    if delay_arr is None and delay_dep is not None and sch_arr and not exp_arr:
++        delay_arr = delay_dep
++
++    # Fill whichever of expected/delay is missing from the other.
++    if exp_arr is None and sch_arr and delay_arr is not None:
++        exp_arr = _add_minutes(sch_arr, delay_arr)
++    if exp_dep is None and sch_dep and delay_dep is not None:
++        exp_dep = _add_minutes(sch_dep, delay_dep)
++    if delay_arr is None and sch_arr and exp_arr:
++        delay_arr = ((_minutes(exp_arr) - _minutes(sch_arr) + 720) % 1440) - 720
++    if delay_dep is None and sch_dep and exp_dep:
++        delay_dep = ((_minutes(exp_dep) - _minutes(sch_dep) + 720) % 1440) - 720
++
++    status_text = _pick(row, ("status", "currentStatus", "trainStatus", "remark", "remarks"))
++    status_text = str(status_text) if status_text is not None else None
++    cancelled = bool(row.get("isCancelled") or row.get("cancelled")) or (
++        status_text is not None and "cancel" in status_text.lower())
++
++    platform = _pick(row, ("platform", "platformNumber", "platform_number", "pf", "platformNo", "expectedPlatform"))
++    if isinstance(platform, dict):
++        platform = _pick(platform, ("number", "actual", "expected"))
++    platform = str(platform).strip() if platform is not None else None
++    if platform in ("0", "-", "--", "?"):
++        platform = None
++
++    return {
++        "train_number": number,
++        "train_name": _pick(row, ("trainName", "train_name", "name")),
++        "source": _pick(row, ("sourceStationName", "source_stn_name", "sourceName", "source", "from", "fromStationName", "source_name")),
++        "destination": _pick(row, ("destinationStationName", "dstn_stn_name", "destinationName", "destination", "to", "toStationName", "destination_name", "dest")),
++        "scheduled_arrival": sch_arr,
++        "expected_arrival": exp_arr,
++        "arrival_delay_minutes": delay_arr,
++        "scheduled_departure": sch_dep,
++        "expected_departure": exp_dep,
++        "departure_delay_minutes": delay_dep,
++        "platform": platform,
++        "cancelled": cancelled,
++        "status_text": status_text,
++    }
++
++
++def _status_for(delay: Optional[int], cancelled: bool) -> str:
++    if cancelled:
++        return "cancelled"
++    if delay is None:
++        return "unknown"
++    if delay >= 5:
++        return "delayed"
++    return "on_time"
++
++
++def build_board(rows: list, mode: str = "departures", now: Optional[datetime] = None) -> list:
++    """Normalized rows -> sorted Departures or Arrivals list."""
++    mode = "arrivals" if mode == "arrivals" else "departures"
++    out = []
++    for r in rows:
++        if mode == "departures":
++            sched, exp, delay = r["scheduled_departure"], r["expected_departure"], r["departure_delay_minutes"]
++            # A train that ends here never departs; a row with only an
++            # arrival time is a terminating train.
++            if sched is None and exp is None:
++                continue
++        else:
++            sched, exp, delay = r["scheduled_arrival"], r["expected_arrival"], r["arrival_delay_minutes"]
++            if sched is None and exp is None:
++                continue
++        shown = exp or sched
++        out.append({
++            **r,
++            "time": sched or exp,
++            "expected_time": exp,
++            "delay_minutes": delay,
++            "status": _status_for(delay, r["cancelled"]),
++            "minutes_until": _minutes_until(shown, now),
++        })
++    out.sort(key=lambda x: (x["minutes_until"] if x["minutes_until"] is not None else 10_000))
++    return out
++
++
++@cached(ttl_seconds=60, prefix="rapidapi_live_station")
++def _rapidapi_live_station(station_code: str, hours: int) -> dict:
++    return rapidapi_provider.get_live_station(station_code, hours)
++
++
++def fetch_station_board(station_code: str, hours: int = 2) -> dict:
++    """Raw rows for a station from RailKit, falling back to RapidAPI."""
++    station_code = (station_code or "").strip().upper()
++    errors = []
++    try:
++        data = railway_api.get_live_at_station(station_code, hours)
++        rows = [r for r in (normalize_board_row(x) for x in _board_rows(data)) if r]
++        if rows:
++            return {"rows": rows, "source": "railkit", "errors": errors}
++        errors.append("RailKit returned no trains for this station/window.")
++    except railway_api.RailwayAPIError as e:
++        errors.append(f"RailKit: {e}")
++    try:
++        data = _rapidapi_live_station(station_code, hours)
++        rows = [r for r in (normalize_board_row(x) for x in _board_rows(data)) if r]
++        if rows:
++            return {"rows": rows, "source": "rapidapi", "errors": errors}
++        errors.append("RapidAPI returned no trains for this station/window.")
++    except rapidapi_provider.RapidAPIProviderError as e:
++        errors.append(f"RapidAPI: {e}")
++    return {"rows": [], "source": None, "errors": errors}
++
++
++def station_name(station_code: str) -> Optional[str]:
++    info = gps_tracking._lookup_station(station_code)
++    return (info or {}).get("name")
++
++
++def live_board(station_code: str, mode: str = "departures", hours: int = 2) -> dict:
++    station_code = (station_code or "").strip().upper()
++    hours = hours if hours in (2, 4, 8) else 2
++    fetched = fetch_station_board(station_code, hours)
++    trains = build_board(fetched["rows"], mode)
++    amen = advanced_features.station_amenities(station_code)
++    return {
++        "station": station_code,
++        "station_name": station_name(station_code) or (amen.get("amenities") or {}).get("name"),
++        "mode": "arrivals" if mode == "arrivals" else "departures",
++        "hours_window": hours,
++        "source": fetched["source"],
++        "trains": trains,
++        "amenities": amen.get("amenities"),
++        "updated_at": ist_now().strftime("%H:%M:%S"),
++        "error": None if trains else ("; ".join(fetched["errors"]) or "No trains reported for this station/window right now."),
++    }
++
++
++# ---------------------------------------------------------------------------
++# Coach / berth helpers
++# ---------------------------------------------------------------------------
++_BAY8 = {1: "Lower", 2: "Middle", 3: "Upper", 4: "Lower", 5: "Middle", 6: "Upper", 7: "Side Lower", 8: "Side Upper"}
++_BAY6 = {1: "Lower", 2: "Upper", 3: "Lower", 4: "Upper", 5: "Side Lower", 6: "Side Upper"}
++_BERTHS_PER_COACH = {"SL": 72, "3A": 72, "3E": 80, "2A": 48, "1A": 22, "CC": 78, "EC": 56, "2S": 108}
++_CLASS_BY_PREFIX = [("HA", "1A"), ("M", "3E"), ("S", "SL"), ("B", "3A"), ("A", "2A"), ("H", "1A"),
++                    ("C", "CC"), ("E", "EC"), ("D", "2S"), ("G", "GEN")]
++
++
++def coach_class(coach_code: Optional[str]) -> Optional[str]:
++    code = (coach_code or "").strip().upper()
++    for prefix, cls in _CLASS_BY_PREFIX:
++        if code.startswith(prefix) and code[len(prefix):].isdigit():
++            return cls
++    return None
++
++
++def berth_info(coach_code: Optional[str], berth: Optional[int], travel_class: Optional[str] = None) -> Optional[dict]:
++    """Standard Indian Railways berth type + nearest door for a berth number."""
++    if not berth:
++        return None
++    cls = (travel_class or coach_class(coach_code) or "").upper()
++    total = _BERTHS_PER_COACH.get(cls)
++    btype = None
++    if cls in ("SL", "3A", "3E"):
++        btype = _BAY8[(berth - 1) % 8 + 1]
++    elif cls == "2A":
++        btype = _BAY6[(berth - 1) % 6 + 1]
++    elif cls in ("CC", "EC", "2S"):
++        btype = "Seat"
++    door = None
++    if total:
++        # Berth 1 sits at one end of the coach and the last berth at the
++        # other; each end has a door.
++        door = "front" if berth <= total / 2 else "rear"
++    return {"berth": berth, "type": btype, "coach_class": cls or None, "total_berths": total, "nearest_door": door}
++
++
++def rake_from_composition(comp: dict) -> list:
++    """RailRadar coach-composition `data` -> ordered list of {code, category}.
++    Order is engine -> rear as the train pulls into the station (mirrored
++    when RailRadar flags a reversal for this station)."""
++    if not isinstance(comp, dict):
++        return []
++    rake = comp.get("rake") or comp.get("coaches") or []
++    if not isinstance(rake, list):
++        return []
++    rake = sorted([c for c in rake if isinstance(c, dict)], key=lambda c: c.get("position") or 0)
++    if comp.get("reversal") is True:
++        rake = list(reversed(rake))
++    return [{
++        "code": str(c.get("code") or c.get("coachCode") or c.get("coach") or "?"),
++        "category": c.get("category") or c.get("classType") or c.get("type"),
++    } for c in rake]
++
++
++def locate_coach(rake: list, coach_code: Optional[str]) -> Optional[dict]:
++    code = (coach_code or "").strip().upper()
++    if not code or not rake:
++        return None
++    for i, c in enumerate(rake):
++        if c["code"].upper() == code:
++            frac = (i + 0.5) / len(rake)
++            zone = "engine end" if frac < 0.34 else ("middle" if frac < 0.67 else "rear end")
++            return {"index": i, "total": len(rake), "fraction": round(frac, 3), "zone": zone}
++    return None
++
++
++# ---------------------------------------------------------------------------
++# Platform Locator
++# ---------------------------------------------------------------------------
++def _railradar_stop(train_number: str, station_code: str, date_ddmmyyyy: Optional[str]) -> Optional[dict]:
++    try:
++        data = railradar_fallback._fetch_raw(train_number, railradar_fallback._ddmmyyyy_to_iso(date_ddmmyyyy))
++    except Exception:  # noqa: BLE001 — no key / no network / no run: just not available
++        return None
++    for p in data.get("route") or []:
++        if str(p.get("stationCode") or "").upper() == station_code:
++            return {
++                "train_name": data.get("trainName") or (data.get("train") or {}).get("name"),
++                "station_name": p.get("stationName"),
++                "platform": str(p["platform"]) if p.get("platform") not in (None, "", 0, "0") else None,
++                "scheduled_arrival": to_hhmm(p.get("scheduledArrival")),
++                "scheduled_departure": to_hhmm(p.get("scheduledDeparture")),
++                "actual_arrival": to_hhmm(p.get("actualArrival")),
++                "arrival_delay_minutes": p.get("delayArrival"),
++                "departure_delay_minutes": p.get("delayDeparture"),
++                "status": p.get("status"),
++            }
++    return None
++
++
++def _composition(train_number: str, station_code: str) -> Optional[dict]:
++    try:
++        comp = railway_api.get_coach_composition(train_number, station_code)
++    except railway_api.RailwayAPIError:
++        return None
++    if isinstance(comp, dict) and isinstance(comp.get("data"), dict) and "rake" not in comp:
++        comp = comp["data"]
++    return comp if isinstance(comp, dict) else None
++
++
++def locate_platform(train_number: str, station_code: str, date_ddmmyyyy: Optional[str] = None,
++                    coach: Optional[str] = None, berth: Optional[int] = None) -> dict:
++    station_code = (station_code or "").strip().upper()
++    train_number = (train_number or "").strip()
++    coach = (coach or "").strip().upper() or None
++
++    board_row = None
++    board_source = None
++    fetched = fetch_station_board(station_code, 4)
++    for r in fetched["rows"]:
++        if r["train_number"] == train_number:
++            board_row, board_source = r, fetched["source"]
++            break
++
++    rr = _railradar_stop(train_number, station_code, date_ddmmyyyy)
++    comp = _composition(train_number, station_code)
++    comp_platform = None
++    if comp and isinstance(comp.get("station"), dict) and comp["station"].get("platform") not in (None, "", 0, "0"):
++        comp_platform = str(comp["station"]["platform"])
++
++    predicted = None
++    if board_row and board_row.get("platform"):
++        platform, source = board_row["platform"], f"station_board_{board_source}"
++    elif rr and rr.get("platform"):
++        platform, source = rr["platform"], "railradar_live"
++    elif comp_platform:
++        platform, source = comp_platform, "railradar_coach_alignment"
++    else:
++        predicted = advanced_features.predict_platform(train_number, station_code)
++        platform, source = str(predicted["predicted_platform"]), "estimate"
++
++    # Timings: the board first (station-reported), RailRadar next.
++    sched_arr = (board_row or {}).get("scheduled_arrival") or (rr or {}).get("scheduled_arrival")
++    sched_dep = (board_row or {}).get("scheduled_departure") or (rr or {}).get("scheduled_departure")
++    delay = (board_row or {}).get("arrival_delay_minutes")
++    if delay is None:
++        delay = (board_row or {}).get("departure_delay_minutes")
++    if delay is None and rr:
++        delay = rr.get("arrival_delay_minutes") if rr.get("arrival_delay_minutes") is not None else rr.get("departure_delay_minutes")
++    expected_arr = (board_row or {}).get("expected_arrival") or (rr or {}).get("actual_arrival") or _add_minutes(sched_arr, delay)
++    expected_dep = (board_row or {}).get("expected_departure") or _add_minutes(sched_dep, delay)
++    arrives_in = _minutes_until(expected_arr or sched_arr or expected_dep or sched_dep)
++
++    rake = rake_from_composition(comp) if comp else []
++    coach_pos = locate_coach(rake, coach)
++
++    train_name = (board_row or {}).get("train_name") or (rr or {}).get("train_name") or (comp or {}).get("trainName")
++    return {
++        "train_number": train_number,
++        "train_name": train_name,
++        "station": station_code,
++        "station_name": (rr or {}).get("station_name") or station_name(station_code) or station_code,
++        "platform": platform,
++        "platform_source": source,
++        "platform_confirmed": source.startswith("station_board"),
++        "alternate_platform": (predicted or {}).get("alternate_platform"),
++        "scheduled_arrival": sched_arr,
++        "expected_arrival": expected_arr,
++        "scheduled_departure": sched_dep,
++        "expected_departure": expected_dep,
++        "delay_minutes": delay,
++        "arrives_in_minutes": arrives_in,
++        "cancelled": bool((board_row or {}).get("cancelled")),
++        "rake": rake,
++        "rake_source": "railradar" if rake else None,
++        "coach": coach,
++        "coach_position": coach_pos,
++        "coach_found_in_rake": bool(coach_pos) if (coach and rake) else None,
++        "berth": berth_info(coach, berth),
++        "checked_at": ist_now().strftime("%H:%M"),
++        "sources_note": {
++            "station_board": board_source,
++            "railradar_live": bool(rr),
++            "railradar_coaches": bool(rake),
++        },
++        "disclaimer": (
++            "Platform from the station's live board is what the station has announced; RailRadar's "
++            "platform is its expected allocation; an 'estimate' is a pattern guess only. Platforms can "
++            "change until the train arrives — watch the station display boards."
++        ),
++    }
++
++
++# ---------------------------------------------------------------------------
++# Station Navigator (schematic map + walking route)
++# ---------------------------------------------------------------------------
++_TYPICAL_CONCOURSE = ["booking", "toilets", "canteen", "water", "lift", "atm"]
++_FACILITY_MAP = {
++    "food_court": "canteen", "cloak_room": "cloak_room", "waiting_room": "waiting_room",
++    "retiring_room": "retiring_room", "executive_lounge": "lounge", "wifi": "wifi",
++}
++
++
++def station_map(station_code: str, platform: Optional[int] = None, train_number: Optional[str] = None,
++                coach: Optional[str] = None, date_ddmmyyyy: Optional[str] = None,
++                step_free: bool = False) -> dict:
++    station_code = (station_code or "").strip().upper()
++    nav = advanced_features.station_navigator(station_code)
++    n_platforms = int(nav.get("station_platform_count") or 4)
++
++    located = None
++    platform_source = "user_given" if platform else None
++    if platform is None and train_number:
++        located = locate_platform(train_number, station_code, date_ddmmyyyy, coach)
++        try:
++            platform = int(re.match(r"\d+", located["platform"]).group(0))
++        except (TypeError, AttributeError, ValueError):
++            platform = None
++        platform_source = located["platform_source"]
++    if platform is None:
++        platform, platform_source = 1, "default"
++    platform = max(1, int(platform))
++    n_platforms = max(n_platforms, platform)
++
++    # Walking model: concourse -> (FOB/lift) -> platform -> along the
++    # platform to the coach (if its position in the rake is known).
++    concourse_m = 45
++    along_m = 60
++    coach_pos = (located or {}).get("coach_position")
++    if coach_pos:
++        # A 24-coach rake is ~560 m; assume the concourse/FOB is mid-platform.
++        along_m = int(abs(coach_pos["fraction"] - 0.5) * 560) + 10
++    steps = [{"icon": "walk", "text": "Walk straight through the concourse past the booking office and canteen",
++              "meters": concourse_m}]
++    if platform == 1:
++        steps.append({"icon": "enter", "text": "Platform 1 is beside the main entrance — no bridge needed", "meters": 15})
++        bridge_m = 15
++    else:
++        bridge_m = (platform - 1) * _PLATFORM_SPACING_M + 20
++        if step_free:
++            steps.append({"icon": "lift", "text": f"Take the lift up to the foot over bridge, cross to PF {platform} and take the lift down",
++                          "meters": bridge_m})
++        else:
++            steps.append({"icon": "stairs", "text": f"Take the foot over bridge (or lift) and cross to PF {platform}",
++                          "meters": bridge_m})
++    target = f"coach {coach}" if coach else "your coach"
++    if coach_pos:
++        direction = "towards the engine end" if coach_pos["fraction"] < 0.5 else "towards the rear end"
++        steps.append({"icon": "flag", "text": f"On PF {platform}, walk {direction} to {target}", "meters": along_m})
++    else:
++        steps.append({"icon": "flag", "text": f"On PF {platform}, check the coach display board for {target}", "meters": along_m})
++
++    total_m = sum(s["meters"] for s in steps)
++    minutes = total_m / _WALK_M_PER_MIN + (_LIFT_EXTRA_MIN if step_free and platform > 1 else 0)
++
++    amen = (advanced_features.station_amenities(station_code).get("amenities") or {})
++    known = [_FACILITY_MAP[k] for k, v in amen.items() if k in _FACILITY_MAP and v]
++    concourse = list(dict.fromkeys(_TYPICAL_CONCOURSE + known))
++
++    return {
++        "station": station_code,
++        "station_name": nav.get("name") if nav.get("name") != station_code else (station_name(station_code) or station_code),
++        "platform_count": n_platforms,
++        "platform_count_basis": nav.get("platform_count_basis"),
++        "target_platform": platform,
++        "platform_source": platform_source,
++        "coach": coach,
++        "coach_position": coach_pos,
++        "step_free": step_free,
++        "steps": steps,
++        "walk_meters": int(round(total_m / 5.0) * 5),
++        "walk_minutes": max(1, int(round(minutes))),
++        "train": ({
++            "train_number": located["train_number"],
++            "train_name": located["train_name"],
++            "arrives_in_minutes": located["arrives_in_minutes"],
++            "expected_arrival": located["expected_arrival"],
++            "platform_confirmed": located["platform_confirmed"],
++        } if located else None),
++        "concourse_facilities": concourse,
++        "facilities_confirmed": known,
++        "entrance_sides": nav.get("entrance_sides") or [],
++        "notable_note": nav.get("notable_note"),
++        "disclaimer": (
++            "Schematic, not the station's real floor plan: no Indian station publishes an indoor map "
++            "through any API. It follows the usual layout (PF 1 by the main entrance, higher platforms "
++            "via the foot over bridge). Distances and walking time are estimates."
++        ),
++    }
+diff --git a/mobile-app/App.js b/mobile-app/App.js
+index ca5854f..8f37a74 100644
+--- a/mobile-app/App.js
++++ b/mobile-app/App.js
+@@ -61,7 +61,7 @@ function withScreenLanguage(Screen, { bar = true } = {}) {
+ const HomeScreenL = withScreenLanguage(HomeScreen, { bar: false });
+ const ChatScreenL = withScreenLanguage(ChatScreen, { bar: false });
+ const LiveTrackingScreenL = withScreenLanguage(LiveTrackingScreen, { bar: false });
+-const MoreToolsScreenL = withScreenLanguage(MoreToolsScreen);
++const MoreToolsScreenL = withScreenLanguage(MoreToolsScreen, { bar: false });
+ const SettingsScreenL = withScreenLanguage(SettingsScreen);
+ const PnrStatusScreenL = withScreenLanguage(PnrStatusScreen);
+ const LiveTrainStatusScreenL = withScreenLanguage(LiveTrainStatusScreen);
+@@ -183,7 +183,7 @@ function AppTabs() {
+             <Tab.Screen name="Home" component={HomeStackNavigator} options={{ title: t("Home"), headerShown: false }} />
+             <Tab.Screen name="Chat" component={ChatScreenL} options={{ title: t("Railway Assistant") }} />
+             <Tab.Screen name="Track" component={LiveTrackingScreenL} options={{ title: t("Live Tracking") }} />
+-            <Tab.Screen name="More" component={MoreToolsScreenL} options={{ title: t("More Tools") }} />
++            <Tab.Screen name="More" component={MoreToolsScreenL} options={{ title: t("More Tools"), headerShown: false }} />
+             <Tab.Screen name="Settings" component={SettingsScreenL} options={{ title: t("Settings") }} />
+           </Tab.Navigator>
+         </NavigationContainer>
+diff --git a/mobile-app/src/api/railwayApi.js b/mobile-app/src/api/railwayApi.js
+index 88495d2..ec951f7 100644
+--- a/mobile-app/src/api/railwayApi.js
++++ b/mobile-app/src/api/railwayApi.js
+@@ -876,3 +876,47 @@ export function warmupLive(baseUrl, trainNumber) {
+     fetch(`${String(baseUrl || "").replace(/\/$/, "")}/api/live/warmup${qs}`).catch(() => {});
+   } catch (e) { /* ignore */ }
+ }
++
++/** Real per-train coach composition (RailRadar passthrough) — used by the
++ * Coach Layout tool. Was imported by MoreToolsScreen but never defined. */
++export async function getCoachComposition(baseUrl, trainNumber, stationCode) {
++  const client = makeClient(baseUrl, { timeoutMs: 15000 });
++  const qs = stationCode ? `?station=${encodeURIComponent(stationCode)}` : "";
++  const { data } = await client.get(`/api/advanced/coach-composition/${encodeURIComponent(trainNumber)}${qs}`);
++  if (!data?.ok) throw new Error(data?.error || "No coach composition for this train.");
++  return data.data?.data || data.data;
++}
++
++/* ---------------------------------------------------------------------
++ * "At the station" tools (redesigned More Tools) — backend/station_tools.py
++ * ------------------------------------------------------------------- */
++
++/** Live Departures / Arrivals board (RailKit, RapidAPI fallback). */
++export async function getLiveBoard(baseUrl, stationCode, { mode = "departures", hours = 2 } = {}) {
++  const client = makeClient(baseUrl, { timeoutMs: 20000 });
++  const { data } = await client.get(`/api/station/live-board/${encodeURIComponent(stationCode)}`, { params: { mode, hours } });
++  return data;
++}
++
++/** Platform Locator: live platform + timings + real rake + berth info. */
++export async function locatePlatform(baseUrl, { trainNumber, station, date, coach, berth }) {
++  const client = makeClient(baseUrl, { timeoutMs: 25000 });
++  const params = { train_number: trainNumber, station };
++  if (date) params.date = date;
++  if (coach) params.coach = coach;
++  if (berth) params.berth = berth;
++  const { data } = await client.get("/api/station/platform-locate", { params });
++  return data;
++}
++
++/** Station Navigator: schematic station + walking route to a platform/coach. */
++export async function getStationMap(baseUrl, stationCode, { platform, trainNumber, coach, date, stepFree } = {}) {
++  const client = makeClient(baseUrl, { timeoutMs: 25000 });
++  const params = { step_free: !!stepFree };
++  if (platform) params.platform = platform;
++  if (trainNumber) params.train_number = trainNumber;
++  if (coach) params.coach = coach;
++  if (date) params.date = date;
++  const { data } = await client.get(`/api/station/map/${encodeURIComponent(stationCode)}`, { params });
++  return data;
++}
+diff --git a/mobile-app/src/screens/MoreToolsScreen.js b/mobile-app/src/screens/MoreToolsScreen.js
+index 14e9d44..96c9df1 100644
+--- a/mobile-app/src/screens/MoreToolsScreen.js
++++ b/mobile-app/src/screens/MoreToolsScreen.js
+@@ -1,6 +1,13 @@
+-import React, { useState, useCallback } from "react";
+-import { View, StyleSheet, ScrollView, TouchableOpacity, Linking } from "react-native";
+-import { Text } from "../i18n/Localized";
++import React, { useState, useCallback, useEffect } from "react";
++import { View, StyleSheet, ScrollView, TouchableOpacity, Linking, BackHandler } from "react-native";
++import { Ionicons } from "@expo/vector-icons";
++import { Text, TextInput, Alert } from "../i18n/Localized";
++import StationNavigatorView from "./station/StationNavigatorView";
++import PlatformLocatorView from "./station/PlatformLocatorView";
++import LiveDeparturesView from "./station/LiveDeparturesView";
++import { st, useTrip, ToolHeader } from "./station/stationShared";
++import ScreenLanguageBar from "../components/ScreenLanguageBar";
++import { useSafeAreaInsets } from "react-native-safe-area-context";
+ import NearbyStationMap from "../components/NearbyStationMap";
+ import RoutePositionMap from "../components/RoutePositionMap";
+ import AsyncStorage from "@react-native-async-storage/async-storage";
+@@ -2114,41 +2121,293 @@ const TOOL_COMPONENTS = {
+   bookingwindow: BookingWindowTool, stationnav: StationNavigatorTool,
+ };
+ 
+-// BUGFIX: jumping here from Live Tracking's "Coach layout" shortcut used
+-// to always land on the first tab ("Platform") and a blank train number —
+-// route.params (see LiveTrackingScreen.web.js's bottom bar) now opens
+-// straight on the Coach Layout tab with the train number already filled
+-// in, same real value the user already typed, not a second re-entry.
+-export default function MoreToolsScreen({ route }) {
++/* ---------------------------------------------------------------------
++ * REDESIGN: More Tools hub (mockup "More Tools"). A searchable home with
++ * the four "At the station" tools as cards, round shortcuts for Plan &
++ * Book and On board, an "Ask Rail AI" banner, and every other tool listed
++ * below. Tapping a tool opens it full-screen with a back button (Android's
++ * hardware back returns to the hub too).
++ * ------------------------------------------------------------------- */
++const STATION_TOOLS = [
++  { key: "stationnav", icon: "🗺️", tint: "#E0F2FE", title: "Station Navigator", sub: "Walk to your platform" },
++  { key: "platform", icon: "🚉", tint: "#FFEDD5", title: "Platform Locator", sub: "Live PF number" },
++  { key: "coachpos", icon: "🧭", tint: "#DCFCE7", title: "Coach Position", sub: "Where to stand" },
++  { key: "departures", icon: "📺", tint: "#FCE7F3", title: "Live Departures", sub: "Station board" },
++];
++const PLAN_TOOLS = [
++  { key: "seatavail", icon: "💺", title: "Seat Avail.", homeScreen: "SeatAvailability" },
++  { key: "farecalc", icon: "💰", title: "Fare Calc", homeScreen: "FareEnquiry" },
++  { key: "bookingwindow", icon: "⏰", title: "Tatkal Timer" },
++  { key: "journeyplanner", icon: "🔁", title: "Alternates" },
++];
++const ONBOARD_TOOLS = [
++  { key: "pantry", icon: "🍱", title: "Food" },
++  { key: "smartalarm", icon: "🔔", title: "Wake Alarm" },
++  { key: "railmadad", icon: "🧹", title: "Rail Madad", url: "https://railmadad.indianrailways.gov.in/" },
++  { key: "sos", icon: "🆘", title: "SOS" },
++];
++// Tools that open their own full-screen view (not wrapped in a ScrollView).
++const FULLSCREEN_TOOLS = new Set(["stationnav", "platform", "coachpos", "departures"]);
++// Old tab keys that now live inside the redesigned station tools.
++const TOOL_ALIASES = { platformnav: "stationnav", coach: "coachpos" };
++
++const TOOL_TITLES = {
++  stationnav: "Station Navigator", platform: "Platform Locator", coachpos: "Coach Position", departures: "Live Departures",
++  ...Object.fromEntries(TOOLS.map((t) => [t.key, t.label.replace(/^\S+\s/, "")])),
++  bookingwindow: "Tatkal Timer & Booking Window", journeyplanner: "Alternates · Journey Planner",
++  pantry: "Food on Train", smartalarm: "Wake-up Alarm", coach: "Coach Layout",
++};
++
++function resolveToolKey(key) {
++  const k = TOOL_ALIASES[key] || key;
++  return FULLSCREEN_TOOLS.has(k) || TOOL_COMPONENTS[k] ? k : null;
++}
++
++// The tab's own header is hidden for this screen (App.js) so the hub can
++// show its big "More Tools" title like the mockup; this shell adds the
++// status-bar inset and the language / speak strip every screen carries.
++export default function MoreToolsScreen(props) {
++  const insets = useSafeAreaInsets();
++  const [dark, setDark] = useState(false);
++  return (
++    <View style={{ flex: 1, paddingTop: insets.top, backgroundColor: dark ? "#050B18" : st.bg }}>
++      <ScreenLanguageBar style={{ paddingHorizontal: 12, paddingTop: 8, marginBottom: 0 }} />
++      <MoreToolsContent {...props} onDarkChange={setDark} />
++    </View>
++  );
++}
++
++function MoreToolsContent({ route, navigation, onDarkChange }) {
+   const { apiBaseUrl } = useSettings();
+-  const initialTab = route?.params?.initialTab && TOOLS.some((t) => t.key === route.params.initialTab)
+-    ? route.params.initialTab
+-    : "platform";
+-  const initialTrainNumber = route?.params?.trainNumber ? String(route.params.trainNumber).trim() : "";
+-  const [active, setActive] = useState(initialTab);
+-  const ActiveComponent = TOOL_COMPONENTS[active];
++  const [trip, setTrip] = useTrip();
++  const [active, setActive] = useState(null);
++  const [navTarget, setNavTarget] = useState(null);
++  const [query, setQuery] = useState("");
++  const [initialTrainNumber, setInitialTrainNumber] = useState("");
++
++  // Deep links: Live Tracking's "Coach layout" button passes
++  // { initialTab: "coach", trainNumber } — open Coach Position with that
++  // train filled in. Re-runs whenever new params arrive, not just on mount.
++  const params = route?.params;
++  useEffect(() => {
++    const key = params?.initialTab ? resolveToolKey(params.initialTab) : null;
++    if (!key) return;
++    const trainNo = params?.trainNumber ? String(params.trainNumber).trim() : "";
++    if (trainNo) {
++      setInitialTrainNumber(trainNo);
++      if (trainNo !== trip.trainNumber) setTrip({ trainNumber: trainNo, station: "", stationName: null, coach: "", berth: null });
++    }
++    setActive(key);
++    navigation?.setParams?.({ initialTab: undefined, trainNumber: undefined });
++  }, [params?.initialTab, params?.trainNumber]); // eslint-disable-line react-hooks/exhaustive-deps
++
++  // Hardware back closes the open tool instead of leaving the tab.
++  useEffect(() => {
++    if (!active) return undefined;
++    const sub = BackHandler.addEventListener("hardwareBackPress", () => { setActive(null); return true; });
++    return () => sub.remove();
++  }, [active]);
++
++  const open = useCallback((tool) => {
++    if (tool.homeScreen) { navigation?.navigate?.("Home", { screen: tool.homeScreen }); return; }
++    if (tool.url) { Linking.openURL(tool.url).catch(() => {}); return; }
++    if (tool.key === "sos") {
++      Alert.alert("Emergency help", "Call the railway helpline or national emergency number.", [
++        { text: "Rail helpline 139", onPress: () => Linking.openURL("tel:139").catch(() => {}) },
++        { text: "Emergency 112", onPress: () => Linking.openURL("tel:112").catch(() => {}) },
++        { text: "Cancel", style: "cancel" },
++      ]);
++      return;
++    }
++    if (tool.key === "ai") { navigation?.navigate?.("Chat"); return; }
++    setNavTarget(null);
++    setActive(tool.key);
++  }, [navigation]);
++
++  const close = useCallback(() => setActive(null), []);
++  useEffect(() => { onDarkChange && onDarkChange(active === "departures"); }, [active, onDarkChange]);
++
++  if (active === "stationnav") {
++    return <StationNavigatorView key={JSON.stringify(navTarget)} apiBaseUrl={apiBaseUrl} onBack={close} initialTarget={navTarget} />;
++  }
++  if (active === "platform" || active === "coachpos") {
++    return (
++      <PlatformLocatorView
++        key={active}
++        apiBaseUrl={apiBaseUrl} onBack={close} mode={active === "coachpos" ? "coach" : "platform"}
++        onNavigate={(target) => { setNavTarget(target); setActive("stationnav"); }}
++      />
++    );
++  }
++  if (active === "departures") {
++    return (
++      <LiveDeparturesView
++        apiBaseUrl={apiBaseUrl} onBack={close}
++        onOpenTrain={(t) => { setTrip({ trainNumber: t.train_number, coach: "", berth: null }); setActive("platform"); }}
++      />
++    );
++  }
++  if (active && TOOL_COMPONENTS[active]) {
++    const ActiveComponent = TOOL_COMPONENTS[active];
++    return (
++      <View style={[styles.flex, { backgroundColor: st.bg }]}>
++        <ToolHeader title={TOOL_TITLES[active] || "Tool"} onBack={close} />
++        <ScrollView style={styles.flex} contentContainerStyle={[styles.content, { paddingTop: 0 }]} keyboardShouldPersistTaps="handled">
++          <ActiveComponent apiBaseUrl={apiBaseUrl} {...(active === "coach" ? { initialTrainNumber } : null)} />
++        </ScrollView>
++      </View>
++    );
++  }
++
++  // ---- hub ----
++  const q = query.trim().toLowerCase();
++  const others = TOOLS.filter((t) => !["platform", "platformnav", "stationnav", "pantry", "smartalarm", "bookingwindow", "journeyplanner"].includes(t.key));
++  const everything = [
++    ...STATION_TOOLS.map((t) => ({ ...t, label: `${t.icon} ${t.title}` })),
++    ...PLAN_TOOLS.map((t) => ({ ...t, label: `${t.icon} ${t.title}` })),
++    ...ONBOARD_TOOLS.map((t) => ({ ...t, label: `${t.icon} ${t.title}` })),
++    ...others,
++  ];
++  const results = q ? everything.filter((t) => `${t.label} ${t.sub || ""} ${TOOL_TITLES[t.key] || ""}`.toLowerCase().includes(q)) : [];
+ 
+   return (
+-    <View style={styles.flex}>
+-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabScroll} contentContainerStyle={styles.tabScrollContent}>
+-        {TOOLS.map((t) => (
+-          <TouchableOpacity key={t.key} style={[styles.tab, active === t.key && styles.tabActive]} onPress={() => setActive(t.key)}>
+-            <Text style={[styles.tabText, active === t.key && styles.tabTextActive]}>{t.label}</Text>
++    <ScrollView style={[styles.flex, { backgroundColor: st.bg }]} contentContainerStyle={hub.content} keyboardShouldPersistTaps="handled">
++      <Text style={hub.title}>More Tools</Text>
++      <View style={hub.search}>
++        <Ionicons name="search" size={17} color={st.muted} />
++        <TextInput
++          value={query} onChangeText={setQuery} placeholder="Search tools…" placeholderTextColor={st.muted}
++          style={hub.searchInput} autoCorrect={false} autoCapitalize="none" returnKeyType="search"
++        />
++        {query ? (
++          <TouchableOpacity onPress={() => setQuery("")} accessibilityLabel="Clear search">
++            <Ionicons name="close-circle" size={17} color={st.muted} />
+           </TouchableOpacity>
+-        ))}
+-      </ScrollView>
+-      <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
+-        {ActiveComponent && (
+-          <ActiveComponent
+-            apiBaseUrl={apiBaseUrl}
+-            {...(active === "coach" ? { initialTrainNumber } : null)}
+-          />
+-        )}
+-      </ScrollView>
++        ) : null}
++      </View>
++
++      {q ? (
++        <View style={hub.listCard}>
++          {results.length ? results.map((t) => (
++            <TouchableOpacity key={t.key} style={hub.listRow} onPress={() => open(t)}>
++              <Text style={hub.listText}>{t.label}</Text>
++              <Ionicons name="chevron-forward" size={16} color={st.muted} />
++            </TouchableOpacity>
++          )) : <Text style={[hub.listText, { padding: 14, color: st.muted }]}>No tool matches “{query}”.</Text>}
++        </View>
++      ) : (
++        <>
++          <Text style={hub.section}>AT THE STATION</Text>
++          <View style={hub.cardGrid}>
++            {STATION_TOOLS.map((t) => (
++              <TouchableOpacity key={t.key} style={hub.card} onPress={() => open(t)} activeOpacity={0.85}>
++                <View style={[hub.cardIcon, { backgroundColor: t.tint }]}>
++                  <Text style={{ fontSize: 24 }} noTranslate>{t.icon}</Text>
++                </View>
++                <Text style={hub.cardTitle}>{t.title}</Text>
++                <Text style={hub.cardSub}>{t.sub}</Text>
++              </TouchableOpacity>
++            ))}
++          </View>
++          {trip.trainNumber && trip.station ? (
++            <TouchableOpacity style={hub.tripBar} onPress={() => open({ key: "platform" })}>
++              <Ionicons name="train-outline" size={16} color={st.blue} />
++              <Text style={hub.tripText} numberOfLines={1}>
++                Your trip: {trip.trainNumber} at {trip.stationName || trip.station}{trip.coach ? ` · ${trip.coach}` : ""}
++              </Text>
++              <Ionicons name="chevron-forward" size={16} color={st.blue} />
++            </TouchableOpacity>
++          ) : null}
++
++          <Text style={hub.section}>PLAN &amp; BOOK</Text>
++          <RoundRow tools={PLAN_TOOLS} onPress={open} />
++          <Text style={hub.section}>ON BOARD</Text>
++          <RoundRow tools={ONBOARD_TOOLS} onPress={open} />
++
++          <TouchableOpacity style={hub.ai} onPress={() => open({ key: "ai" })} activeOpacity={0.9}>
++            <View style={hub.aiGlow} />
++            <View style={{ flex: 1 }}>
++              <Text style={hub.aiTitle}>✨ Ask Rail AI</Text>
++              <Text style={hub.aiSub}>"Which platform for {trip.trainNumber || "12785"} at {trip.stationName || "Kurnool"}?"</Text>
++            </View>
++            <Ionicons name="chevron-forward" size={20} color="#fff" />
++          </TouchableOpacity>
++
++          <Text style={hub.section}>ALL TOOLS</Text>
++          <View style={hub.listCard}>
++            {others.map((t, i) => (
++              <TouchableOpacity key={t.key} style={[hub.listRow, i === others.length - 1 && { borderBottomWidth: 0 }]} onPress={() => open(t)}>
++                <Text style={hub.listText}>{t.label}</Text>
++                <Ionicons name="chevron-forward" size={16} color={st.muted} />
++              </TouchableOpacity>
++            ))}
++          </View>
++        </>
++      )}
++    </ScrollView>
++  );
++}
++
++function RoundRow({ tools, onPress }) {
++  return (
++    <View style={hub.roundRow}>
++      {tools.map((t) => (
++        <TouchableOpacity key={t.key} style={hub.roundItem} onPress={() => onPress(t)} activeOpacity={0.8}>
++          <View style={[hub.roundIcon, t.key === "sos" && { backgroundColor: "#FEE2E2" }]}>
++            <Text style={{ fontSize: 22 }} noTranslate>{t.icon}</Text>
++          </View>
++          <Text style={hub.roundText} numberOfLines={1}>{t.title}</Text>
++        </TouchableOpacity>
++      ))}
+     </View>
+   );
+ }
+ 
++const hub = StyleSheet.create({
++  content: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 32 },
++  title: { fontSize: 28, fontWeight: "900", color: st.ink, marginBottom: 14 },
++  search: {
++    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: st.card, borderRadius: 16,
++    paddingHorizontal: 14, paddingVertical: 4, marginBottom: 18,
++    shadowColor: "#0F1B33", shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1,
++  },
++  searchInput: { flex: 1, fontSize: 15, color: st.ink, paddingVertical: 10 },
++  section: { fontSize: 12.5, fontWeight: "800", letterSpacing: 1.4, color: st.muted, marginBottom: 10, marginTop: 6 },
++  cardGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 12, marginBottom: 10 },
++  card: {
++    width: "48.3%", backgroundColor: st.card, borderRadius: 20, padding: 14, minHeight: 124,
++    shadowColor: "#0F1B33", shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1,
++  },
++  cardIcon: { width: 48, height: 48, borderRadius: 14, alignItems: "center", justifyContent: "center", marginBottom: 12 },
++  cardTitle: { fontSize: 15.5, fontWeight: "800", color: st.ink },
++  cardSub: { fontSize: 12, color: st.muted, marginTop: 2 },
++  tripBar: {
++    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: st.blueSoft, borderRadius: 14,
++    paddingHorizontal: 12, paddingVertical: 10, marginBottom: 14,
++  },
++  tripText: { flex: 1, color: st.blue, fontWeight: "700", fontSize: 13 },
++  roundRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 16 },
++  roundItem: { width: "24%", alignItems: "center" },
++  roundIcon: {
++    width: 54, height: 54, borderRadius: 27, backgroundColor: st.card, alignItems: "center", justifyContent: "center",
++    shadowColor: "#0F1B33", shadowOpacity: 0.06, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 1,
++  },
++  roundText: { fontSize: 12, fontWeight: "700", color: st.ink, marginTop: 6 },
++  ai: {
++    flexDirection: "row", alignItems: "center", backgroundColor: "#6D28D9", borderRadius: 18, padding: 16,
++    overflow: "hidden", marginBottom: 20, marginTop: 4,
++  },
++  aiGlow: { position: "absolute", right: -40, top: -60, width: 180, height: 180, borderRadius: 90, backgroundColor: "#8B5CF6" },
++  aiTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
++  aiSub: { color: "#EDE9FE", fontSize: 12.5, marginTop: 2 },
++  listCard: { backgroundColor: st.card, borderRadius: 18, overflow: "hidden" },
++  listRow: {
++    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
++    paddingHorizontal: 14, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: st.line,
++  },
++  listText: { fontSize: 14.5, color: st.ink, fontWeight: "600" },
++});
++
+ const styles = StyleSheet.create({
+   flex: { flex: 1, backgroundColor: colors.bg },
+   tabScroll: { flexGrow: 0, backgroundColor: colors.card, borderBottomWidth: 1, borderBottomColor: colors.border },
+diff --git a/mobile-app/src/screens/station/LiveDeparturesView.js b/mobile-app/src/screens/station/LiveDeparturesView.js
+new file mode 100644
+index 0000000..17d66e6
+--- /dev/null
++++ b/mobile-app/src/screens/station/LiveDeparturesView.js
+@@ -0,0 +1,233 @@
++import React, { useCallback, useEffect, useRef, useState } from "react";
++import { View, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator, Linking, AppState } from "react-native";
++import { Text } from "../../i18n/Localized";
++import { getLiveBoard } from "../../api/railwayApi";
++import { describeApiError } from "../../api/client";
++import { useTrip, ToolHeader, TripForm } from "./stationShared";
++
++const REFRESH_MS = 30 * 1000;
++const HOURS = [2, 4, 8];
++
++const dk = {
++  bg: "#050B18",
++  panel: "#0B1428",
++  head: "#101B33",
++  row: "#0B1428",
++  rowMine: "#1C2230",
++  line: "#18233D",
++  text: "#F1F5F9",
++  sub: "#A5B1C8",
++  muted: "#7D8AA5",
++  yellow: "#FBBF24",
++  green: "#34D399",
++  orange: "#FB923C",
++  red: "#F87171",
++  chip: "#131F38",
++};
++
++function mapsSearch(query) {
++  const q = encodeURIComponent(query);
++  Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${q}`).catch(() => {});
++}
++
++/**
++ * Live Departures — the station's running board (RailKit live-at-station,
++ * RapidAPI as fallback), dark like a real platform display. Refreshes
++ * every 30 s while open; pausing when the app is in the background.
++ */
++export default function LiveDeparturesView({ apiBaseUrl, onBack, onOpenTrain }) {
++  const [trip, setTrip] = useTrip();
++  const [station, setStation] = useState(trip.station || null);
++  const [mode, setMode] = useState("departures");
++  const [hours, setHours] = useState(2);
++  const [data, setData] = useState(null);
++  const [error, setError] = useState(null);
++  const [loading, setLoading] = useState(false);
++  const [refreshing, setRefreshing] = useState(false);
++  const [editing, setEditing] = useState(false);
++  const reqId = useRef(0);
++
++  useEffect(() => { if (!station && trip.station) setStation(trip.station); }, [trip.station]); // eslint-disable-line
++
++  const load = useCallback(async ({ quiet } = {}) => {
++    if (!station) return;
++    const my = ++reqId.current;
++    quiet ? setRefreshing(true) : setLoading(true);
++    try {
++      const res = await getLiveBoard(apiBaseUrl, station, { mode, hours });
++      if (my !== reqId.current) return;
++      setData(res); setError(null);
++    } catch (e) {
++      if (my === reqId.current) setError(describeApiError(e));
++    } finally {
++      if (my === reqId.current) { setLoading(false); setRefreshing(false); }
++    }
++  }, [apiBaseUrl, station, mode, hours]);
++
++  useEffect(() => { load(); }, [load]);
++
++  // Auto-refresh every 30 s, only while the app is in the foreground.
++  useEffect(() => {
++    if (!station) return undefined;
++    let id = setInterval(() => load({ quiet: true }), REFRESH_MS);
++    const sub = AppState.addEventListener("change", (s) => {
++      clearInterval(id);
++      if (s === "active") { load({ quiet: true }); id = setInterval(() => load({ quiet: true }), REFRESH_MS); }
++    });
++    return () => { clearInterval(id); sub.remove(); };
++  }, [station, load]);
++
++  const title = mode === "arrivals" ? "Live Arrivals" : "Live Departures";
++  const stationLabel = data?.station_name || trip.stationName || station;
++  const subtitle = station ? `${stationLabel || ""} · ${station} · auto-refresh 30s` : "Your station's running board";
++  const showForm = !station || editing;
++  const trains = data?.trains || [];
++  const amen = data?.amenities || {};
++
++  const atStation = [
++    { key: "waiting", icon: "🛋️", label: "Waiting hall", onPress: () => mapsSearch(`waiting room ${stationLabel} railway station`) },
++    { key: "cloak", icon: "🧳", label: "Cloak room", onPress: () => mapsSearch(`cloak room ${stationLabel} railway station`) },
++    { key: "taxi", icon: "🚕", label: "Taxi / Auto", onPress: () => mapsSearch(`taxi stand near ${stationLabel} railway station`) },
++    { key: "parking", icon: "🅿️", label: "Parking", onPress: () => mapsSearch(`parking ${stationLabel} railway station`) },
++  ];
++
++  return (
++    <View style={{ flex: 1, backgroundColor: dk.bg }}>
++      <ToolHeader
++        dark title={title} subtitle={subtitle} onBack={onBack}
++        right={station && !showForm ? (
++          <TouchableOpacity onPress={() => setEditing(true)} style={styles.changeBtn}>
++            <Text style={styles.changeText}>Station</Text>
++          </TouchableOpacity>
++        ) : null}
++      />
++      <ScrollView
++        contentContainerStyle={{ paddingBottom: 32 }}
++        keyboardShouldPersistTaps="handled"
++        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load({ quiet: true })} tintColor={dk.yellow} />}
++      >
++        {showForm ? (
++          <TripForm
++            apiBaseUrl={apiBaseUrl} trip={trip} setTrip={setTrip}
++            fields={["station"]} submitLabel="Show board"
++            onSubmit={(p) => { setEditing(false); setData(null); setStation(p.station); }}
++          />
++        ) : null}
++
++        {station ? (
++          <>
++            <View style={styles.tabs}>
++              {[["departures", "Departures"], ["arrivals", "Arrivals"]].map(([k, label]) => (
++                <TouchableOpacity key={k} onPress={() => setMode(k)} style={[styles.tab, mode === k && styles.tabOn]}>
++                  <Text style={[styles.tabText, mode === k && styles.tabTextOn]}>{label}</Text>
++                </TouchableOpacity>
++              ))}
++              <TouchableOpacity
++                onPress={() => setHours(HOURS[(HOURS.indexOf(hours) + 1) % HOURS.length])}
++                style={styles.tab}
++                accessibilityLabel="Change time window"
++              >
++                <Text style={styles.tabText}>Next {hours} hrs ▾</Text>
++              </TouchableOpacity>
++            </View>
++
++            <View style={styles.board}>
++              <View style={styles.boardHead}>
++                <Text style={[styles.th, { width: 64 }]}>TIME</Text>
++                <Text style={[styles.th, { flex: 1 }]}>{mode === "arrivals" ? "TRAIN / FROM" : "TRAIN / TO"}</Text>
++                <Text style={[styles.th, { width: 36, textAlign: "center" }]}>PF</Text>
++                <Text style={[styles.th, { width: 84, textAlign: "right" }]}>STATUS</Text>
++              </View>
++              {loading && !data ? <ActivityIndicator color={dk.yellow} style={{ margin: 24 }} /> : null}
++              {!loading && !trains.length ? (
++                <Text style={styles.empty}>{error || data?.error || "No trains reported in this window."}</Text>
++              ) : null}
++              {trains.map((t, i) => {
++                const mine = trip.trainNumber && t.train_number === trip.trainNumber;
++                return (
++                  <TouchableOpacity
++                    key={`${t.train_number}-${i}`}
++                    activeOpacity={0.7}
++                    onPress={() => onOpenTrain && onOpenTrain(t)}
++                    style={[styles.row, mine && styles.rowMine, i === trains.length - 1 && { borderBottomWidth: 0 }]}
++                  >
++                    <Text style={[styles.time, { width: 64 }]} noTranslate>{t.time || "—"}</Text>
++                    <View style={{ flex: 1, paddingRight: 6 }}>
++                      <Text style={[styles.num, mine && { color: dk.yellow }]} noTranslate>{t.train_number}</Text>
++                      <Text numberOfLines={1} style={styles.dest}>
++                        {(mode === "arrivals" ? t.source : t.destination) || t.train_name || ""}
++                      </Text>
++                    </View>
++                    <Text style={[styles.pf, mine && { color: dk.yellow }]} noTranslate>{t.platform || "—"}</Text>
++                    <StatusCell t={t} />
++                  </TouchableOpacity>
++                );
++              })}
++            </View>
++            {error && trains.length ? <Text style={styles.staleNote}>Couldn't refresh: {error}</Text> : null}
++            {data ? (
++              <Text style={styles.staleNote}>
++                Updated {data.updated_at} IST · source: {data.source === "rapidapi" ? "RapidAPI (IRCTC)" : data.source === "railkit" ? "RailKit" : "—"}
++                {refreshing ? " · refreshing…" : ""}
++              </Text>
++            ) : null}
++
++            <Text style={styles.section}>AT THIS STATION</Text>
++            <View style={styles.tiles}>
++              {atStation.map((a) => (
++                <TouchableOpacity key={a.key} style={styles.tile} onPress={a.onPress}>
++                  <Text style={{ fontSize: 22 }} noTranslate>{a.icon}</Text>
++                  <Text style={styles.tileText}>{a.label}</Text>
++                </TouchableOpacity>
++              ))}
++            </View>
++          </>
++        ) : null}
++      </ScrollView>
++    </View>
++  );
++}
++
++function StatusCell({ t }) {
++  let text = "—";
++  let color = dk.muted;
++  let strike = false;
++  if (t.status === "cancelled") { text = "Cancelled"; color = dk.muted; strike = true; }
++  else if (t.status === "delayed") { text = `+${t.delay_minutes} min`; color = t.delay_minutes >= 30 ? dk.red : dk.orange; }
++  else if (t.status === "on_time") { text = "On time"; color = dk.green; }
++  else if (t.status_text) { text = t.status_text; }
++  return (
++    <Text
++      numberOfLines={2}
++      style={[styles.status, { color }, strike && { textDecorationLine: "line-through" }]}
++    >
++      {text}
++    </Text>
++  );
++}
++
++const styles = StyleSheet.create({
++  tabs: { flexDirection: "row", gap: 8, paddingHorizontal: 16, marginBottom: 14, flexWrap: "wrap" },
++  tab: { paddingHorizontal: 16, paddingVertical: 9, borderRadius: 999, backgroundColor: dk.chip },
++  tabOn: { backgroundColor: dk.yellow },
++  tabText: { color: dk.sub, fontWeight: "700", fontSize: 13.5 },
++  tabTextOn: { color: "#1A1300" },
++  board: { marginHorizontal: 16, borderRadius: 20, backgroundColor: dk.panel, overflow: "hidden" },
++  boardHead: { flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 12, backgroundColor: dk.head },
++  th: { color: dk.muted, fontSize: 11.5, fontWeight: "800", letterSpacing: 0.6 },
++  row: { flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: dk.line },
++  rowMine: { backgroundColor: dk.rowMine },
++  time: { color: dk.yellow, fontSize: 16, fontWeight: "800" },
++  num: { color: dk.text, fontSize: 15, fontWeight: "800" },
++  dest: { color: dk.sub, fontSize: 12.5, marginTop: 1 },
++  pf: { width: 36, textAlign: "center", color: dk.text, fontSize: 16, fontWeight: "800" },
++  status: { width: 84, textAlign: "right", fontSize: 12.5, fontWeight: "600" },
++  empty: { color: dk.sub, padding: 20, textAlign: "center", fontSize: 13 },
++  staleNote: { color: dk.muted, fontSize: 11, marginHorizontal: 18, marginTop: 8 },
++  section: { color: dk.muted, fontSize: 12, fontWeight: "800", letterSpacing: 1.3, marginHorizontal: 16, marginTop: 22, marginBottom: 10 },
++  tiles: { flexDirection: "row", gap: 8, paddingHorizontal: 16 },
++  tile: { flex: 1, backgroundColor: dk.head, borderRadius: 16, paddingVertical: 12, alignItems: "center", gap: 4 },
++  tileText: { color: dk.sub, fontSize: 11, fontWeight: "700", textAlign: "center" },
++  changeBtn: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: dk.chip },
++  changeText: { color: dk.yellow, fontWeight: "700", fontSize: 13 },
++});
+diff --git a/mobile-app/src/screens/station/PlatformLocatorView.js b/mobile-app/src/screens/station/PlatformLocatorView.js
+new file mode 100644
+index 0000000..c0afc11
+--- /dev/null
++++ b/mobile-app/src/screens/station/PlatformLocatorView.js
+@@ -0,0 +1,300 @@
++import React, { useCallback, useEffect, useRef, useState } from "react";
++import { View, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator } from "react-native";
++import AsyncStorage from "@react-native-async-storage/async-storage";
++import { Ionicons } from "@expo/vector-icons";
++import { Text } from "../../i18n/Localized";
++import { locatePlatform } from "../../api/railwayApi";
++import { describeApiError } from "../../api/client";
++import { scheduleLocalAlarm, ensureLocalNotificationPermission } from "../../services/pushNotifications";
++import {
++  st, useTrip, ToolHeader, TripForm, Pill, CoachStrip, SectionLabel, Note, formatIn,
++} from "./stationShared";
++
++const SEEN_KEY = "stationTools.platformSeen";
++const POLL_MS = 60 * 1000;
++
++function todayKey() {
++  const d = new Date();
++  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
++}
++
++function nowHHMM() {
++  const d = new Date();
++  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
++}
++
++const SOURCE_BADGE = {
++  station_board_railkit: { text: "✓ Confirmed by station", bg: st.green, color: "#fff" },
++  station_board_rapidapi: { text: "✓ Confirmed by station", bg: st.green, color: "#fff" },
++  railradar_live: { text: "Expected · RailRadar", bg: "#3B82F6", color: "#fff" },
++  railradar_coach_alignment: { text: "Expected · RailRadar", bg: "#3B82F6", color: "#fff" },
++  estimate: { text: "Estimate only", bg: "#475569", color: "#fff" },
++};
++
++/**
++ * Platform Locator (mode="platform") and Coach Position (mode="coach").
++ * Same data — which platform the train comes in on, the real rake and
++ * where the rider's coach stops — with the coach strip leading in coach
++ * mode. "Alert on change" re-checks every minute while the screen is open
++ * and notifies the moment the platform changes.
++ */
++export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mode = "platform" }) {
++  const [trip, setTrip] = useTrip();
++  const [data, setData] = useState(null);
++  const [error, setError] = useState(null);
++  const [loading, setLoading] = useState(false);
++  const [refreshing, setRefreshing] = useState(false);
++  const [editing, setEditing] = useState(false);
++  const [change, setChange] = useState(null);
++  const [alertOn, setAlertOn] = useState(false);
++  const autoRan = useRef(false);
++  const alertRef = useRef(false);
++  alertRef.current = alertOn;
++
++  const run = useCallback(async (t, { quiet } = {}) => {
++    if (!t?.trainNumber || !t?.station) return;
++    quiet ? setRefreshing(true) : setLoading(true);
++    setError(null);
++    try {
++      const res = await locatePlatform(apiBaseUrl, {
++        trainNumber: t.trainNumber, station: t.station, coach: t.coach || undefined, berth: t.berth || undefined,
++      });
++      setData(res);
++      setEditing(false);
++      await checkChange(t, res);
++    } catch (e) {
++      setError(describeApiError(e));
++    } finally {
++      setLoading(false); setRefreshing(false);
++    }
++  }, [apiBaseUrl]);
++
++  // Remember the last platform seen per train/station/day; a different
++  // one on a later check is a platform change.
++  async function checkChange(t, res) {
++    const key = `${t.trainNumber}:${res.station}:${todayKey()}`;
++    let seen = {};
++    try { seen = JSON.parse((await AsyncStorage.getItem(SEEN_KEY)) || "{}") || {}; } catch (e) { seen = {}; }
++    const prev = seen[key];
++    if (prev && prev.platform && res.platform && prev.platform !== res.platform) {
++      const notified = alertRef.current;
++      if (notified) {
++        scheduleLocalAlarm(
++          `Platform changed: ${t.trainNumber}`,
++          `Now arriving at ${res.station_name || res.station} on PF ${res.platform} (was PF ${prev.platform}).`,
++          1,
++        );
++      }
++      setChange({ from: prev.platform, to: res.platform, at: nowHHMM(), notified });
++    }
++    // Keep only today's entries so the store stays tiny.
++    const next = Object.fromEntries(Object.entries(seen).filter(([k]) => k.endsWith(todayKey())));
++    next[key] = { platform: res.platform, at: nowHHMM() };
++    AsyncStorage.setItem(SEEN_KEY, JSON.stringify(next)).catch(() => {});
++  }
++
++  // Open straight on the result when the trip is already known.
++  useEffect(() => {
++    if (autoRan.current) return;
++    if (trip.trainNumber && trip.station) { autoRan.current = true; run(trip); }
++  }, [trip.trainNumber, trip.station]); // eslint-disable-line react-hooks/exhaustive-deps
++
++  // "Alert on change": poll while enabled and the screen is open.
++  useEffect(() => {
++    if (!alertOn || !data) return undefined;
++    const id = setInterval(() => run(trip, { quiet: true }), POLL_MS);
++    return () => clearInterval(id);
++  }, [alertOn, data, trip, run]);
++
++  const isCoach = mode === "coach";
++  const title = isCoach ? "Coach Position" : "Platform Locator";
++  const subtitle = data
++    ? `${data.train_number}${data.train_name ? ` · ${data.train_name}` : ""}`
++    : isCoach ? "Where to stand for your coach" : "Live platform number";
++  const showForm = editing || !data;
++
++  const badge = data ? (SOURCE_BADGE[data.platform_source] || SOURCE_BADGE.estimate) : null;
++  const arrTime = data?.scheduled_arrival || data?.scheduled_departure;
++  const expTime = data?.expected_arrival || data?.expected_departure;
++  const coachLabel = data?.coach || trip.coach;
++
++  const platformCard = data && (
++    <View style={[styles.hero, isCoach && styles.heroCompact]}>
++      <Text style={styles.heroKicker}>
++        {data.cancelled ? "Cancelled today at" : "Arriving at"} {data.station_name || data.station} on
++      </Text>
++      <Text style={[styles.heroNumber, isCoach && { fontSize: 64, lineHeight: 72 }]} noTranslate>{data.platform || "—"}</Text>
++      <Text style={styles.heroLabel}>PLATFORM</Text>
++      <View style={styles.heroPills}>
++        {arrTime ? (
++          <Pill
++            bg="rgba(255,255,255,0.14)" color="#E6ECFA"
++            text={expTime && expTime !== arrTime ? `Arr ${arrTime} → ${expTime}` : `Arr ${arrTime}`}
++          />
++        ) : null}
++        {badge ? <Pill bg={badge.bg} color={badge.color} text={badge.text} /> : null}
++      </View>
++      {data.arrives_in_minutes != null && !data.cancelled ? (
++        <Text style={styles.heroIn}>
++          {formatIn(data.arrives_in_minutes)}
++          {data.delay_minutes > 0 ? ` · running ${data.delay_minutes} min late` : data.delay_minutes === 0 ? " · on time" : ""}
++        </Text>
++      ) : null}
++      {data.platform_source === "estimate" && data.alternate_platform ? (
++        <Text style={styles.heroIn}>No live platform yet — could also be PF {data.alternate_platform}</Text>
++      ) : null}
++    </View>
++  );
++
++  const coachSection = data && (
++    <View style={{ marginHorizontal: 16 }}>
++      <Text style={styles.coachHead}>COACH POSITION · ENGINE → REAR</Text>
++      {data.rake?.length ? (
++        <>
++          <CoachStrip
++            rake={data.rake}
++            coach={coachLabel}
++            onPickCoach={(code) => { const t = { ...trip, coach: code }; setTrip({ coach: code }); run(t, { quiet: true }); }}
++          />
++          {coachLabel && data.coach_found_in_rake === false ? (
++            <Text style={styles.warnText}>Coach {coachLabel} isn't in today's formation — tap your coach above.</Text>
++          ) : !coachLabel ? (
++            <Text style={styles.hint}>Tap your coach to see where to stand.</Text>
++          ) : null}
++        </>
++      ) : (
++        <View style={styles.noRake}>
++          <Ionicons name="information-circle-outline" size={18} color={st.muted} />
++          <Text style={styles.noRakeText}>
++            RailRadar has no coach formation for this train today. Check the coach position display on the platform.
++          </Text>
++        </View>
++      )}
++    </View>
++  );
++
++  const berth = data?.berth;
++  const pos = data?.coach_position;
++  const berthCard = data && (berth || pos) && (
++    <View style={styles.berthCard}>
++      {berth ? (
++        <Text style={styles.berthTitle}>
++          Your berth: {coachLabel ? `${coachLabel} · ` : ""}{berth.berth}{berth.type ? ` (${berth.type})` : ""}
++        </Text>
++      ) : (
++        <Text style={styles.berthTitle}>Coach {coachLabel}</Text>
++      )}
++      <Text style={styles.berthText}>
++        {berth?.nearest_door ? `Door nearest to ${berth.berth} → ${berth.nearest_door} door of ${coachLabel || "your coach"}. ` : ""}
++        {pos ? `Coach ${pos.index + 1} of ${pos.total} from the engine — stand at the ${pos.zone} of PF ${data.platform}.` : ""}
++      </Text>
++    </View>
++  );
++
++  return (
++    <View style={{ flex: 1, backgroundColor: st.bg }}>
++      <ToolHeader
++        title={title}
++        subtitle={subtitle}
++        onBack={onBack}
++        right={data && !showForm ? (
++          <TouchableOpacity onPress={() => setEditing(true)} style={styles.changeBtn}>
++            <Text style={styles.changeText}>Change</Text>
++          </TouchableOpacity>
++        ) : null}
++      />
++      <ScrollView
++        contentContainerStyle={{ paddingBottom: 32 }}
++        keyboardShouldPersistTaps="handled"
++        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => run(trip, { quiet: true })} />}
++      >
++        {showForm && (
++          <TripForm
++            apiBaseUrl={apiBaseUrl} trip={trip} setTrip={setTrip}
++            fields={["train", "station", "coach", "berth"]}
++            submitLabel={isCoach ? "Find my coach" : "Find platform"}
++            loading={loading} error={error}
++            onSubmit={(patch) => run({ ...trip, ...patch })}
++          />
++        )}
++        {loading && !data ? <ActivityIndicator color={st.blue} style={{ marginTop: 24 }} /> : null}
++        {!showForm && error ? <Text style={styles.errorBar}>{error}</Text> : null}
++
++        {data && !showForm && (
++          <>
++            {isCoach ? coachSection : platformCard}
++            {change ? (
++              <View style={styles.changeBanner}>
++                <Text style={styles.changeBannerText}>
++                  ⚠️ Changed from <Text style={{ fontWeight: "800" }}>PF {change.from}</Text> at {change.at}
++                  {change.notified ? " — we notified you" : ""}
++                </Text>
++              </View>
++            ) : null}
++            {isCoach ? platformCard : coachSection}
++            {berthCard}
++            <View style={styles.actions}>
++              <TouchableOpacity
++                style={styles.navBtn}
++                onPress={() => onNavigate && onNavigate({ platform: data.platform, coach: coachLabel })}
++              >
++                <Text style={styles.navBtnText}>🗺️ Navigate to {coachLabel || `PF ${data.platform}`}</Text>
++              </TouchableOpacity>
++              <TouchableOpacity
++                style={[styles.alertBtn, alertOn && styles.alertBtnOn]}
++                onPress={() => { if (!alertOn) ensureLocalNotificationPermission(); setAlertOn((v) => !v); }}
++                accessibilityState={{ selected: alertOn }}
++              >
++                <Text style={[styles.alertBtnText, alertOn && { color: st.blue }]}>
++                  {alertOn ? "🔔 Alert is on" : "🔔 Alert on change"}
++                </Text>
++              </TouchableOpacity>
++            </View>
++            {alertOn ? <Note text="Re-checking every minute while this screen is open. You'll get a notification if the platform changes." /> : null}
++            <Note text={`Checked at ${data.checked_at} IST. ${data.disclaimer}`} />
++          </>
++        )}
++      </ScrollView>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  hero: {
++    marginHorizontal: 16, marginBottom: 14, borderRadius: 24, paddingVertical: 22, paddingHorizontal: 16,
++    backgroundColor: st.navy, alignItems: "center",
++    borderWidth: 1, borderColor: st.navy2,
++    shadowColor: st.navy, shadowOpacity: 0.3, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 5,
++  },
++  heroCompact: { paddingVertical: 16, marginTop: 14 },
++  heroKicker: { color: "#C7D2EA", fontSize: 14 },
++  heroNumber: { color: "#fff", fontSize: 96, fontWeight: "900", lineHeight: 104, marginTop: 2 },
++  heroLabel: { color: "#fff", fontSize: 16, fontWeight: "800", letterSpacing: 0.5 },
++  heroPills: { flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: 8, marginTop: 14 },
++  heroIn: { color: "#AFC0E3", fontSize: 12.5, marginTop: 10, textAlign: "center" },
++  changeBanner: {
++    marginHorizontal: 16, marginBottom: 14, borderRadius: 16, paddingVertical: 11, paddingHorizontal: 14,
++    backgroundColor: st.amberSoft, borderWidth: 1, borderColor: st.amberLine,
++  },
++  changeBannerText: { color: st.ink, fontSize: 13.5 },
++  coachHead: { fontSize: 12, fontWeight: "800", letterSpacing: 1.3, color: st.muted, marginBottom: 2 },
++  hint: { fontSize: 12, color: st.muted, marginTop: 6 },
++  warnText: { fontSize: 12, color: st.amber, marginTop: 6 },
++  noRake: { flexDirection: "row", gap: 8, alignItems: "flex-start", backgroundColor: st.card, padding: 12, borderRadius: 14, marginTop: 6 },
++  noRakeText: { flex: 1, fontSize: 12.5, color: st.muted },
++  berthCard: {
++    backgroundColor: st.card, marginHorizontal: 16, marginTop: 16, borderRadius: 18, padding: 16,
++    shadowColor: "#0F1B33", shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1,
++  },
++  berthTitle: { fontSize: 16, fontWeight: "800", color: st.ink },
++  berthText: { fontSize: 12.5, color: st.muted, marginTop: 4, lineHeight: 17 },
++  actions: { flexDirection: "row", gap: 10, marginHorizontal: 16, marginTop: 16 },
++  navBtn: { flex: 1, backgroundColor: st.blue, borderRadius: 999, paddingVertical: 14, alignItems: "center" },
++  navBtnText: { color: "#fff", fontWeight: "800", fontSize: 14 },
++  alertBtn: { flex: 1, backgroundColor: st.card, borderRadius: 999, paddingVertical: 14, alignItems: "center", borderWidth: 1, borderColor: st.line },
++  alertBtnOn: { borderColor: st.blue, backgroundColor: st.blueSoft },
++  alertBtnText: { color: st.ink, fontWeight: "800", fontSize: 14 },
++  changeBtn: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: st.blueSoft },
++  changeText: { color: st.blue, fontWeight: "700", fontSize: 13 },
++  errorBar: { color: st.red, marginHorizontal: 16, marginBottom: 10, fontSize: 13 },
++});
+diff --git a/mobile-app/src/screens/station/StationNavigatorView.js b/mobile-app/src/screens/station/StationNavigatorView.js
+new file mode 100644
+index 0000000..b53361e
+--- /dev/null
++++ b/mobile-app/src/screens/station/StationNavigatorView.js
+@@ -0,0 +1,357 @@
++import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
++import { View, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from "react-native";
++import { Ionicons } from "@expo/vector-icons";
++import { Text } from "../../i18n/Localized";
++import { getStationMap } from "../../api/railwayApi";
++import { describeApiError } from "../../api/client";
++import { st, useTrip, ToolHeader, TripForm, Pill, Note, formatIn } from "./stationShared";
++
++const FACILITY = {
++  booking: { icon: "🎫", label: "Booking" },
++  toilets: { icon: "🚻", label: "Toilets" },
++  canteen: { icon: "🍽️", label: "Canteen" },
++  water: { icon: "💧", label: "Water" },
++  lift: { icon: "🛗", label: "Lift" },
++  atm: { icon: "🏧", label: "ATM" },
++  cloak_room: { icon: "🧳", label: "Cloak room" },
++  waiting_room: { icon: "🛋️", label: "Waiting" },
++  retiring_room: { icon: "🛏️", label: "Retiring" },
++  lounge: { icon: "☕", label: "Lounge" },
++  wifi: { icon: "📶", label: "WiFi" },
++};
++const STEP_ICON = { walk: "walk-outline", stairs: "trending-up-outline", lift: "swap-vertical-outline", enter: "enter-outline", flag: "flag-outline" };
++
++const ROW_H = 44;
++const ROW_GAP = 26;
++const MAX_ROWS = 6;
++
++/** Which platforms to draw: all of them when few, else PF1-2 plus the ones around the target. */
++function visiblePlatforms(count, target) {
++  if (count <= MAX_ROWS) return Array.from({ length: count }, (_, i) => i + 1);
++  const set = new Set([1, 2, target - 1, target, target + 1].filter((p) => p >= 1 && p <= count));
++  for (let p = count; set.size < MAX_ROWS && p >= 1; p--) set.add(p);
++  return [...set].sort((a, b) => a - b);
++}
++
++/** Dots along a polyline, spaced ~10 px. */
++function dotsAlong(points, gap = 10) {
++  const out = [];
++  for (let i = 0; i < points.length - 1; i++) {
++    const [x1, y1] = points[i];
++    const [x2, y2] = points[i + 1];
++    const len = Math.hypot(x2 - x1, y2 - y1);
++    const n = Math.max(1, Math.floor(len / gap));
++    for (let k = 0; k < n; k++) out.push([x1 + ((x2 - x1) * k) / n, y1 + ((y2 - y1) * k) / n]);
++  }
++  out.push(points[points.length - 1]);
++  return out;
++}
++
++/**
++ * Station Navigator — a schematic of the station (platforms, foot over
++ * bridge, concourse facilities) with the walking route from the main entry
++ * to the rider's platform/coach, step-by-step directions and a step-free
++ * (lift) variant. The target platform comes from the live platform when a
++ * train is given (see Platform Locator), or the platform picked here.
++ */
++export default function StationNavigatorView({ apiBaseUrl, onBack, initialTarget }) {
++  const [trip, setTrip] = useTrip();
++  const [data, setData] = useState(null);
++  const [error, setError] = useState(null);
++  const [loading, setLoading] = useState(false);
++  const [editing, setEditing] = useState(false);
++  const [stepFree, setStepFree] = useState(false);
++  const [platform, setPlatform] = useState(initialTarget?.platform ? parseInt(initialTarget.platform, 10) || null : null);
++  const [guideStep, setGuideStep] = useState(null);
++  const [width, setWidth] = useState(0);
++  const autoRan = useRef(false);
++
++  const load = useCallback(async (t, opts = {}) => {
++    if (!t?.station) return;
++    setLoading(true); setError(null);
++    try {
++      const pf = opts.platform !== undefined ? opts.platform : platform;
++      const res = await getStationMap(apiBaseUrl, t.station, {
++        platform: pf || undefined,
++        trainNumber: pf ? undefined : (t.trainNumber || undefined),
++        coach: t.coach || undefined,
++        stepFree: opts.stepFree !== undefined ? opts.stepFree : stepFree,
++      });
++      setData(res);
++      setEditing(false);
++      setGuideStep(null);
++    } catch (e) {
++      setError(describeApiError(e));
++    } finally {
++      setLoading(false);
++    }
++  }, [apiBaseUrl, platform, stepFree]);
++
++  useEffect(() => {
++    if (autoRan.current || !trip.station) return;
++    autoRan.current = true;
++    load(trip);
++  }, [trip.station]); // eslint-disable-line react-hooks/exhaustive-deps
++
++  const showForm = editing || !data;
++  const target = data?.target_platform;
++  const rows = useMemo(() => (data ? visiblePlatforms(data.platform_count, target) : []), [data, target]);
++
++  // ---- schematic geometry ------------------------------------------------
++  const pad = 16;
++  const top = 26; // room for the "FOB" label
++  const platformsH = rows.length * ROW_H + (rows.length - 1) * ROW_GAP;
++  const concourseTop = top + platformsH + 14;
++  const concourseH = 120;
++  const entryY = concourseTop + concourseH + 8;
++  const mapH = entryY + 20 + 38 + 12;
++  const fobX = width * 0.66;
++  const fobW = 26;
++  const entryX = width * 0.46;
++  // Top row = highest platform; PF1 sits next to the concourse.
++  const rowY = (pf) => {
++    const idx = rows.length - 1 - rows.indexOf(pf);
++    return top + idx * (ROW_H + ROW_GAP);
++  };
++
++  let route = [];
++  if (data && width > 0 && rows.includes(target)) {
++    const yT = rowY(target) + ROW_H / 2;
++    const yC = concourseTop + concourseH - 36;
++    const fobC = fobX + fobW / 2;
++    const cp = data.coach_position;
++    const endX = cp ? pad + 30 + cp.fraction * (width - 2 * pad - 60) : fobC + 70;
++    // Entry -> across the concourse -> foot over bridge -> onto the platform -> coach.
++    route = dotsAlong([[entryX, entryY], [entryX, yC], [fobC, yC], [fobC, yT], [endX, yT]]);
++  }
++  const routeEnd = route.length ? route[route.length - 1] : null;
++
++  const coachLabel = data?.coach || trip.coach;
++  const subtitle = data ? `${data.station_name} (${data.station}) · Ground floor` : "Walk to your platform";
++
++  return (
++    <View style={{ flex: 1, backgroundColor: st.bg }}>
++      <ToolHeader
++        title="Station Navigator" subtitle={subtitle} onBack={onBack}
++        right={data && !showForm ? (
++          <TouchableOpacity onPress={() => setEditing(true)} style={styles.changeBtn}>
++            <Text style={styles.changeText}>Change</Text>
++          </TouchableOpacity>
++        ) : null}
++      />
++      <ScrollView contentContainerStyle={{ paddingBottom: 24 }} keyboardShouldPersistTaps="handled">
++        {showForm && (
++          <TripForm
++            apiBaseUrl={apiBaseUrl} trip={trip} setTrip={setTrip}
++            fields={["station", "trainOptional", "coach"]}
++            submitLabel="Show route" loading={loading} error={error}
++            onSubmit={(p) => { setPlatform(null); load({ ...trip, ...p }, { platform: null }); }}
++          />
++        )}
++        {loading && !data ? <ActivityIndicator color={st.blue} style={{ marginTop: 24 }} /> : null}
++
++        {data && !showForm && (
++          <>
++            {/* Platform picker — switch the destination instantly. */}
++            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pfChips}>
++              {Array.from({ length: data.platform_count }, (_, i) => i + 1).map((p) => (
++                <TouchableOpacity
++                  key={p}
++                  onPress={() => { setPlatform(p); load(trip, { platform: p }); }}
++                  style={[styles.pfChip, p === target && styles.pfChipOn]}
++                >
++                  <Text style={[styles.pfChipText, p === target && { color: "#fff" }]}>PF {p}</Text>
++                </TouchableOpacity>
++              ))}
++            </ScrollView>
++
++            <View style={[styles.map, { height: mapH }]} onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
++              {width > 0 && (
++                <>
++                  {rows.map((pf, i) => {
++                    const y = rowY(pf);
++                    const on = pf === target;
++                    const prev = rows[i - 1];
++                    return (
++                      <React.Fragment key={pf}>
++                        <View style={[styles.platform, { top: y, left: pad, right: pad }, on && styles.platformOn]}>
++                          <Text style={[styles.platformText, on && { color: st.blue }]}>PF {pf}</Text>
++                        </View>
++                        {/* Track between two drawn platforms (a gap marker if some are skipped). */}
++                        {i < rows.length - 1 ? (
++                          <View style={[styles.track, { top: y - ROW_GAP / 2 - 1, left: pad, right: pad }]} />
++                        ) : null}
++                        {prev != null && pf - prev > 1 ? (
++                          <Text style={[styles.gapText, { top: y + ROW_H + 4 }]}>⋯ PF {prev + 1}–{pf - 1}</Text>
++                        ) : null}
++                      </React.Fragment>
++                    );
++                  })}
++                  <Text style={[styles.fobLabel, { left: fobX - 2 }]}>FOB</Text>
++                  <View style={[styles.fob, { left: fobX, width: fobW, top: top - 6, height: concourseTop - top + 6 }]} />
++                  {/* Concourse with its facilities */}
++                  <View style={[styles.concourse, { top: concourseTop, left: pad, right: pad, height: concourseH }]}>
++                    <View style={styles.facilityGrid}>
++                      {data.concourse_facilities.slice(0, 8).map((f) => {
++                        const meta = FACILITY[f];
++                        if (!meta) return null;
++                        const confirmed = data.facilities_confirmed?.includes(f);
++                        return (
++                          <View key={f} style={styles.facility}>
++                            <Text style={{ fontSize: 20 }} noTranslate>{meta.icon}</Text>
++                            <Text style={[styles.facilityText, confirmed && { color: st.ink, fontWeight: "700" }]}>{meta.label}</Text>
++                          </View>
++                        );
++                      })}
++                    </View>
++                  </View>
++                  {route.map(([x, y], i) => (
++                    <View key={i} style={[styles.dot, { left: x - 3.5, top: y - 3.5 }, guideStep != null && styles.dotGuide]} />
++                  ))}
++                  {routeEnd ? (
++                    <View style={[styles.endPin, { left: routeEnd[0] - 11, top: routeEnd[1] - 11 }]}>
++                      <Ionicons name="flag" size={12} color="#fff" />
++                    </View>
++                  ) : null}
++                  <View style={[styles.youHalo, { left: entryX - 18, top: entryY - 18 }]}>
++                    <View style={styles.you} />
++                  </View>
++                  <View style={[styles.entry, { top: entryY + 20, left: entryX - 60 }]}>
++                    <Text style={styles.entryText}>Main Entry</Text>
++                  </View>
++                </>
++              )}
++            </View>
++
++            {/* Bottom sheet */}
++            <View style={styles.sheet}>
++              <View style={styles.sheetHead}>
++                <View style={{ flex: 1 }}>
++                  <Text style={styles.sheetKicker}>
++                    To {coachLabel ? `Coach ${coachLabel} · ` : ""}Platform {target}
++                  </Text>
++                  <Text style={styles.sheetTitle}>{data.walk_minutes} min walk · {data.walk_meters} m</Text>
++                </View>
++                {data.train?.arrives_in_minutes != null ? (
++                  <Pill
++                    bg={data.train.arrives_in_minutes < 10 ? "#FEE2E2" : st.greenSoft}
++                    color={data.train.arrives_in_minutes < 10 ? st.red : "#15803D"}
++                    text={`Train ${formatIn(data.train.arrives_in_minutes)}`}
++                  />
++                ) : null}
++              </View>
++              {data.platform_source && data.platform_source.startsWith("estimate") ? (
++                <Text style={styles.sheetWarn}>Platform is an estimate — no live platform for this train yet.</Text>
++              ) : null}
++
++              {data.steps.map((s, i) => {
++                const active = guideStep === i;
++                const done = guideStep != null && i < guideStep;
++                return (
++                  <View key={i} style={[styles.step, active && styles.stepActive]}>
++                    <View style={[styles.stepNum, (active || done) && { backgroundColor: st.blue }]}>
++                      {done ? <Ionicons name="checkmark" size={14} color="#fff" /> : (
++                        <Text style={[styles.stepNumText, active && { color: "#fff" }]}>{i + 1}</Text>
++                      )}
++                    </View>
++                    <Ionicons name={STEP_ICON[s.icon] || "walk-outline"} size={16} color={st.muted} style={{ marginRight: 6 }} />
++                    <Text style={[styles.stepText, done && { color: st.muted }]}>{s.text} · {s.meters} m</Text>
++                  </View>
++                );
++              })}
++
++              <View style={styles.sheetBtns}>
++                {guideStep == null ? (
++                  <TouchableOpacity style={styles.startBtn} onPress={() => setGuideStep(0)}>
++                    <Text style={styles.startText}>▶ Start</Text>
++                  </TouchableOpacity>
++                ) : (
++                  <TouchableOpacity
++                    style={styles.startBtn}
++                    onPress={() => setGuideStep((g) => (g + 1 >= data.steps.length ? null : g + 1))}
++                  >
++                    <Text style={styles.startText}>{guideStep + 1 >= data.steps.length ? "✓ Arrived" : "Next step ▶"}</Text>
++                  </TouchableOpacity>
++                )}
++                <TouchableOpacity
++                  style={[styles.freeBtn, stepFree && styles.freeBtnOn]}
++                  onPress={() => { const v = !stepFree; setStepFree(v); load(trip, { stepFree: v }); }}
++                  accessibilityState={{ selected: stepFree }}
++                >
++                  <Text style={[styles.freeText, stepFree && { color: st.blue }]}>♿ Step-free{stepFree ? " ✓" : ""}</Text>
++                </TouchableOpacity>
++              </View>
++              {loading ? <ActivityIndicator color={st.blue} style={{ marginTop: 10 }} /> : null}
++              {error ? <Text style={{ color: st.red, marginTop: 8 }}>{error}</Text> : null}
++            </View>
++
++            {data.entrance_sides?.length ? (
++              <View style={styles.infoCard}>
++                <Text style={styles.infoTitle}>Entrances</Text>
++                {data.entrance_sides.map((e, i) => <Text key={i} style={styles.infoLine}>• {e}</Text>)}
++                {data.notable_note ? <Text style={styles.infoLine}>{data.notable_note}</Text> : null}
++              </View>
++            ) : null}
++            <Note text={data.disclaimer} />
++          </>
++        )}
++      </ScrollView>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  pfChips: { gap: 8, paddingHorizontal: 16, paddingBottom: 10 },
++  pfChip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 999, backgroundColor: st.card, borderWidth: 1, borderColor: st.line },
++  pfChipOn: { backgroundColor: st.blue, borderColor: st.blue },
++  pfChipText: { fontSize: 13, fontWeight: "700", color: st.ink },
++  map: { backgroundColor: "#EEF2F7", marginHorizontal: 0 },
++  fobLabel: { position: "absolute", top: 6, fontSize: 11, fontWeight: "800", color: "#475569" },
++  fob: { position: "absolute", backgroundColor: st.fob, borderRadius: 4 },
++  platform: { position: "absolute", height: ROW_H, borderRadius: 8, backgroundColor: st.platform, justifyContent: "center", paddingLeft: 12 },
++  platformOn: { backgroundColor: st.blueSoft, borderWidth: 1.5, borderColor: "#93B4F5" },
++  platformText: { fontSize: 13, fontWeight: "800", color: "#334155" },
++  track: { position: "absolute", height: 0, borderTopWidth: 2, borderStyle: "dashed", borderColor: "#A5B0C2" },
++  gapText: { position: "absolute", left: 20, fontSize: 10, color: st.muted },
++  concourse: {
++    position: "absolute", backgroundColor: "#fff", borderRadius: 14, borderWidth: 1, borderColor: st.line,
++    paddingHorizontal: 8, paddingVertical: 10,
++  },
++  facilityGrid: { flexDirection: "row", flexWrap: "wrap", rowGap: 8 },
++  facility: { width: "25%", alignItems: "center", gap: 2 },
++  facilityText: { fontSize: 10.5, color: st.muted },
++  dot: { position: "absolute", width: 7, height: 7, borderRadius: 3.5, backgroundColor: st.blue },
++  dotGuide: { backgroundColor: "#1D4ED8" },
++  endPin: {
++    position: "absolute", width: 22, height: 22, borderRadius: 11, backgroundColor: st.blue,
++    alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: "#fff",
++  },
++  youHalo: { position: "absolute", width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(37,99,235,0.18)", alignItems: "center", justifyContent: "center" },
++  you: { width: 18, height: 18, borderRadius: 9, backgroundColor: st.blue, borderWidth: 2, borderColor: "#fff" },
++  entry: { position: "absolute", width: 120, height: 38, borderRadius: 10, backgroundColor: st.ink, alignItems: "center", justifyContent: "center" },
++  entryText: { color: "#fff", fontWeight: "800", fontSize: 13 },
++  sheet: {
++    backgroundColor: st.card, marginTop: -6, borderTopLeftRadius: 26, borderTopRightRadius: 26, padding: 18,
++    shadowColor: "#0F1B33", shadowOpacity: 0.08, shadowRadius: 14, shadowOffset: { width: 0, height: -4 }, elevation: 6,
++  },
++  sheetHead: { flexDirection: "row", alignItems: "flex-start", gap: 8, marginBottom: 12 },
++  sheetKicker: { fontSize: 13, color: st.muted },
++  sheetTitle: { fontSize: 24, fontWeight: "900", color: st.ink, marginTop: 2 },
++  sheetWarn: { fontSize: 12, color: st.amber, marginBottom: 8 },
++  step: { flexDirection: "row", alignItems: "center", paddingVertical: 7, paddingHorizontal: 6, borderRadius: 12 },
++  stepActive: { backgroundColor: st.blueSoft },
++  stepNum: { width: 28, height: 28, borderRadius: 14, backgroundColor: st.blueSoft, alignItems: "center", justifyContent: "center", marginRight: 10 },
++  stepNumText: { color: st.blue, fontWeight: "800", fontSize: 13 },
++  stepText: { flex: 1, fontSize: 14.5, color: st.ink },
++  sheetBtns: { flexDirection: "row", gap: 10, marginTop: 14 },
++  startBtn: { flex: 1, backgroundColor: st.blue, borderRadius: 999, paddingVertical: 14, alignItems: "center" },
++  startText: { color: "#fff", fontWeight: "800", fontSize: 15 },
++  freeBtn: { flex: 1, backgroundColor: "#EEF2F7", borderRadius: 999, paddingVertical: 14, alignItems: "center" },
++  freeBtnOn: { backgroundColor: st.blueSoft, borderWidth: 1, borderColor: st.blue },
++  freeText: { color: st.ink, fontWeight: "800", fontSize: 15 },
++  changeBtn: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: st.blueSoft },
++  changeText: { color: st.blue, fontWeight: "700", fontSize: 13 },
++  infoCard: { backgroundColor: st.card, marginHorizontal: 16, marginTop: 14, borderRadius: 16, padding: 14 },
++  infoTitle: { fontSize: 14, fontWeight: "800", color: st.ink, marginBottom: 4 },
++  infoLine: { fontSize: 12.5, color: st.muted, marginTop: 2 },
++});
+diff --git a/mobile-app/src/screens/station/stationShared.js b/mobile-app/src/screens/station/stationShared.js
+new file mode 100644
+index 0000000..d8bd676
+--- /dev/null
++++ b/mobile-app/src/screens/station/stationShared.js
+@@ -0,0 +1,297 @@
++import React, { useCallback, useEffect, useRef, useState } from "react";
++import { View, StyleSheet, TouchableOpacity, ScrollView } from "react-native";
++import AsyncStorage from "@react-native-async-storage/async-storage";
++import { Ionicons } from "@expo/vector-icons";
++import { Text } from "../../i18n/Localized";
++import LabeledInput from "../../components/LabeledInput";
++import StationField from "../../components/StationField";
++import PrimaryButton from "../../components/PrimaryButton";
++
++/**
++ * Shared bits for the redesigned "At the station" tools (Station Navigator,
++ * Platform Locator, Coach Position, Live Departures). The trip the rider
++ * enters once (train, station, coach, berth) is remembered and shared by
++ * all four screens, so "Navigate to B2" or the Live Departures board open
++ * already filled in.
++ */
++
++// Palette taken from the mockups (clean white cards on a pale blue-grey
++// background, bright blue accents, dark navy hero cards).
++export const st = {
++  bg: "#F3F5F9",
++  card: "#FFFFFF",
++  ink: "#0F1B33",
++  muted: "#6B778C",
++  line: "#E3E8EF",
++  blue: "#2563EB",
++  blueSoft: "#E4ECFD",
++  navy: "#0E1F4D",
++  navy2: "#1E3A8A",
++  green: "#16A34A",
++  greenSoft: "#DCFCE7",
++  amberSoft: "#FFF4E5",
++  amberLine: "#F7D9A8",
++  amber: "#B45309",
++  red: "#DC2626",
++  platform: "#E2E7EF",
++  fob: "#CBD3DF",
++};
++
++const TRIP_KEY = "stationTools.trip";
++const listeners = new Set();
++let memoryTrip = null;
++
++/** The remembered trip: { trainNumber, station, stationName, coach, berth }. */
++export function useTrip() {
++  const [trip, setTripState] = useState(memoryTrip || {});
++  useEffect(() => {
++    let alive = true;
++    if (!memoryTrip) {
++      AsyncStorage.getItem(TRIP_KEY).then((raw) => {
++        if (!alive || !raw) return;
++        try { memoryTrip = JSON.parse(raw) || {}; setTripState(memoryTrip); } catch (e) { /* ignore */ }
++      }).catch(() => {});
++    }
++    const l = (t) => setTripState(t);
++    listeners.add(l);
++    return () => { alive = false; listeners.delete(l); };
++  }, []);
++  const setTrip = useCallback((patch) => {
++    memoryTrip = { ...(memoryTrip || {}), ...patch };
++    listeners.forEach((l) => l(memoryTrip));
++    AsyncStorage.setItem(TRIP_KEY, JSON.stringify(memoryTrip)).catch(() => {});
++  }, []);
++  return [trip, setTrip];
++}
++
++/** Screen header from the mockups: round back button, title, subtitle. */
++export function ToolHeader({ title, subtitle, onBack, dark, right }) {
++  return (
++    <View style={styles.header}>
++      <TouchableOpacity
++        onPress={onBack}
++        style={[styles.backBtn, dark && styles.backBtnDark]}
++        accessibilityRole="button"
++        accessibilityLabel="Back to all tools"
++      >
++        <Ionicons name="arrow-back" size={20} color={dark ? "#E5E9F2" : st.ink} />
++      </TouchableOpacity>
++      <View style={{ flex: 1 }}>
++        <Text style={[styles.headerTitle, dark && { color: "#F8FAFC" }]}>{title}</Text>
++        {subtitle ? <Text numberOfLines={1} style={[styles.headerSub, dark && { color: "#8C9AB5" }]}>{subtitle}</Text> : null}
++      </View>
++      {right}
++    </View>
++  );
++}
++
++/**
++ * Train / station / coach / berth form. `fields` picks which rows show.
++ * Calls onSubmit(tripPatch) after saving the values to the shared trip.
++ */
++export function TripForm({ apiBaseUrl, trip, setTrip, fields = ["train", "station"], submitLabel = "Find", loading, onSubmit, error }) {
++  const [trainNumber, setTrainNumber] = useState(trip.trainNumber || "");
++  const [station, setStation] = useState(trip.station || "");
++  const [stationName, setStationName] = useState(trip.stationName || null);
++  const [coach, setCoach] = useState(trip.coach || "");
++  const [berth, setBerth] = useState(trip.berth ? String(trip.berth) : "");
++  const [localError, setLocalError] = useState(null);
++
++  // The saved trip loads asynchronously on first open — pick it up.
++  useEffect(() => {
++    if (trip.trainNumber && !trainNumber) setTrainNumber(trip.trainNumber);
++    if (trip.station && !station) { setStation(trip.station); setStationName(trip.stationName || null); }
++    if (trip.coach && !coach) setCoach(trip.coach);
++    if (trip.berth && !berth) setBerth(String(trip.berth));
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [trip.trainNumber, trip.station, trip.coach, trip.berth]);
++
++  function submit() {
++    const needTrain = fields.includes("train") && !fields.includes("trainOptional");
++    if (needTrain && !/^\d{5}$/.test(trainNumber.trim())) { setLocalError("Enter a valid 5-digit train number."); return; }
++    if (fields.includes("trainOptional") && trainNumber.trim() && !/^\d{5}$/.test(trainNumber.trim())) { setLocalError("Train number must be 5 digits."); return; }
++    if (fields.includes("station") && !station.trim()) { setLocalError("Pick a station."); return; }
++    if (fields.includes("coach") && coach.trim() && !/^[A-Za-z]{1,3}\d{1,2}$/.test(coach.trim())) { setLocalError("Coach looks like B2, S4 or A1."); return; }
++    setLocalError(null);
++    const patch = {
++      trainNumber: trainNumber.trim(),
++      station: station.trim().toUpperCase(),
++      stationName: stationName || null,
++      coach: coach.trim().toUpperCase(),
++      berth: berth.trim() ? parseInt(berth, 10) || null : null,
++    };
++    setTrip(patch);
++    onSubmit && onSubmit(patch);
++  }
++
++  const showTrain = fields.includes("train") || fields.includes("trainOptional");
++  return (
++    <View style={styles.formCard}>
++      {showTrain && (
++        <LabeledInput
++          label={fields.includes("trainOptional") ? "Train number (optional)" : "Train number"}
++          placeholder="e.g. 12785" value={trainNumber} onChangeText={setTrainNumber}
++          keyboardType="number-pad" maxLength={5}
++        />
++      )}
++      {fields.includes("station") && (
++        <StationField
++          label="Station" placeholder="e.g. KRNT or Kurnool" icon="location-outline"
++          value={station} resolvedName={stationName}
++          onChangeText={(t) => { setStation(t); setStationName(null); }}
++          onSelectStation={(m) => { setStation(m.code); setStationName(m.name); }}
++          apiBaseUrl={apiBaseUrl} style={{ marginBottom: 12 }}
++        />
++      )}
++      {(fields.includes("coach") || fields.includes("berth")) && (
++        <View style={{ flexDirection: "row", gap: 10 }}>
++          {fields.includes("coach") && (
++            <LabeledInput label="Coach (optional)" placeholder="B2" value={coach} onChangeText={(t) => setCoach(t.toUpperCase())} maxLength={4} style={{ flex: 1 }} />
++          )}
++          {fields.includes("berth") && (
++            <LabeledInput label="Berth (optional)" placeholder="34" value={berth} onChangeText={setBerth} keyboardType="number-pad" maxLength={3} style={{ flex: 1 }} />
++          )}
++        </View>
++      )}
++      <PrimaryButton title={submitLabel} onPress={submit} loading={loading} style={{ backgroundColor: st.blue, shadowColor: st.blue }} />
++      {(localError || error) ? <Text style={styles.error}>{localError || error}</Text> : null}
++    </View>
++  );
++}
++
++/** Pill / chip used for small status badges. */
++export function Pill({ text, bg, color, style, icon }) {
++  return (
++    <View style={[styles.pill, { backgroundColor: bg }, style]}>
++      {icon ? <Ionicons name={icon} size={12} color={color} style={{ marginRight: 4 }} /> : null}
++      <Text style={[styles.pillText, { color }]}>{text}</Text>
++    </View>
++  );
++}
++
++/**
++ * The rake, engine -> rear, as a row of coach boxes with the rider's coach
++ * raised in blue, plus a "STAND HERE" marker under it.
++ */
++export function CoachStrip({ rake, coach, onPickCoach }) {
++  const scrollRef = useRef(null);
++  const [width, setWidth] = useState(0);
++  const coaches = (rake || []).filter((c) => !(/^(ENG|LOCO|L)$/i.test(c.code || "") || /engine|loco/i.test(c.category || "")));
++  const idx = coaches.findIndex((c) => c.code?.toUpperCase() === (coach || "").toUpperCase());
++  // Short rakes fit the screen like the mockup; long ones (20+ coaches)
++  // scroll, and open with the rider's coach centred over the marker.
++  const fits = coaches.length <= 9;
++  const BOX = 49;
++  useEffect(() => {
++    if (fits || idx < 0 || !width || !scrollRef.current) return;
++    const x = Math.max(0, (idx + 1) * BOX - width / 2 + BOX / 2);
++    scrollRef.current.scrollTo({ x, animated: false });
++  }, [fits, idx, width]);
++  if (!coaches.length) return null;
++  const frac = idx >= 0 ? (idx + 1.5) / (coaches.length + 1) : null; // +1 for the engine box
++  const boxes = [
++    <View key="engine" style={[styles.coachBox, styles.engineBox, fits && styles.coachFlex]}>
++      <Text style={{ fontSize: 16 }} noTranslate>🚂</Text>
++    </View>,
++    ...coaches.map((c, i) => {
++      const mine = i === idx;
++      return (
++        <TouchableOpacity
++          key={`${c.code}-${i}`}
++          activeOpacity={onPickCoach ? 0.7 : 1}
++          onPress={() => onPickCoach && onPickCoach(c.code)}
++          style={[styles.coachBox, fits && styles.coachFlex, mine && styles.coachBoxMine]}
++        >
++          <Text noTranslate style={[styles.coachCode, mine && { color: "#fff" }]}>{c.code}</Text>
++        </TouchableOpacity>
++      );
++    }),
++  ];
++  return (
++    <View onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
++      {fits ? (
++        <View style={styles.rakeRow}>{boxes}</View>
++      ) : (
++        <ScrollView ref={scrollRef} horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rakeRow}>{boxes}</ScrollView>
++      )}
++      <View style={styles.rakeLine} />
++      <View style={styles.rakeEnds}>
++        <Text style={styles.rakeEnd}>◀ Engine end</Text>
++        <Text style={styles.rakeEnd}>Rear end ▶</Text>
++      </View>
++      {frac != null && width > 0 ? (
++        <View style={[styles.standWrap, { left: fits ? Math.min(Math.max(frac * width - 70, 0), width - 140) : width / 2 - 70 }]} pointerEvents="none">
++          <Ionicons name="arrow-up" size={16} color={st.ink} />
++          <Text style={styles.standHere}>STAND HERE</Text>
++          {!fits ? <Text style={styles.standSub}>{Math.round(frac * 100)}% along the train</Text> : null}
++        </View>
++      ) : null}
++      {frac != null ? <View style={{ height: fits ? 30 : 44 }} /> : null}
++    </View>
++  );
++}
++
++export function SectionLabel({ children, dark, style }) {
++  return <Text style={[styles.sectionLabel, dark && { color: "#8C9AB5" }, style]}>{children}</Text>;
++}
++
++export function Note({ text, dark }) {
++  if (!text) return null;
++  return <Text style={[styles.note, dark && { color: "#7C89A3" }]}>{text}</Text>;
++}
++
++export function EmptyState({ icon, title, text }) {
++  return (
++    <View style={styles.empty}>
++      <Ionicons name={icon} size={30} color={st.muted} />
++      <Text style={styles.emptyTitle}>{title}</Text>
++      {text ? <Text style={styles.emptyText}>{text}</Text> : null}
++    </View>
++  );
++}
++
++/** "10:22" -> minutes-from-now text like "in 14 min" / "2 h 5 min". */
++export function formatIn(mins) {
++  if (mins == null) return null;
++  if (mins <= 0) return mins > -5 ? "Due now" : "Arrived / left";
++  if (mins < 60) return `in ${mins} min`;
++  return `in ${Math.floor(mins / 60)} h ${mins % 60} min`;
++}
++
++const styles = StyleSheet.create({
++  header: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 12 },
++  backBtn: {
++    width: 42, height: 42, borderRadius: 21, backgroundColor: "#fff", alignItems: "center", justifyContent: "center",
++    shadowColor: "#000", shadowOpacity: 0.08, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 2,
++  },
++  backBtnDark: { backgroundColor: "#111C33" },
++  headerTitle: { fontSize: 20, fontWeight: "800", color: st.ink },
++  headerSub: { fontSize: 12.5, color: st.muted, marginTop: 1 },
++  formCard: {
++    backgroundColor: st.card, borderRadius: 20, padding: 16, marginHorizontal: 16, marginBottom: 14,
++    shadowColor: "#0F1B33", shadowOpacity: 0.06, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 2,
++  },
++  error: { color: st.red, fontSize: 13, marginTop: 8 },
++  pill: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999 },
++  pillText: { fontSize: 12.5, fontWeight: "700" },
++  rakeRow: { flexDirection: "row", gap: 5, paddingVertical: 8, alignItems: "center" },
++  coachFlex: { flex: 1, minWidth: 0, paddingHorizontal: 0 },
++  coachBox: { minWidth: 44, height: 46, paddingHorizontal: 6, borderRadius: 8, backgroundColor: st.platform, alignItems: "center", justifyContent: "center" },
++  engineBox: { backgroundColor: st.ink, borderTopLeftRadius: 14, borderBottomLeftRadius: 14 },
++  coachBoxMine: {
++    backgroundColor: st.blue, height: 56, minWidth: 54,
++    shadowColor: st.blue, shadowOpacity: 0.35, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 4,
++  },
++  coachCode: { fontSize: 12.5, fontWeight: "800", color: st.ink },
++  rakeLine: { height: 3, backgroundColor: "#94A3B8", borderRadius: 2, marginTop: 2 },
++  rakeEnds: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginTop: 4 },
++  rakeEnd: { fontSize: 12, color: st.muted },
++  standWrap: { position: "absolute", bottom: 0, width: 140, alignItems: "center" },
++  standHere: { fontSize: 11, fontWeight: "800", color: st.blue },
++  standSub: { fontSize: 10, color: st.muted },
++  sectionLabel: { fontSize: 12, fontWeight: "800", letterSpacing: 1.2, color: st.muted, textTransform: "uppercase", marginHorizontal: 16, marginTop: 6, marginBottom: 8 },
++  note: { fontSize: 11, color: st.muted, marginHorizontal: 16, marginTop: 8, lineHeight: 15 },
++  empty: { alignItems: "center", padding: 24, gap: 6 },
++  emptyTitle: { fontSize: 15, fontWeight: "700", color: st.ink, textAlign: "center" },
++  emptyText: { fontSize: 13, color: st.muted, textAlign: "center" },
++});
+diff --git a/mobile-app/src/services/pushNotifications.js b/mobile-app/src/services/pushNotifications.js
+index b96a64c..e850fa0 100644
+--- a/mobile-app/src/services/pushNotifications.js
++++ b/mobile-app/src/services/pushNotifications.js
+@@ -449,4 +449,22 @@ export function addNotificationResponseListener(handler) {
+ export function addNotificationReceivedListener(handler) {
+   const sub = Notifications.addNotificationReceivedListener(handler);
+   return () => sub.remove();
+-}
+\ No newline at end of file
++}
++/** Asks for permission to show local notifications (the Platform Locator's
++ * "Alert on change"). Resolves true when notifications can be shown. */
++export async function ensureLocalNotificationPermission() {
++  try {
++    if (Platform.OS === "web") {
++      if (typeof Notification === "undefined") return false;
++      if (Notification.permission === "granted") return true;
++      if (Notification.permission === "denied") return false;
++      return (await Notification.requestPermission()) === "granted";
++    }
++    const current = await Notifications.getPermissionsAsync();
++    if (current.status === "granted") return true;
++    const asked = await Notifications.requestPermissionsAsync();
++    return asked.status === "granted";
++  } catch (e) {
++    return false;
++  }
++}

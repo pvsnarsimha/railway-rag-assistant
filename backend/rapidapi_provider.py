@@ -162,3 +162,14 @@ def get_seat_availability(train_number: str, source_code: str, dest_code: str,
     params = {k: v for k, v in params.items() if v is not None}
     return _get("/api/v1/checkSeatAvailability", params)
 
+
+
+def get_live_station(station_code: str, hours: int = 2) -> dict:
+    """Trains due at a station in the next `hours`, via RapidAPI's
+    /api/v3/getLiveStation. Used by station_tools.py only as the fallback
+    when RailKit's live-at-station board has nothing for the station.
+    Returned raw - station_tools.normalize_board_row handles the row shape."""
+    return _get("/api/v3/getLiveStation", {
+        "fromStationCode": station_code.upper(),
+        "hours": hours if hours in (1, 2, 4, 8) else 2,
+    })

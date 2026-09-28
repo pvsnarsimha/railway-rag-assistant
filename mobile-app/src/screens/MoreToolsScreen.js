@@ -1,6 +1,13 @@
-import React, { useState, useCallback } from "react";
-import { View, StyleSheet, ScrollView, TouchableOpacity, Linking } from "react-native";
-import { Text } from "../i18n/Localized";
+import React, { useState, useCallback, useEffect } from "react";
+import { View, StyleSheet, ScrollView, TouchableOpacity, Linking, BackHandler } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { Text, TextInput, Alert } from "../i18n/Localized";
+import StationNavigatorView from "./station/StationNavigatorView";
+import PlatformLocatorView from "./station/PlatformLocatorView";
+import LiveDeparturesView from "./station/LiveDeparturesView";
+import { st, useTrip, ToolHeader } from "./station/stationShared";
+import ScreenLanguageBar from "../components/ScreenLanguageBar";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import NearbyStationMap from "../components/NearbyStationMap";
 import RoutePositionMap from "../components/RoutePositionMap";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -2114,40 +2121,292 @@ const TOOL_COMPONENTS = {
   bookingwindow: BookingWindowTool, stationnav: StationNavigatorTool,
 };
 
-// BUGFIX: jumping here from Live Tracking's "Coach layout" shortcut used
-// to always land on the first tab ("Platform") and a blank train number —
-// route.params (see LiveTrackingScreen.web.js's bottom bar) now opens
-// straight on the Coach Layout tab with the train number already filled
-// in, same real value the user already typed, not a second re-entry.
-export default function MoreToolsScreen({ route }) {
-  const { apiBaseUrl } = useSettings();
-  const initialTab = route?.params?.initialTab && TOOLS.some((t) => t.key === route.params.initialTab)
-    ? route.params.initialTab
-    : "platform";
-  const initialTrainNumber = route?.params?.trainNumber ? String(route.params.trainNumber).trim() : "";
-  const [active, setActive] = useState(initialTab);
-  const ActiveComponent = TOOL_COMPONENTS[active];
+/* ---------------------------------------------------------------------
+ * REDESIGN: More Tools hub (mockup "More Tools"). A searchable home with
+ * the four "At the station" tools as cards, round shortcuts for Plan &
+ * Book and On board, an "Ask Rail AI" banner, and every other tool listed
+ * below. Tapping a tool opens it full-screen with a back button (Android's
+ * hardware back returns to the hub too).
+ * ------------------------------------------------------------------- */
+const STATION_TOOLS = [
+  { key: "stationnav", icon: "🗺️", tint: "#E0F2FE", title: "Station Navigator", sub: "Walk to your platform" },
+  { key: "platform", icon: "🚉", tint: "#FFEDD5", title: "Platform Locator", sub: "Live PF number" },
+  { key: "coachpos", icon: "🧭", tint: "#DCFCE7", title: "Coach Position", sub: "Where to stand" },
+  { key: "departures", icon: "📺", tint: "#FCE7F3", title: "Live Departures", sub: "Station board" },
+];
+const PLAN_TOOLS = [
+  { key: "seatavail", icon: "💺", title: "Seat Avail.", homeScreen: "SeatAvailability" },
+  { key: "farecalc", icon: "💰", title: "Fare Calc", homeScreen: "FareEnquiry" },
+  { key: "bookingwindow", icon: "⏰", title: "Tatkal Timer" },
+  { key: "journeyplanner", icon: "🔁", title: "Alternates" },
+];
+const ONBOARD_TOOLS = [
+  { key: "pantry", icon: "🍱", title: "Food" },
+  { key: "smartalarm", icon: "🔔", title: "Wake Alarm" },
+  { key: "railmadad", icon: "🧹", title: "Rail Madad", url: "https://railmadad.indianrailways.gov.in/" },
+  { key: "sos", icon: "🆘", title: "SOS" },
+];
+// Tools that open their own full-screen view (not wrapped in a ScrollView).
+const FULLSCREEN_TOOLS = new Set(["stationnav", "platform", "coachpos", "departures"]);
+// Old tab keys that now live inside the redesigned station tools.
+const TOOL_ALIASES = { platformnav: "stationnav", coach: "coachpos" };
 
+const TOOL_TITLES = {
+  stationnav: "Station Navigator", platform: "Platform Locator", coachpos: "Coach Position", departures: "Live Departures",
+  ...Object.fromEntries(TOOLS.map((t) => [t.key, t.label.replace(/^\S+\s/, "")])),
+  bookingwindow: "Tatkal Timer & Booking Window", journeyplanner: "Alternates · Journey Planner",
+  pantry: "Food on Train", smartalarm: "Wake-up Alarm", coach: "Coach Layout",
+};
+
+function resolveToolKey(key) {
+  const k = TOOL_ALIASES[key] || key;
+  return FULLSCREEN_TOOLS.has(k) || TOOL_COMPONENTS[k] ? k : null;
+}
+
+// The tab's own header is hidden for this screen (App.js) so the hub can
+// show its big "More Tools" title like the mockup; this shell adds the
+// status-bar inset and the language / speak strip every screen carries.
+export default function MoreToolsScreen(props) {
+  const insets = useSafeAreaInsets();
+  const [dark, setDark] = useState(false);
   return (
-    <View style={styles.flex}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabScroll} contentContainerStyle={styles.tabScrollContent}>
-        {TOOLS.map((t) => (
-          <TouchableOpacity key={t.key} style={[styles.tab, active === t.key && styles.tabActive]} onPress={() => setActive(t.key)}>
-            <Text style={[styles.tabText, active === t.key && styles.tabTextActive]}>{t.label}</Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
-      <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
-        {ActiveComponent && (
-          <ActiveComponent
-            apiBaseUrl={apiBaseUrl}
-            {...(active === "coach" ? { initialTrainNumber } : null)}
-          />
-        )}
-      </ScrollView>
+    <View style={{ flex: 1, paddingTop: insets.top, backgroundColor: dark ? "#050B18" : st.bg }}>
+      <ScreenLanguageBar style={{ paddingHorizontal: 12, paddingTop: 8, marginBottom: 0 }} />
+      <MoreToolsContent {...props} onDarkChange={setDark} />
     </View>
   );
 }
+
+function MoreToolsContent({ route, navigation, onDarkChange }) {
+  const { apiBaseUrl } = useSettings();
+  const [trip, setTrip] = useTrip();
+  const [active, setActive] = useState(null);
+  const [navTarget, setNavTarget] = useState(null);
+  const [query, setQuery] = useState("");
+  const [initialTrainNumber, setInitialTrainNumber] = useState("");
+
+  // Deep links: Live Tracking's "Coach layout" button passes
+  // { initialTab: "coach", trainNumber } — open Coach Position with that
+  // train filled in. Re-runs whenever new params arrive, not just on mount.
+  const params = route?.params;
+  useEffect(() => {
+    const key = params?.initialTab ? resolveToolKey(params.initialTab) : null;
+    if (!key) return;
+    const trainNo = params?.trainNumber ? String(params.trainNumber).trim() : "";
+    if (trainNo) {
+      setInitialTrainNumber(trainNo);
+      if (trainNo !== trip.trainNumber) setTrip({ trainNumber: trainNo, station: "", stationName: null, coach: "", berth: null });
+    }
+    setActive(key);
+    navigation?.setParams?.({ initialTab: undefined, trainNumber: undefined });
+  }, [params?.initialTab, params?.trainNumber]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Hardware back closes the open tool instead of leaving the tab.
+  useEffect(() => {
+    if (!active) return undefined;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => { setActive(null); return true; });
+    return () => sub.remove();
+  }, [active]);
+
+  const open = useCallback((tool) => {
+    if (tool.homeScreen) { navigation?.navigate?.("Home", { screen: tool.homeScreen }); return; }
+    if (tool.url) { Linking.openURL(tool.url).catch(() => {}); return; }
+    if (tool.key === "sos") {
+      Alert.alert("Emergency help", "Call the railway helpline or national emergency number.", [
+        { text: "Rail helpline 139", onPress: () => Linking.openURL("tel:139").catch(() => {}) },
+        { text: "Emergency 112", onPress: () => Linking.openURL("tel:112").catch(() => {}) },
+        { text: "Cancel", style: "cancel" },
+      ]);
+      return;
+    }
+    if (tool.key === "ai") { navigation?.navigate?.("Chat"); return; }
+    setNavTarget(null);
+    setActive(tool.key);
+  }, [navigation]);
+
+  const close = useCallback(() => setActive(null), []);
+  useEffect(() => { onDarkChange && onDarkChange(active === "departures"); }, [active, onDarkChange]);
+
+  if (active === "stationnav") {
+    return <StationNavigatorView key={JSON.stringify(navTarget)} apiBaseUrl={apiBaseUrl} onBack={close} initialTarget={navTarget} />;
+  }
+  if (active === "platform" || active === "coachpos") {
+    return (
+      <PlatformLocatorView
+        key={active}
+        apiBaseUrl={apiBaseUrl} onBack={close} mode={active === "coachpos" ? "coach" : "platform"}
+        onNavigate={(target) => { setNavTarget(target); setActive("stationnav"); }}
+      />
+    );
+  }
+  if (active === "departures") {
+    return (
+      <LiveDeparturesView
+        apiBaseUrl={apiBaseUrl} onBack={close}
+        onOpenTrain={(t) => { setTrip({ trainNumber: t.train_number, coach: "", berth: null }); setActive("platform"); }}
+      />
+    );
+  }
+  if (active && TOOL_COMPONENTS[active]) {
+    const ActiveComponent = TOOL_COMPONENTS[active];
+    return (
+      <View style={[styles.flex, { backgroundColor: st.bg }]}>
+        <ToolHeader title={TOOL_TITLES[active] || "Tool"} onBack={close} />
+        <ScrollView style={styles.flex} contentContainerStyle={[styles.content, { paddingTop: 0 }]} keyboardShouldPersistTaps="handled">
+          <ActiveComponent apiBaseUrl={apiBaseUrl} {...(active === "coach" ? { initialTrainNumber } : null)} />
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // ---- hub ----
+  const q = query.trim().toLowerCase();
+  const others = TOOLS.filter((t) => !["platform", "platformnav", "stationnav", "pantry", "smartalarm", "bookingwindow", "journeyplanner"].includes(t.key));
+  const everything = [
+    ...STATION_TOOLS.map((t) => ({ ...t, label: `${t.icon} ${t.title}` })),
+    ...PLAN_TOOLS.map((t) => ({ ...t, label: `${t.icon} ${t.title}` })),
+    ...ONBOARD_TOOLS.map((t) => ({ ...t, label: `${t.icon} ${t.title}` })),
+    ...others,
+  ];
+  const results = q ? everything.filter((t) => `${t.label} ${t.sub || ""} ${TOOL_TITLES[t.key] || ""}`.toLowerCase().includes(q)) : [];
+
+  return (
+    <ScrollView style={[styles.flex, { backgroundColor: st.bg }]} contentContainerStyle={hub.content} keyboardShouldPersistTaps="handled">
+      <Text style={hub.title}>More Tools</Text>
+      <View style={hub.search}>
+        <Ionicons name="search" size={17} color={st.muted} />
+        <TextInput
+          value={query} onChangeText={setQuery} placeholder="Search tools…" placeholderTextColor={st.muted}
+          style={hub.searchInput} autoCorrect={false} autoCapitalize="none" returnKeyType="search"
+        />
+        {query ? (
+          <TouchableOpacity onPress={() => setQuery("")} accessibilityLabel="Clear search">
+            <Ionicons name="close-circle" size={17} color={st.muted} />
+          </TouchableOpacity>
+        ) : null}
+      </View>
+
+      {q ? (
+        <View style={hub.listCard}>
+          {results.length ? results.map((t) => (
+            <TouchableOpacity key={t.key} style={hub.listRow} onPress={() => open(t)}>
+              <Text style={hub.listText}>{t.label}</Text>
+              <Ionicons name="chevron-forward" size={16} color={st.muted} />
+            </TouchableOpacity>
+          )) : <Text style={[hub.listText, { padding: 14, color: st.muted }]}>No tool matches “{query}”.</Text>}
+        </View>
+      ) : (
+        <>
+          <Text style={hub.section}>AT THE STATION</Text>
+          <View style={hub.cardGrid}>
+            {STATION_TOOLS.map((t) => (
+              <TouchableOpacity key={t.key} style={hub.card} onPress={() => open(t)} activeOpacity={0.85}>
+                <View style={[hub.cardIcon, { backgroundColor: t.tint }]}>
+                  <Text style={{ fontSize: 24 }} noTranslate>{t.icon}</Text>
+                </View>
+                <Text style={hub.cardTitle}>{t.title}</Text>
+                <Text style={hub.cardSub}>{t.sub}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {trip.trainNumber && trip.station ? (
+            <TouchableOpacity style={hub.tripBar} onPress={() => open({ key: "platform" })}>
+              <Ionicons name="train-outline" size={16} color={st.blue} />
+              <Text style={hub.tripText} numberOfLines={1}>
+                Your trip: {trip.trainNumber} at {trip.stationName || trip.station}{trip.coach ? ` · ${trip.coach}` : ""}
+              </Text>
+              <Ionicons name="chevron-forward" size={16} color={st.blue} />
+            </TouchableOpacity>
+          ) : null}
+
+          <Text style={hub.section}>PLAN &amp; BOOK</Text>
+          <RoundRow tools={PLAN_TOOLS} onPress={open} />
+          <Text style={hub.section}>ON BOARD</Text>
+          <RoundRow tools={ONBOARD_TOOLS} onPress={open} />
+
+          <TouchableOpacity style={hub.ai} onPress={() => open({ key: "ai" })} activeOpacity={0.9}>
+            <View style={hub.aiGlow} />
+            <View style={{ flex: 1 }}>
+              <Text style={hub.aiTitle}>✨ Ask Rail AI</Text>
+              <Text style={hub.aiSub}>"Which platform for {trip.trainNumber || "12785"} at {trip.stationName || "Kurnool"}?"</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#fff" />
+          </TouchableOpacity>
+
+          <Text style={hub.section}>ALL TOOLS</Text>
+          <View style={hub.listCard}>
+            {others.map((t, i) => (
+              <TouchableOpacity key={t.key} style={[hub.listRow, i === others.length - 1 && { borderBottomWidth: 0 }]} onPress={() => open(t)}>
+                <Text style={hub.listText}>{t.label}</Text>
+                <Ionicons name="chevron-forward" size={16} color={st.muted} />
+              </TouchableOpacity>
+            ))}
+          </View>
+        </>
+      )}
+    </ScrollView>
+  );
+}
+
+function RoundRow({ tools, onPress }) {
+  return (
+    <View style={hub.roundRow}>
+      {tools.map((t) => (
+        <TouchableOpacity key={t.key} style={hub.roundItem} onPress={() => onPress(t)} activeOpacity={0.8}>
+          <View style={[hub.roundIcon, t.key === "sos" && { backgroundColor: "#FEE2E2" }]}>
+            <Text style={{ fontSize: 22 }} noTranslate>{t.icon}</Text>
+          </View>
+          <Text style={hub.roundText} numberOfLines={1}>{t.title}</Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+  );
+}
+
+const hub = StyleSheet.create({
+  content: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 32 },
+  title: { fontSize: 28, fontWeight: "900", color: st.ink, marginBottom: 14 },
+  search: {
+    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: st.card, borderRadius: 16,
+    paddingHorizontal: 14, paddingVertical: 4, marginBottom: 18,
+    shadowColor: "#0F1B33", shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1,
+  },
+  searchInput: { flex: 1, fontSize: 15, color: st.ink, paddingVertical: 10 },
+  section: { fontSize: 12.5, fontWeight: "800", letterSpacing: 1.4, color: st.muted, marginBottom: 10, marginTop: 6 },
+  cardGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 12, marginBottom: 10 },
+  card: {
+    width: "48.3%", backgroundColor: st.card, borderRadius: 20, padding: 14, minHeight: 124,
+    shadowColor: "#0F1B33", shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1,
+  },
+  cardIcon: { width: 48, height: 48, borderRadius: 14, alignItems: "center", justifyContent: "center", marginBottom: 12 },
+  cardTitle: { fontSize: 15.5, fontWeight: "800", color: st.ink },
+  cardSub: { fontSize: 12, color: st.muted, marginTop: 2 },
+  tripBar: {
+    flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: st.blueSoft, borderRadius: 14,
+    paddingHorizontal: 12, paddingVertical: 10, marginBottom: 14,
+  },
+  tripText: { flex: 1, color: st.blue, fontWeight: "700", fontSize: 13 },
+  roundRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 16 },
+  roundItem: { width: "24%", alignItems: "center" },
+  roundIcon: {
+    width: 54, height: 54, borderRadius: 27, backgroundColor: st.card, alignItems: "center", justifyContent: "center",
+    shadowColor: "#0F1B33", shadowOpacity: 0.06, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 1,
+  },
+  roundText: { fontSize: 12, fontWeight: "700", color: st.ink, marginTop: 6 },
+  ai: {
+    flexDirection: "row", alignItems: "center", backgroundColor: "#6D28D9", borderRadius: 18, padding: 16,
+    overflow: "hidden", marginBottom: 20, marginTop: 4,
+  },
+  aiGlow: { position: "absolute", right: -40, top: -60, width: 180, height: 180, borderRadius: 90, backgroundColor: "#8B5CF6" },
+  aiTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
+  aiSub: { color: "#EDE9FE", fontSize: 12.5, marginTop: 2 },
+  listCard: { backgroundColor: st.card, borderRadius: 18, overflow: "hidden" },
+  listRow: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    paddingHorizontal: 14, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: st.line,
+  },
+  listText: { fontSize: 14.5, color: st.ink, fontWeight: "600" },
+});
 
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },

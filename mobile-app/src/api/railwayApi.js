@@ -876,3 +876,47 @@ export function warmupLive(baseUrl, trainNumber) {
     fetch(`${String(baseUrl || "").replace(/\/$/, "")}/api/live/warmup${qs}`).catch(() => {});
   } catch (e) { /* ignore */ }
 }
+
+/** Real per-train coach composition (RailRadar passthrough) — used by the
+ * Coach Layout tool. Was imported by MoreToolsScreen but never defined. */
+export async function getCoachComposition(baseUrl, trainNumber, stationCode) {
+  const client = makeClient(baseUrl, { timeoutMs: 15000 });
+  const qs = stationCode ? `?station=${encodeURIComponent(stationCode)}` : "";
+  const { data } = await client.get(`/api/advanced/coach-composition/${encodeURIComponent(trainNumber)}${qs}`);
+  if (!data?.ok) throw new Error(data?.error || "No coach composition for this train.");
+  return data.data?.data || data.data;
+}
+
+/* ---------------------------------------------------------------------
+ * "At the station" tools (redesigned More Tools) — backend/station_tools.py
+ * ------------------------------------------------------------------- */
+
+/** Live Departures / Arrivals board (RailKit, RapidAPI fallback). */
+export async function getLiveBoard(baseUrl, stationCode, { mode = "departures", hours = 2 } = {}) {
+  const client = makeClient(baseUrl, { timeoutMs: 20000 });
+  const { data } = await client.get(`/api/station/live-board/${encodeURIComponent(stationCode)}`, { params: { mode, hours } });
+  return data;
+}
+
+/** Platform Locator: live platform + timings + real rake + berth info. */
+export async function locatePlatform(baseUrl, { trainNumber, station, date, coach, berth }) {
+  const client = makeClient(baseUrl, { timeoutMs: 25000 });
+  const params = { train_number: trainNumber, station };
+  if (date) params.date = date;
+  if (coach) params.coach = coach;
+  if (berth) params.berth = berth;
+  const { data } = await client.get("/api/station/platform-locate", { params });
+  return data;
+}
+
+/** Station Navigator: schematic station + walking route to a platform/coach. */
+export async function getStationMap(baseUrl, stationCode, { platform, trainNumber, coach, date, stepFree } = {}) {
+  const client = makeClient(baseUrl, { timeoutMs: 25000 });
+  const params = { step_free: !!stepFree };
+  if (platform) params.platform = platform;
+  if (trainNumber) params.train_number = trainNumber;
+  if (coach) params.coach = coach;
+  if (date) params.date = date;
+  const { data } = await client.get(`/api/station/map/${encodeURIComponent(stationCode)}`, { params });
+  return data;
+}

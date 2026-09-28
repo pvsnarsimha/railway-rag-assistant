@@ -450,3 +450,21 @@ export function addNotificationReceivedListener(handler) {
   const sub = Notifications.addNotificationReceivedListener(handler);
   return () => sub.remove();
 }
+/** Asks for permission to show local notifications (the Platform Locator's
+ * "Alert on change"). Resolves true when notifications can be shown. */
+export async function ensureLocalNotificationPermission() {
+  try {
+    if (Platform.OS === "web") {
+      if (typeof Notification === "undefined") return false;
+      if (Notification.permission === "granted") return true;
+      if (Notification.permission === "denied") return false;
+      return (await Notification.requestPermission()) === "granted";
+    }
+    const current = await Notifications.getPermissionsAsync();
+    if (current.status === "granted") return true;
+    const asked = await Notifications.requestPermissionsAsync();
+    return asked.status === "granted";
+  } catch (e) {
+    return false;
+  }
+}

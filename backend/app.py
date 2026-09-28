@@ -60,6 +60,7 @@ import crowd_position_tracking
 import station_search
 import analytics
 import advanced_features
+import station_tools
 import journey_planner
 import historical_delay
 import pnr_tracking
@@ -4523,6 +4524,46 @@ def api_station_amenities(station_code: str):
 @app.get("/api/advanced/station-navigator/{station_code}")
 def api_station_navigator(station_code: str):
     return advanced_features.station_navigator(station_code)
+
+
+# =============================================================================
+# FEATURE: redesigned "At the station" tools (mobile More Tools tab) —
+# Live Departures board, Platform Locator (+ Coach Position) and the
+# Station Navigator's schematic route. See station_tools.py for the source
+# priority (RailKit board -> RapidAPI board -> RailRadar -> estimate).
+# =============================================================================
+@app.get("/api/station/live-board/{station_code}")
+def api_station_live_board(station_code: str, mode: str = "departures", hours: int = 2):
+    code = _resolve_station_code(station_code) or station_code.strip().upper()
+    return station_tools.live_board(code, mode, hours)
+
+
+@app.get("/api/station/platform-locate")
+def api_station_platform_locate(
+    train_number: str, station: str, date: Optional[str] = None,
+    coach: Optional[str] = None, berth: Optional[int] = None,
+):
+    train_number = (train_number or "").strip()
+    if not re.fullmatch(r"\d{5}", train_number):
+        raise HTTPException(status_code=400, detail="Enter a valid 5-digit train number.")
+    code = _resolve_station_code(station)
+    if not code:
+        raise HTTPException(status_code=400, detail=f"Unknown station '{station}'.")
+    return station_tools.locate_platform(train_number, code, date, coach, berth)
+
+
+@app.get("/api/station/map/{station_code}")
+def api_station_map(
+    station_code: str, platform: Optional[int] = None, train_number: Optional[str] = None,
+    coach: Optional[str] = None, date: Optional[str] = None, step_free: bool = False,
+):
+    code = _resolve_station_code(station_code)
+    if not code:
+        raise HTTPException(status_code=400, detail=f"Unknown station '{station_code}'.")
+    train_number = (train_number or "").strip() or None
+    if train_number and not re.fullmatch(r"\d{5}", train_number):
+        raise HTTPException(status_code=400, detail="Enter a valid 5-digit train number.")
+    return station_tools.station_map(code, platform, train_number, coach, date, step_free)
 
 
 @app.get("/api/advanced/coach-layout/{travel_class}")

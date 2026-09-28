@@ -61,7 +61,7 @@ function withScreenLanguage(Screen, { bar = true } = {}) {
 const HomeScreenL = withScreenLanguage(HomeScreen, { bar: false });
 const ChatScreenL = withScreenLanguage(ChatScreen, { bar: false });
 const LiveTrackingScreenL = withScreenLanguage(LiveTrackingScreen, { bar: false });
-const MoreToolsScreenL = withScreenLanguage(MoreToolsScreen);
+const MoreToolsScreenL = withScreenLanguage(MoreToolsScreen, { bar: false });
 const SettingsScreenL = withScreenLanguage(SettingsScreen);
 const PnrStatusScreenL = withScreenLanguage(PnrStatusScreen);
 const LiveTrainStatusScreenL = withScreenLanguage(LiveTrainStatusScreen);
@@ -183,7 +183,7 @@ function AppTabs() {
             <Tab.Screen name="Home" component={HomeStackNavigator} options={{ title: t("Home"), headerShown: false }} />
             <Tab.Screen name="Chat" component={ChatScreenL} options={{ title: t("Railway Assistant") }} />
             <Tab.Screen name="Track" component={LiveTrackingScreenL} options={{ title: t("Live Tracking") }} />
-            <Tab.Screen name="More" component={MoreToolsScreenL} options={{ title: t("More Tools") }} />
+            <Tab.Screen name="More" component={MoreToolsScreenL} options={{ title: t("More Tools"), headerShown: false }} />
             <Tab.Screen name="Settings" component={SettingsScreenL} options={{ title: t("Settings") }} />
           </Tab.Navigator>
         </NavigationContainer>
