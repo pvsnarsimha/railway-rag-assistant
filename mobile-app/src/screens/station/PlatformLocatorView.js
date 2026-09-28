@@ -9,6 +9,7 @@ import { scheduleLocalAlarm, ensureLocalNotificationPermission } from "../../ser
 import {
   st, useTrip, ToolHeader, TripForm, Pill, CoachStrip, SectionLabel, Note, formatIn,
 } from "./stationShared";
+import { PlatformScene, CoachSeatMap } from "./stationScenes";
 
 const SEEN_KEY = "stationTools.platformSeen";
 const POLL_MS = 60 * 1000;
@@ -118,12 +119,48 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
   const expTime = data?.expected_arrival || data?.expected_departure;
   const coachLabel = data?.coach || trip.coach;
 
+  // LED-board status line for the platform scene.
+  const sceneStatus = !data ? null
+    : data.cancelled ? { text: "Cancelled", color: "#F87171" }
+    : data.arrives_in_minutes != null && data.arrives_in_minutes <= 0 && data.arrives_in_minutes > -5 ? { text: "Arriving", color: "#4ADE80" }
+    : data.delay_minutes > 0 ? { text: `Late ${data.delay_minutes} min`, color: "#FB923C" }
+    : data.delay_minutes === 0 ? { text: "On time", color: "#4ADE80" }
+    : { text: data.arrives_in_minutes != null ? formatIn(data.arrives_in_minutes) : "Expected", color: "#4ADE80" };
+
+  const scene = data && (
+    <PlatformScene
+      stationName={data.station_name || trip.stationName || data.station}
+      stationCode={data.station}
+      platform={data.platform}
+      trainNumber={data.train_number}
+      trainName={data.train_name}
+      time={expTime || arrTime}
+      status={sceneStatus?.text}
+      statusColor={sceneStatus?.color}
+      rake={data.rake}
+      coach={coachLabel}
+    />
+  );
+
+  const rakeEntry = data?.rake?.find((c) => String(c.code || "").toUpperCase() === String(coachLabel || "").toUpperCase());
+  const seatMap = data && coachLabel ? (
+    <CoachSeatMap
+      apiBaseUrl={apiBaseUrl}
+      coach={String(coachLabel).toUpperCase()}
+      category={rakeEntry?.category}
+      trainNumber={data.train_number}
+      trainName={data.train_name}
+      berth={data.berth?.berth ?? trip.berth}
+      position={data.coach_position}
+    />
+  ) : null;
+
   const platformCard = data && (
-    <View style={[styles.hero, isCoach && styles.heroCompact]}>
+    <View style={[styles.hero, styles.heroCompact]}>
       <Text style={styles.heroKicker}>
         {data.cancelled ? "Cancelled today at" : "Arriving at"} {data.station_name || data.station} on
       </Text>
-      <Text style={[styles.heroNumber, isCoach && { fontSize: 64, lineHeight: 72 }]} noTranslate>{data.platform || "—"}</Text>
+      <Text style={[styles.heroNumber, { fontSize: 64, lineHeight: 72 }]} noTranslate>{data.platform || "—"}</Text>
       <Text style={styles.heroLabel}>PLATFORM</Text>
       <View style={styles.heroPills}>
         {arrTime ? (
@@ -222,7 +259,8 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
 
         {data && !showForm && (
           <>
-            {isCoach ? coachSection : platformCard}
+            {isCoach ? coachSection : scene}
+            {isCoach ? seatMap : null}
             {change ? (
               <View style={styles.changeBanner}>
                 <Text style={styles.changeBannerText}>
@@ -231,7 +269,12 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
                 </Text>
               </View>
             ) : null}
-            {isCoach ? platformCard : coachSection}
+            {isCoach ? platformCard : (
+              <>
+                {platformCard}
+                {coachSection}
+              </>
+            )}
             {berthCard}
             <View style={styles.actions}>
               <TouchableOpacity

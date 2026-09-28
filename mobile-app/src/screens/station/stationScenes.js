@@ -1,0 +1,459 @@
+import React, { useEffect, useRef, useState } from "react";
+import { View, StyleSheet, ScrollView, ActivityIndicator } from "react-native";
+import Svg, {
+  Rect, Circle, Line, Path, G, Defs, LinearGradient, RadialGradient, Stop, Text as SvgText,
+} from "react-native-svg";
+import { Text } from "../../i18n/Localized";
+import { getCoachLayout } from "../../api/railwayApi";
+import { describeApiError } from "../../api/client";
+import { st } from "./stationShared";
+
+/**
+ * Drawn station scenes for the "At the station" tools:
+ *   - PlatformScene: the platform as the rider will see it — PF number
+ *     board, yellow station name board (the station the user entered),
+ *     LED arrival display and the train's real rake (RailRadar) pulling
+ *     in, with the rider's coach marked.
+ *   - CoachSeatMap: the berth/seat plan of the selected coach (B1, S4 …)
+ *     from the standard numbering for its class, rider's berth marked.
+ */
+
+// Coach code -> reservation class. Code prefix first (B1 -> 3A), then
+// RailRadar's own category text as a fallback.
+const CLASS_BY_PREFIX = [
+  [/^(HA|H)\d*$/i, "1A"],
+  [/^A\d*$/i, "2A"],
+  [/^B\d*$/i, "3A"],
+  [/^M\d*$/i, "3E"],
+  [/^S\d*$/i, "SL"],
+  [/^E\d*$/i, "EC"],
+  [/^C\d*$/i, "CC"],
+  [/^D\d*$/i, "2S"],
+  [/^(GS|GEN|UR|G)\d*$/i, "GEN"],
+  [/^(SLR|SLRD|LSLRD|EOG|PC|PCV|LPR|RMS)\d*$/i, "OTHER"],
+];
+const KNOWN = ["1A", "2A", "3A", "3E", "SL", "CC", "EC", "2S"];
+
+export function coachClass(code, category) {
+  const c = String(code || "").trim();
+  for (const [re, cls] of CLASS_BY_PREFIX) if (re.test(c)) return cls;
+  const cat = String(category || "").toUpperCase();
+  const hit = KNOWN.find((k) => cat.includes(k));
+  if (hit) return hit;
+  if (/GEN|UNRES|GS/.test(cat)) return "GEN";
+  return null;
+}
+
+const AC = new Set(["1A", "2A", "3A", "3E", "CC", "EC"]);
+function coachLook(cls) {
+  if (AC.has(cls)) return { body: "#ECEBE6", stripe: "#C62828", window: "#26324A", label: "#C62828", ac: true };
+  if (cls === "GEN") return { body: "#8A4B2E", stripe: "#F1E6D8", window: "#DCE7F7", label: "#FFFFFF" };
+  if (cls === "OTHER") return { body: "#5B6472", stripe: "#E2E7EF", window: "#DCE7F7", label: "#FFFFFF" };
+  return { body: "#2354B0", stripe: "#EEF2FA", window: "#DCE7F7", label: "#FFFFFF" };
+}
+
+const isEngine = (c) => /^(ENG|LOCO|L)$/i.test(c?.code || "") || /engine|loco/i.test(c?.category || "");
+
+function trimTo(s, n) {
+  s = String(s || "");
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+const FONT = "Arial, Helvetica, sans-serif";
+function T(props) {
+  return <SvgText fontFamily={FONT} fontWeight="bold" {...props} />;
+}
+
+function Coach({ x, code, cls, mine }) {
+  const look = coachLook(cls);
+  const w = 260;
+  return (
+    <G>
+      {mine ? <Rect x={x - 8} y={216} width={w + 16} height={136} rx={16} fill="none" stroke="#FACC15" strokeWidth={8} /> : null}
+      <Rect x={x} y={224} width={w} height={120} rx={10} fill={look.body} />
+      {look.ac ? (
+        <>
+          <Rect x={x + 8} y={240} width={24} height={56} rx={2} fill="#9CA3AF" />
+          <Rect x={x + w - 32} y={240} width={24} height={56} rx={2} fill="#9CA3AF" />
+          <Rect x={x + 44} y={250} width={w - 88} height={26} rx={4} fill={look.window} />
+          <Rect x={x} y={284} width={w} height={8} fill={look.stripe} />
+        </>
+      ) : (
+        <>
+          <Rect x={x + 8} y={240} width={24} height={52} rx={2} fill="#1B3F86" />
+          <Rect x={x + w - 32} y={240} width={24} height={52} rx={2} fill="#1B3F86" />
+          {[0, 1, 2, 3].map((i) => (
+            <G key={i}>
+              <Rect x={x + 46 + i * 44} y={248} width={32} height={24} rx={3} fill={look.window} />
+              <Rect x={x + 46 + i * 44} y={248} width={32} height={6} fill="#AFC3E6" />
+            </G>
+          ))}
+          <Rect x={x} y={284} width={w} height={6} fill={look.stripe} />
+        </>
+      )}
+      <T x={x + w / 2} y={332} fontSize={36} fill={look.label} textAnchor="middle">{code}</T>
+      <Rect x={x + 18} y={344} width={70} height={14} rx={3} fill="#1F2937" />
+      <Rect x={x + w - 88} y={344} width={70} height={14} rx={3} fill="#1F2937" />
+      {[x + 34, x + 74, x + w - 72, x + w - 32].map((cx) => (
+        <Circle key={cx} cx={cx} cy={361} r={9} fill="#374151" stroke="#111827" strokeWidth={2} />
+      ))}
+      {mine ? (
+        <G>
+          <Rect x={x + w / 2 - 100} y={168} width={200} height={40} rx={20} fill="#FACC15" />
+          <T x={x + w / 2} y={196} fontSize={24} fill="#1A1300" textAnchor="middle">YOUR COACH</T>
+        </G>
+      ) : null}
+    </G>
+  );
+}
+
+function Engine({ x }) {
+  return (
+    <G>
+      <Path d={`M${x + 80} 222 L${x + 110} 192 L${x + 140} 222`} stroke="#1F2937" strokeWidth={3} fill="none" />
+      <Line x1={x + 96} y1={192} x2={x + 128} y2={192} stroke="#1F2937" strokeWidth={4} />
+      <Path d={`M${x + 30} 224 H${x + 230} V344 H${x} V254 Q${x} 224 ${x + 30} 224 Z`} fill="#C8322B" />
+      <Rect x={x + 8} y={232} width={48} height={36} rx={3} fill="#DCE7F7" stroke="#fff" strokeWidth={2} />
+      <Rect x={x + 80} y={238} width={24} height={22} rx={2} fill="#DCE7F7" />
+      <Rect x={x + 170} y={238} width={40} height={30} rx={2} fill="#7F1D1D" />
+      <Rect x={x} y={284} width={230} height={14} fill="#F4E9D8" />
+      <Circle cx={x + 14} cy={318} r={6} fill="#FFF7D6" />
+      <T x={x + 140} y={332} fontSize={26} fill="#fff" textAnchor="middle">ENGINE</T>
+      <Rect x={x + 20} y={344} width={70} height={14} rx={3} fill="#1F2937" />
+      <Rect x={x + 140} y={344} width={70} height={14} rx={3} fill="#1F2937" />
+      {[x + 36, x + 76, x + 156, x + 196].map((cx) => (
+        <Circle key={cx} cx={cx} cy={361} r={9} fill="#374151" stroke="#111827" strokeWidth={2} />
+      ))}
+    </G>
+  );
+}
+
+function Person({ x, y, body, bag }) {
+  return (
+    <G>
+      <Circle cx={x} cy={y} r={14} fill="#1E1B2E" />
+      <Rect x={x - 14} y={y + 16} width={28} height={60} rx={9} fill={body} />
+      <Rect x={x - 11} y={y + 72} width={8} height={46} fill="#1E1B2E" />
+      <Rect x={x + 3} y={y + 72} width={8} height={46} fill="#1E1B2E" />
+      {bag ? <Rect x={x + 18} y={y + 74} width={26} height={40} rx={3} fill={bag} /> : null}
+    </G>
+  );
+}
+
+/**
+ * The platform scene. `rake` is engine -> rear ({code, category}); the
+ * view shows the engine plus the coaches around the rider's coach.
+ * Drawn at 1200x720 and scaled to the card, so lettering is sized to
+ * stay readable on a phone.
+ */
+export function PlatformScene({ stationName, stationCode, platform, trainNumber, trainName, time, status, statusColor, rake, coach }) {
+  const coaches = (rake || []).filter((c) => !isEngine(c));
+  const idx = coaches.findIndex((c) => String(c.code || "").toUpperCase() === String(coach || "").toUpperCase());
+  // Items: engine first, then coaches. About 4.5 slots fit the scene;
+  // keep the rider's coach in the second visible slot when it's far back.
+  const blank = { code: "", category: "" };
+  const items = [{ engine: true }, ...(coaches.length ? coaches : [blank, blank, blank, blank])];
+  const mineItem = idx >= 0 ? idx + 1 : -1;
+  const start = mineItem > 2 ? mineItem - 1 : 0;
+  const x0 = start === 0 ? 40 : -150;
+  const slotW = (it) => (it.engine ? 230 : 260) + 12;
+  let x = x0;
+  const drawn = items.slice(start, start + 5).map((it, i) => {
+    const node = it.engine
+      ? <Engine key="engine" x={x} />
+      : <Coach key={`${it.code}-${i}`} x={x} code={it.code} cls={coachClass(it.code, it.category)} mine={start + i === mineItem} />;
+    x += slotW(it);
+    return node;
+  });
+  let mineX = null;
+  if (mineItem >= 0) {
+    mineX = x0;
+    for (let i = start; i < mineItem; i++) mineX += slotW(items[i]);
+    mineX += 130;
+  }
+
+  const name = String(stationName || stationCode || "Station").toUpperCase();
+  const nameSize = Math.min(50, Math.floor(520 / Math.max(name.length * 0.66, 1)));
+  const led1 = trimTo(`${trainNumber || ""} ${String(trainName || "").toUpperCase()}`.trim(), 19);
+  const led2 = `${time ? `EXP ${time}` : "EXP --:--"} PF ${platform || "-"}`;
+
+  return (
+    <View style={styles.sceneWrap}>
+      <Svg width="100%" height="100%" viewBox="0 0 1200 720">
+        <Defs>
+          <LinearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor="#2B2E4F" />
+            <Stop offset="1" stopColor="#4B3F6B" />
+          </LinearGradient>
+          <LinearGradient id="floor" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor="#8E9095" />
+            <Stop offset="1" stopColor="#6F7176" />
+          </LinearGradient>
+          <RadialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+            <Stop offset="0" stopColor="#FFF7D6" stopOpacity="0.55" />
+            <Stop offset="1" stopColor="#FFF7D6" stopOpacity="0" />
+          </RadialGradient>
+        </Defs>
+        <Rect x={0} y={0} width={1200} height={720} fill="url(#sky)" />
+
+        {/* train, track and platform sit below the boards */}
+        <G transform="translate(0, 70)">
+          <Rect x={0} y={270} width={1200} height={90} fill="#3A3354" />
+          {[[300, 210, 30], [510, 200, 26], [760, 230, 34], [1080, 215, 40]].map(([bx, by, bw]) => (
+            <Rect key={bx} x={bx} y={by} width={bw} height={150} fill="#3E3760" />
+          ))}
+          <Circle cx={1000} cy={250} r={34} fill="#E7B98A" opacity={0.8} />
+          <Path d="M0 190 Q600 198 1200 190" stroke="#1F2033" strokeWidth={2} fill="none" />
+          {drawn}
+          <Rect x={0} y={370} width={1200} height={20} fill="#595448" />
+          <Rect x={0} y={388} width={1200} height={10} fill="#F2C318" />
+          <Rect x={0} y={398} width={1200} height={260} fill="url(#floor)" />
+          <Rect x={0} y={426} width={1200} height={18} fill="#D9B31E" />
+          {Array.from({ length: 60 }).map((_, i) => (
+            <Circle key={i} cx={10 + i * 20} cy={435} r={2.2} fill="#A8871A" />
+          ))}
+        </G>
+
+        {/* canopy + lamps */}
+        <Rect x={0} y={0} width={1200} height={56} fill="#46495A" />
+        <Rect x={0} y={56} width={1200} height={9} fill="#9B2C2C" />
+        {[440, 760].map((lx) => (
+          <G key={lx}>
+            <Circle cx={lx} cy={70} r={60} fill="url(#glow)" />
+            <Rect x={lx - 22} y={64} width={44} height={8} rx={2} fill="#FFF7D6" />
+          </G>
+        ))}
+
+        {/* pillars */}
+        {[96, 596, 1096].map((px) => (
+          <G key={px}>
+            <Rect x={px} y={65} width={12} height={655} fill="#6B7280" />
+            <Rect x={px} y={540} width={12} height={18} fill="#F3F4F6" />
+          </G>
+        ))}
+
+        {/* PF number board */}
+        <Rect x={20} y={84} width={170} height={132} rx={10} fill="#1D4ED8" stroke="#fff" strokeWidth={3} />
+        <T x={105} y={124} fontSize={26} fill="#fff" textAnchor="middle">PLATFORM</T>
+        <T x={105} y={196} fontSize={70} fill="#fff" textAnchor="middle">{String(platform || "–")}</T>
+
+        {/* station name board — the station the user entered */}
+        <Rect x={206} y={80} width={588} height={140} rx={6} fill="#111827" />
+        <Rect x={212} y={86} width={576} height={128} rx={4} fill="#F5C518" />
+        {stationCode ? (
+          <T x={500} y={126} fontSize={24} fill="#3B3208" textAnchor="middle">{`STATION CODE · ${String(stationCode).toUpperCase()}`}</T>
+        ) : null}
+        <T x={500} y={stationCode ? 190 : 168} fontSize={nameSize} fill="#1F1A05" textAnchor="middle">{name}</T>
+
+        {/* LED arrival display */}
+        <Rect x={810} y={80} width={376} height={140} rx={6} fill="#0B0B0F" stroke="#374151" strokeWidth={3} />
+        <T x={826} y={124} fontSize={27} fontFamily="Courier New, monospace" fill="#F59E0B">{led1}</T>
+        <T x={826} y={164} fontSize={27} fontFamily="Courier New, monospace" fill="#F59E0B">{led2}</T>
+        <T x={826} y={204} fontSize={27} fontFamily="Courier New, monospace" fill={statusColor || "#4ADE80"}>{trimTo(String(status || "").toUpperCase(), 19)}</T>
+
+        {/* passengers + stand-here marker (platform level) */}
+        <G transform="translate(0, 70)">
+          <Person x={330} y={470} body="#23213A" bag="#8B3A2F" />
+          <Person x={720} y={480} body="#6B2A6B" />
+          <Person x={900} y={500} body="#1F3A5F" bag="#D8962E" />
+          {mineX != null && mineX > 60 && mineX < 1140 ? (
+            <G>
+              <Path d={`M${mineX} 452 l-18 26 h36 z`} fill="#FACC15" />
+              <Rect x={mineX - 105} y={478} width={210} height={46} rx={23} fill="#FACC15" />
+              <T x={mineX} y={510} fontSize={26} fill="#1A1300" textAnchor="middle">STAND HERE</T>
+            </G>
+          ) : null}
+        </G>
+      </Svg>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Coach seat map
+// ---------------------------------------------------------------------------
+const BERTH_COLORS = {
+  L: { bg: "#DCFCE7", fg: "#166534", name: "Lower" },
+  M: { bg: "#FEF3C7", fg: "#92400E", name: "Middle" },
+  U: { bg: "#EDE9FE", fg: "#5B21B6", name: "Upper" },
+  SL: { bg: "#CCFBF1", fg: "#115E59", name: "Side lower" },
+  SM: { bg: "#FFEDD5", fg: "#9A3412", name: "Side middle" },
+  SU: { bg: "#FCE7F3", fg: "#9D174D", name: "Side upper" },
+  window: { bg: "#DBEAFE", fg: "#1E40AF", name: "Window" },
+  middle: { bg: "#FEF3C7", fg: "#92400E", name: "Middle" },
+  aisle: { bg: "#F1F5F9", fg: "#334155", name: "Aisle" },
+};
+
+function Berth({ b, mine }) {
+  const c = BERTH_COLORS[b.type] || BERTH_COLORS.aisle;
+  return (
+    <View style={[styles.berth, { backgroundColor: mine ? st.blue : c.bg }, mine && styles.berthMine]}>
+      <Text noTranslate style={[styles.berthNum, { color: mine ? "#fff" : c.fg }]}>{b.number}</Text>
+      <Text noTranslate style={[styles.berthType, { color: mine ? "#DCE7FF" : c.fg }]}>{b.type.length <= 2 ? b.type : b.type[0].toUpperCase()}</Text>
+    </View>
+  );
+}
+
+function BayColumn({ bay, berth, onLayout }) {
+  const mine = (b) => berth != null && Number(berth) === b.number;
+  return (
+    <View style={[styles.bay, bay.is_coupe && styles.coupe]} onLayout={onLayout}>
+      <Text noTranslate style={styles.bayLabel}>{bay.is_cabin ? `Cabin ${bay.bay}` : bay.is_coupe ? `Coupe ${bay.bay}` : `Bay ${bay.bay}`}</Text>
+      <View style={styles.bayRow}>{bay.left.map((b) => <Berth key={b.number} b={b} mine={mine(b)} />)}</View>
+      {bay.right?.length ? <View style={styles.bayRow}>{bay.right.map((b) => <Berth key={b.number} b={b} mine={mine(b)} />)}</View> : null}
+      <View style={styles.aisle}><Text style={styles.aisleText}>aisle</Text></View>
+      <View style={styles.bayRow}>
+        {bay.side?.length ? bay.side.map((b) => <Berth key={b.number} b={b} mine={mine(b)} />) : <View style={{ height: 38 }} />}
+      </View>
+    </View>
+  );
+}
+
+function SeatRowColumn({ row, berth, onLayout }) {
+  const out = [];
+  row.seats.forEach((s) => {
+    out.push(<Berth key={s.number} b={s} mine={berth != null && Number(berth) === s.number} />);
+    if (s.aisle_after) out.push(<View key={`a${s.number}`} style={styles.aisleV}><Text style={styles.aisleText}>aisle</Text></View>);
+  });
+  return (
+    <View style={styles.bay} onLayout={onLayout}>
+      <Text noTranslate style={styles.bayLabel}>Row {row.row}</Text>
+      <View style={{ gap: 4, alignItems: "center" }}>{out}</View>
+    </View>
+  );
+}
+
+/**
+ * Seat/berth plan of one coach. Class comes from the coach code (B1 ->
+ * 3A); `berth` (optional) is highlighted and scrolled into view.
+ */
+export function CoachSeatMap({ apiBaseUrl, coach, category, trainNumber, trainName, berth, position }) {
+  const cls = coachClass(coach, category);
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    let alive = true;
+    setData(null); setError(null);
+    if (!cls || !KNOWN.includes(cls)) return undefined;
+    setLoading(true);
+    getCoachLayout(apiBaseUrl, cls, trainNumber)
+      .then((res) => { if (alive) setData(res); })
+      .catch((e) => { if (alive) setError(describeApiError(e)); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [apiBaseUrl, cls, trainNumber]);
+
+  if (!coach) return null;
+  const map = data?.seat_map;
+  const types = map
+    ? [...new Set((map.kind === "bay"
+      ? map.bays.flatMap((b) => [...b.left, ...(b.right || []), ...(b.side || [])])
+      : map.rows.flatMap((r) => r.seats)).map((b) => b.type))]
+    : [];
+  // Which bay/row holds the rider's berth — scrolled into view once laid out.
+  const units = map ? (map.kind === "bay" ? map.bays.map((b) => [...b.left, ...(b.right || []), ...(b.side || [])]) : map.rows.map((r) => r.seats)) : [];
+  const myUnit = berth != null ? units.findIndex((u) => u.some((b) => b.number === Number(berth))) : -1;
+  const onUnitLayout = (i) => (e) => {
+    if (i !== myUnit || !scrollRef.current) return;
+    scrollRef.current.scrollTo({ x: Math.max(0, e.nativeEvent.layout.x - 40), animated: false });
+  };
+  const myBerth = map && berth != null
+    ? (map.kind === "bay"
+      ? map.bays.flatMap((b) => [...b.left, ...(b.right || []), ...(b.side || [])])
+      : map.rows.flatMap((r) => r.seats)).find((b) => b.number === Number(berth))
+    : null;
+
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle} noTranslate>
+        Seat layout · {coach}{data?.layout?.label ? ` · ${data.layout.label}` : cls && KNOWN.includes(cls) ? ` · ${cls}` : ""}
+      </Text>
+      <Text style={styles.cardSub}>
+        {trainNumber ? `${trainNumber}${trainName ? ` ${trainName}` : ""}` : ""}
+        {position ? ` · coach ${position.index + 1} of ${position.total} from the engine` : ""}
+      </Text>
+      {cls === "GEN" ? <Text style={styles.cardNote}>{coach} is an unreserved General coach — no numbered seats.</Text> : null}
+      {cls === "OTHER" ? <Text style={styles.cardNote}>{coach} is a luggage / guard / power car — no passenger seats.</Text> : null}
+      {!cls ? <Text style={styles.cardNote}>Couldn't tell the class of coach {coach} from its code.</Text> : null}
+      {loading ? <ActivityIndicator color={st.blue} style={{ marginVertical: 16 }} /> : null}
+      {error ? <Text style={[styles.cardNote, { color: st.red }]}>{error}</Text> : null}
+      {map ? (
+        <>
+          {myBerth ? (
+            <Text style={styles.mineLine} noTranslate>
+              Berth {myBerth.number} · {(BERTH_COLORS[myBerth.type] || {}).name || myBerth.type}
+            </Text>
+          ) : null}
+          <View style={styles.coachShell}>
+            <View style={styles.doorCol}><Text style={styles.doorText}>DOOR</Text></View>
+            <ScrollView ref={scrollRef} horizontal showsHorizontalScrollIndicator contentContainerStyle={{ gap: 6, paddingVertical: 8 }}>
+              {map.kind === "bay"
+                ? map.bays.map((b, i) => <BayColumn key={String(b.bay)} bay={b} berth={berth} onLayout={onUnitLayout(i)} />)
+                : map.rows.map((r, i) => <SeatRowColumn key={r.row} row={r} berth={berth} onLayout={onUnitLayout(i)} />)}
+            </ScrollView>
+            <View style={styles.doorCol}><Text style={styles.doorText}>DOOR</Text></View>
+          </View>
+          <View style={styles.legend}>
+            {types.map((tp) => {
+              const c = BERTH_COLORS[tp] || BERTH_COLORS.aisle;
+              return (
+                <View key={tp} style={styles.legendItem}>
+                  <View style={[styles.legendDot, { backgroundColor: c.bg, borderColor: c.fg }]} />
+                  <Text style={styles.legendText}>{c.name}</Text>
+                </View>
+              );
+            })}
+            {berth ? (
+              <View style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: st.blue, borderColor: st.blue }]} />
+                <Text style={styles.legendText}>Your berth</Text>
+              </View>
+            ) : null}
+          </View>
+          <Text style={styles.cardNote}>
+            Standard {data.layout?.label || cls} numbering{map.approximate ? " (approximate — layouts vary slightly by rake)" : ""}. Scroll sideways for the whole coach.
+          </Text>
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  sceneWrap: {
+    marginHorizontal: 16, marginBottom: 14, borderRadius: 22, overflow: "hidden",
+    aspectRatio: 1200 / 720, backgroundColor: "#2B2E4F",
+  },
+  card: {
+    backgroundColor: st.card, marginHorizontal: 16, marginTop: 16, borderRadius: 18, padding: 14,
+    shadowColor: "#0F1B33", shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1,
+  },
+  cardTitle: { fontSize: 16, fontWeight: "800", color: st.ink },
+  cardSub: { fontSize: 12.5, color: st.muted, marginTop: 2 },
+  cardNote: { fontSize: 11.5, color: st.muted, marginTop: 8, lineHeight: 16 },
+  mineLine: { marginTop: 8, fontSize: 13.5, fontWeight: "800", color: st.blue },
+  coachShell: {
+    flexDirection: "row", alignItems: "stretch", marginTop: 10, borderWidth: 2, borderColor: "#CBD3DF",
+    borderRadius: 14, backgroundColor: "#F8FAFC", overflow: "hidden",
+  },
+  doorCol: { width: 22, backgroundColor: "#E2E7EF", alignItems: "center", justifyContent: "center" },
+  doorText: { fontSize: 8, fontWeight: "800", color: st.muted, transform: [{ rotate: "-90deg" }], width: 40, textAlign: "center" },
+  bay: { paddingHorizontal: 6, paddingVertical: 4, borderRightWidth: 1, borderRightColor: "#E3E8EF", alignItems: "center" },
+  coupe: { backgroundColor: "#F1F5F9" },
+  bayLabel: { fontSize: 10, fontWeight: "700", color: st.muted, marginBottom: 4 },
+  bayRow: { flexDirection: "row", gap: 3, marginBottom: 3 },
+  aisle: { height: 16, justifyContent: "center", alignItems: "center" },
+  aisleV: { height: 14, justifyContent: "center" },
+  aisleText: { fontSize: 8, color: "#94A3B8", letterSpacing: 1 },
+  berth: { width: 34, height: 38, borderRadius: 7, alignItems: "center", justifyContent: "center" },
+  berthMine: { shadowColor: st.blue, shadowOpacity: 0.4, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
+  berthNum: { fontSize: 12.5, fontWeight: "800" },
+  berthType: { fontSize: 9, fontWeight: "700" },
+  legend: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 10 },
+  legendItem: { flexDirection: "row", alignItems: "center", gap: 5 },
+  legendDot: { width: 12, height: 12, borderRadius: 3, borderWidth: 1 },
+  legendText: { fontSize: 11.5, color: st.ink },
+});
