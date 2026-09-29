@@ -1,0 +1,452 @@
+diff --git a/backend/app.py b/backend/app.py
+index 97d565f..13b4a2e 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -5184,6 +5184,9 @@ class RegisterTokenRequest(BaseModel):
+     token: str
+     platform: Optional[str] = None  # "web" | "android" | "ios", informational only
+     lang: Optional[str] = None  # notification language code (i18n_notify.LANGUAGES)
++    # Android app only: its FCM token, so train notifications can be sent
++    # data-only through Firebase and show their buttons with the app closed.
++    native_token: Optional[str] = None
+ 
+ 
+ def _clean_lang(lang: Optional[str]) -> Optional[str]:
+@@ -5197,8 +5200,10 @@ def _clean_lang(lang: Optional[str]) -> Optional[str]:
+ def api_push_register_token(req: RegisterTokenRequest):
+     if not req.token.strip():
+         return {"ok": False, "error": "Empty token."}
+-    push_store.register_token(req.token.strip(), req.platform, _clean_lang(req.lang))
+-    return {"ok": True, "push_configured": push_notifications.status()["configured"]}
++    native = (req.native_token or "").strip() or None
++    push_store.register_token(req.token.strip(), req.platform, _clean_lang(req.lang), native)
++    return {"ok": True, "push_configured": push_notifications.status()["configured"],
++            "native_push": bool(native) and push_notifications.status()["configured"]}
+ 
+ 
+ class PushLanguageRequest(BaseModel):
+diff --git a/backend/push_notifications.py b/backend/push_notifications.py
+index c9d779b..9359522 100644
+--- a/backend/push_notifications.py
++++ b/backend/push_notifications.py
+@@ -60,6 +60,18 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
+                    category_id: Optional[str] = None) -> dict:
+     """Never raises — same never-raises contract as the FCM senders below,
+     so alert_scheduler.py can keep going on a per-token failure."""
++    # FEATURE: buttons on train notifications with the app closed. Expo's
++    # push service sends an FCM *notification* message, which Android shows
++    # by itself while the app is in the background — without the
++    # notification category, so no "Turn off updates" button. When the
++    # Android app registered its own FCM token, send data-only straight
++    # through Firebase instead: expo-notifications then builds the
++    # notification natively, with the buttons, even with the app swiped away.
++    native = _native_token_for(token)
++    if native:
++        res = _send_via_native_fcm(token, native, title, body, data, sound=sound, category_id=category_id)
++        if res.get("sent"):
++            return res
+     try:
+         resp = requests.post(
+             _EXPO_PUSH_URL,
+@@ -89,6 +101,97 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
+         return {"sent": False, "error": f"Expo push API request failed: {e}"}
+ 
+ 
++# Accent colour of train notifications — Android tints the button text
++# with it (red "Turn off updates"; the app flips it to green "Turn on").
++_NATIVE_COLOR = "#D32F2F"
++# Android channels the app creates (pushNotifications.registerNotificationActions):
++# silent in-place status refreshes vs. alerting pushes. A missing channel
++# falls back to the default one.
++_NATIVE_SILENT_CHANNEL = "train-status"
++_NATIVE_ALERT_CHANNEL = "delay-alerts"
++# FCM's data payload limit is 4096 bytes.
++_NATIVE_MAX_BYTES = 3800
++
++
++def _native_token_for(token: str) -> Optional[str]:
++    try:
++        import push_store
++        return push_store.get_native_token(token)
++    except Exception:  # noqa: BLE001
++        return None
++
++
++def _native_tag(data: dict) -> Optional[str]:
++    """One notification per train, replaced in place as it moves (same
++    slots as the web push tags)."""
++    d = data or {}
++    train = d.get("train_number")
++    if d.get("type") == "smart_alarm":
++        return f"smart_alarm-{train or ''}-{d.get('station') or ''}"
++    if d.get("type") == "fare_alert":
++        return f"fare_alert-{train or ''}"
++    return f"train-{train}" if train else None
++
++
++def _send_via_native_fcm(token: str, native: str, title: str, body: str, data: dict,
++                         sound: Optional[str] = "default", category_id: Optional[str] = None) -> dict:
++    """Data-only FCM message in expo-notifications' Android format (title /
++    message / body JSON / categoryId / channelId / color / tag). The same
++    message wakes the app's background task, which reads it aloud when the
++    rider turned that on — so no separate "speak" message is sent.
++    Never raises; {"sent": False} lets the caller fall back to Expo."""
++    if not _ensure_initialized():
++        return {"sent": False, "error": _init_error}
++    try:
++        import json
++        from firebase_admin import messaging
++
++        visible = {k: v for k, v in (data or {}).items() if k != "speak_text_en"}
++        visible.setdefault("title", title)
++        visible.setdefault("body", body)
++        payload = {
++            "title": title,
++            "message": body,
++            "body": json.dumps(visible, ensure_ascii=False),
++            "color": _NATIVE_COLOR,
++            "channelId": _NATIVE_ALERT_CHANNEL if sound else _NATIVE_SILENT_CHANNEL,
++        }
++        if category_id:
++            payload["categoryId"] = category_id
++        tag = _native_tag(data)
++        if tag:
++            payload["tag"] = tag
++        def _size(p):
++            return len(json.dumps(p, ensure_ascii=False).encode("utf-8"))
++
++        # Keep under FCM's limit: the spoken copy goes first (read-aloud then
++        # speaks the title and text).
++        if _size(payload) > _NATIVE_MAX_BYTES:
++            visible.pop("speak_text", None)
++            payload["body"] = json.dumps(visible, ensure_ascii=False)
++        if sound and (data or {}).get("speak_text_en"):
++            with_en = dict(visible, speak_text_en=data["speak_text_en"])
++            candidate = dict(payload, body=json.dumps(with_en, ensure_ascii=False))
++            if _size(candidate) <= _NATIVE_MAX_BYTES:
++                payload = candidate
++        messaging.send(messaging.Message(
++            token=native,
++            data={k: str(v) for k, v in payload.items()},
++            android=messaging.AndroidConfig(priority="high", ttl=timedelta(hours=1)),
++        ))
++        return {"sent": True, "error": None}
++    except Exception as e:  # noqa: BLE001
++        msg = str(e)
++        if "registration-token-not-registered" in msg or "Requested entity was not found" in msg \
++                or "UNREGISTERED" in msg or "NotRegistered" in msg:
++            try:
++                import push_store
++                push_store.clear_native_token(token)
++            except Exception:  # noqa: BLE001
++                pass
++        return {"sent": False, "error": msg}
++
++
+ def _visible_expo_data(data: Optional[dict], title: str, body: str) -> dict:
+     """The visible Expo push carries the announcement text too (so the open
+     app reads the same announcement), unless that would crowd Expo's 4 KB
+diff --git a/backend/push_store.py b/backend/push_store.py
+index d31232c..cad4279 100644
+--- a/backend/push_store.py
++++ b/backend/push_store.py
+@@ -81,6 +81,10 @@ def _init_db():
+             "ALTER TABLE watches ADD COLUMN approach_notified_at REAL",
+             # FEATURE: notifications in the user's language (i18n_notify.py).
+             "ALTER TABLE device_tokens ADD COLUMN lang TEXT",
++            # FEATURE: the Android app's own FCM token next to its Expo token,
++            # so train notifications can be sent data-only straight through
++            # Firebase (push_notifications._send_via_native_fcm).
++            "ALTER TABLE device_tokens ADD COLUMN native_token TEXT",
+         ):
+             try:
+                 conn.execute(stmt)
+@@ -215,23 +219,45 @@ def _connect():
+         conn.close()
+ 
+ 
+-def register_token(token: str, platform: Optional[str] = None, lang: Optional[str] = None) -> None:
++def register_token(token: str, platform: Optional[str] = None, lang: Optional[str] = None,
++                   native_token: Optional[str] = None) -> None:
+     """Insert or refresh a device token's last_seen_at (upsert). `lang`
+-    (notification language, see i18n_notify.py) is kept when omitted."""
++    (notification language, see i18n_notify.py) and `native_token` (the
++    Android app's FCM token) are kept when omitted."""
+     now = time.time()
+     with _connect() as conn:
+         conn.execute(
+             """
+-            INSERT INTO device_tokens (token, platform, created_at, last_seen_at, lang)
+-            VALUES (?, ?, ?, ?, ?)
++            INSERT INTO device_tokens (token, platform, created_at, last_seen_at, lang, native_token)
++            VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(token) DO UPDATE SET last_seen_at = excluded.last_seen_at,
+                                               platform = COALESCE(excluded.platform, device_tokens.platform),
+-                                              lang = COALESCE(excluded.lang, device_tokens.lang)
++                                              lang = COALESCE(excluded.lang, device_tokens.lang),
++                                              native_token = COALESCE(excluded.native_token, device_tokens.native_token)
+             """,
+-            (token, platform, now, now, lang or None),
++            (token, platform, now, now, lang or None, native_token or None),
+         )
+ 
+ 
++def get_native_token(token: str) -> Optional[str]:
++    """The Android app's FCM token registered with this Expo token, if any."""
++    try:
++        with _connect() as conn:
++            row = conn.execute("SELECT native_token FROM device_tokens WHERE token = ?", (token,)).fetchone()
++        return row[0] if row and row[0] else None
++    except Exception:  # noqa: BLE001 - never break a push; Expo is the fallback
++        return None
++
++
++def clear_native_token(token: str) -> None:
++    """Forget a native FCM token Firebase reported as no longer valid."""
++    try:
++        with _connect() as conn:
++            conn.execute("UPDATE device_tokens SET native_token = NULL WHERE token = ?", (token,))
++    except Exception:  # noqa: BLE001
++        pass
++
++
+ def get_token_lang(token: str) -> str:
+     """The device's chosen notification language code ("en" by default)."""
+     try:
+diff --git a/mobile-app/App.js b/mobile-app/App.js
+index ae743fb..75b57d1 100644
+--- a/mobile-app/App.js
++++ b/mobile-app/App.js
+@@ -14,6 +14,9 @@ import { SpeakScope } from "./src/i18n/Localized";
+ import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
+ import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification } from "./src/services/pushNotifications";
+ import { handleStatusAction } from "./src/services/notificationActions";
++import { syncNativePushToken } from "./src/services/backgroundTracking";
++import AsyncStorage from "@react-native-async-storage/async-storage";
++import { DEFAULT_API_BASE_URL, STORAGE_KEYS } from "./src/config";
+ import * as Notifications from "expo-notifications";
+ import { openRide } from "./src/components/BookRideCard";
+ // Registers the headless "read notifications aloud" task at module scope.
+@@ -133,6 +136,13 @@ export default function App() {
+     configureForegroundNotificationHandler();
+     registerOfflineShell();
+     registerNotificationActions();
++    // Android: give the server this phone's FCM token so train pushes come
++    // data-only and keep their Turn off / Turn on buttons with the app closed.
++    if (Platform.OS === "android") {
++      AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)
++        .then((b) => syncNativePushToken(b || DEFAULT_API_BASE_URL))
++        .catch(() => {});
++    }
+     // "Turn off updates" / "Turn on updates" on a train notification — also
+     // handled in the background when the app isn't open (readAloudTask.js).
+     const handled = new Set();
+diff --git a/mobile-app/src/api/railwayApi.js b/mobile-app/src/api/railwayApi.js
+index 363b5c9..88d90fb 100644
+--- a/mobile-app/src/api/railwayApi.js
++++ b/mobile-app/src/api/railwayApi.js
+@@ -328,7 +328,18 @@ export async function checkDelayAlerts(baseUrl, watches) {
+ /** Registers this device's push token with the backend (push_store.py). */
+ export async function registerPushToken(baseUrl, token, platform, lang) {
+   const client = makeClient(baseUrl);
+-  const { data } = await client.post("/api/push/register-token", { token, platform: platform || null, lang: lang || null });
++  // Android app: its FCM token rides along, so the server can send train
++  // notifications data-only (their buttons then show with the app closed).
++  let nativeToken = null;
++  if (token && /^Expo(nent)?PushToken\[/.test(String(token))) {
++    try {
++      const { getNativePushToken } = require("../services/pushNotifications");
++      nativeToken = await getNativePushToken();
++    } catch (e) { nativeToken = null; }
++  }
++  const { data } = await client.post("/api/push/register-token", {
++    token, platform: platform || null, lang: lang || null, native_token: nativeToken,
++  });
+   return data;
+ }
+ 
+diff --git a/mobile-app/src/screens/SettingsScreen.js b/mobile-app/src/screens/SettingsScreen.js
+index 2cbc721..3a7375f 100644
+--- a/mobile-app/src/screens/SettingsScreen.js
++++ b/mobile-app/src/screens/SettingsScreen.js
+@@ -7,16 +7,17 @@ import SectionCard from "../components/SectionCard";
+ import LabeledInput from "../components/LabeledInput";
+ import PrimaryButton from "../components/PrimaryButton";
+ import { useSettings } from "../context/SettingsContext";
+-import { checkHealth } from "../api/railwayApi";
++import { checkHealth, registerPushToken } from "../api/railwayApi";
++import AsyncStorage from "@react-native-async-storage/async-storage";
+ import { describeApiError } from "../api/client";
+ import LanguagePickerModal from "../components/LanguagePickerModal";
+ import { getLanguage, languageInfo, loadLanguage } from "../utils/notifyLanguage";
+ import { useT } from "../context/LanguageContext";
+ import { Platform } from "react-native";
+-import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission, STATUS_ON_COLOR } from "../services/pushNotifications";
++import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission, STATUS_ON_COLOR, getNativePushToken } from "../services/pushNotifications";
+ 
+ // Shown in Settings so it's easy to tell which build is installed.
+-export const NOTIFY_BUTTONS_VERSION = "notification buttons v4";
++export const NOTIFY_BUTTONS_VERSION = "notification buttons v5";
+ 
+ export default function SettingsScreen() {
+   const { apiBaseUrl, setApiBaseUrl, wsBaseUrl } = useSettings();
+@@ -31,6 +32,7 @@ export default function SettingsScreen() {
+   useEffect(() => { loadLanguage().then((c) => { if (c) setLang(c); }); }, []);
+ 
+   const [notifyTest, setNotifyTest] = useState(null);
++  const [serverButtons, setServerButtons] = useState(null);
+   // Shows a sample train notification with the "Turn off updates" button
+   // straight from this phone (no server) — proves the installed app has the
+   // buttons. Tapping the button there works like on a real update.
+@@ -47,6 +49,22 @@ export default function SettingsScreen() {
+       data: { type: "running_status", train_number: "12760", interval_minutes: "10" },
+     });
+     setNotifyTest(id ? "Sent — pull down the notification shade and expand it." : "Couldn't show a notification (Expo Go can't show buttons — use the installed app).");
++    // Real train updates come from the server: check it can send them with
++    // the buttons (data-only through Firebase) to this phone.
++    setServerButtons("Checking train updates from the server…");
++    try {
++      const token = await AsyncStorage.getItem("moreTools.pushToken");
++      const native = await getNativePushToken();
++      if (!token) { setServerButtons("Start Live Tracking with notifications on once — then train updates get the buttons."); return; }
++      if (!native) { setServerButtons("This phone didn't give a Firebase token — train updates will come without buttons."); return; }
++      const r = await registerPushToken(apiBaseUrl, token, "android");
++      if (r && r.native_push === undefined) { setServerButtons("✖ The server on Render is an older version — redeploy it, then check again."); return; }
++      setServerButtons(r && r.native_push
++        ? "✔ Train updates from the server will show Turn off updates, even with the app closed."
++        : "✖ The server can't send through Firebase (FIREBASE_SERVICE_ACCOUNT_JSON not set on Render) — train updates come without buttons.");
++    } catch (e) {
++      setServerButtons("Couldn't reach the server to check — try again when online.");
++    }
+   }
+ 
+   async function handleSave() {
+@@ -140,6 +158,7 @@ export default function SettingsScreen() {
+       <SectionCard title="Notification buttons" subtitle="Check that this installed app shows Turn off updates on train notifications.">
+         <PrimaryButton title="Test notification buttons" variant="secondary" onPress={handleNotifyTest} />
+         {notifyTest ? <Text style={styles.aboutText}>{notifyTest}</Text> : null}
++        {serverButtons ? <Text style={styles.aboutText}>{serverButtons}</Text> : null}
+         <Text style={styles.aboutText}>Build: {NOTIFY_BUTTONS_VERSION}</Text>
+       </SectionCard>
+ 
+diff --git a/mobile-app/src/services/backgroundTracking.js b/mobile-app/src/services/backgroundTracking.js
+index 0359369..be28ede 100644
+--- a/mobile-app/src/services/backgroundTracking.js
++++ b/mobile-app/src/services/backgroundTracking.js
+@@ -13,6 +13,7 @@
+ //      user presses Stop.
+ 
+ import AsyncStorage from "@react-native-async-storage/async-storage";
++import { Platform } from "react-native";
+ import { registerPushToken, setPushLanguage, setTrackingInterval, startBackgroundTracking, stopBackgroundTracking, resumeTrackingInterval } from "../api/railwayApi";
+ import { getLanguage, hasChosenLanguage, saveLanguage } from "../utils/notifyLanguage";
+ import { registerForPushNotifications, refreshWebPushToken } from "./pushNotifications";
+@@ -154,6 +155,20 @@ export async function disableBackgroundTracking(apiBaseUrl, { trainNumber, date
+  * device tracks (under its current and earlier push tokens). Never prompts,
+  * never throws. Returns true when the server accepted it.
+  */
++/**
++ * Android app start: re-send this phone's push token with its FCM token
++ * (railwayApi.registerPushToken adds it), so a phone that was already
++ * tracking gets data-only train pushes — with their buttons — without
++ * re-enabling anything. Never throws.
++ */
++export async function syncNativePushToken(apiBaseUrl) {
++  if (Platform.OS !== "android" || !apiBaseUrl) return;
++  let token = null;
++  try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
++  if (!token) return;
++  try { await registerPushToken(apiBaseUrl, token, "android", hasChosenLanguage() ? getLanguage() : null); } catch (e) { /* next start retries */ }
++}
++
+ export async function applyStatusEveryOnServer(apiBaseUrl, minutes) {
+   let token = null;
+   try {
+diff --git a/mobile-app/src/services/pushNotifications.js b/mobile-app/src/services/pushNotifications.js
+index a2abe2e..579fc6d 100644
+--- a/mobile-app/src/services/pushNotifications.js
++++ b/mobile-app/src/services/pushNotifications.js
+@@ -528,6 +528,7 @@ export const STATUS_ON_COLOR = "#D32F2F";
+ export const STATUS_OFF_COLOR = "#2E7D32";
+ export async function registerNotificationActions() {
+   if (Platform.OS === "web") return;
++  await ensureTrainChannels();
+   try {
+     // opensAppToForeground: false — the button works right in the
+     // notification shade (src/services/notificationActions.js runs in the
+@@ -546,6 +547,47 @@ export async function registerNotificationActions() {
+   } catch (e) { /* older OS / Expo Go — the notification just has no button */ }
+ }
+ 
++/**
++ * Android channels the server's data-only train pushes name
++ * (backend push_notifications._send_via_native_fcm): "train-status" for
++ * the silent in-place status refresh, "delay-alerts" for alerting ones.
++ */
++let _trainChannelsReady = false;
++async function ensureTrainChannels() {
++  if (Platform.OS !== "android" || _trainChannelsReady) return;
++  try {
++    await Notifications.setNotificationChannelAsync("train-status", {
++      name: "Live train status",
++      importance: Notifications.AndroidImportance.DEFAULT,
++      sound: null,
++      enableVibrate: false,
++      lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
++    });
++    await Notifications.setNotificationChannelAsync("delay-alerts", {
++      name: "Delay alerts",
++      importance: Notifications.AndroidImportance.HIGH,
++    });
++    _trainChannelsReady = true;
++  } catch (e) { /* default channel is used instead */ }
++}
++
++/**
++ * Android app: this phone's own FCM token. Sent to the server next to the
++ * Expo token (railwayApi.registerPushToken) so train notifications come
++ * data-only through Firebase and keep their "Turn off updates" button with
++ * the app closed. null on web / iOS / Expo Go or when unavailable.
++ */
++let _nativeToken = null;
++export async function getNativePushToken() {
++  if (Platform.OS !== "android" || IS_EXPO_GO) return null;
++  if (_nativeToken) return _nativeToken;
++  try {
++    const t = await Notifications.getDevicePushTokenAsync();
++    _nativeToken = t && typeof t.data === "string" ? t.data : null;
++  } catch (e) { _nativeToken = null; }
++  return _nativeToken;
++}
++
+ /** Dismiss one delivered notification (e.g. after its Off button). */
+ export async function dismissNotification(identifier) {
+   if (Platform.OS === "web" || !identifier) return;
+diff --git a/mobile-app/src/utils/speakNotifications.js b/mobile-app/src/utils/speakNotifications.js
+index 4403cfa..45985ec 100644
+--- a/mobile-app/src/utils/speakNotifications.js
++++ b/mobile-app/src/utils/speakNotifications.js
+@@ -166,8 +166,11 @@ export function onTrainPush(handler) {
+  *  - silent in-place status refreshes (alert="0") are not read,
+  *  - a push older than 3 minutes (delivered late, e.g. after reopening the
+  *    browser) is past news and is not read,
+- *  - an older push arriving after a newer one for the same train is skipped. */
++ *  - an older push arriving after a newer one for the same train is skipped,
++ *  - the same push reaching both the open app and its background task is
++ *    read once. */
+ const lastSentAt = new Map(); // train -> newest sent_at seen
++const spoken = new Set(); // train|sent_at|type already read
+ export function shouldSpeakPush(m) {
+   if (!m) return false;
+   if (m.type === "running_status" && m.alert === "0") return false;
+@@ -178,6 +181,10 @@ export function shouldSpeakPush(m) {
+     const prev = lastSentAt.get(key) || 0;
+     if (sent < prev) return false;
+     lastSentAt.set(key, sent);
++    const once = `${key}|${sent}|${m.type || ""}`;
++    if (spoken.has(once)) return false;
++    spoken.add(once);
++    if (spoken.size > 50) spoken.delete(spoken.values().next().value);
+   }
+   return true;
+ }

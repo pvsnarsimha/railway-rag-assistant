@@ -81,6 +81,10 @@ def _init_db():
             "ALTER TABLE watches ADD COLUMN approach_notified_at REAL",
             # FEATURE: notifications in the user's language (i18n_notify.py).
             "ALTER TABLE device_tokens ADD COLUMN lang TEXT",
+            # FEATURE: the Android app's own FCM token next to its Expo token,
+            # so train notifications can be sent data-only straight through
+            # Firebase (push_notifications._send_via_native_fcm).
+            "ALTER TABLE device_tokens ADD COLUMN native_token TEXT",
         ):
             try:
                 conn.execute(stmt)
@@ -215,21 +219,43 @@ def _connect():
         conn.close()
 
 
-def register_token(token: str, platform: Optional[str] = None, lang: Optional[str] = None) -> None:
+def register_token(token: str, platform: Optional[str] = None, lang: Optional[str] = None,
+                   native_token: Optional[str] = None) -> None:
     """Insert or refresh a device token's last_seen_at (upsert). `lang`
-    (notification language, see i18n_notify.py) is kept when omitted."""
+    (notification language, see i18n_notify.py) and `native_token` (the
+    Android app's FCM token) are kept when omitted."""
     now = time.time()
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO device_tokens (token, platform, created_at, last_seen_at, lang)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO device_tokens (token, platform, created_at, last_seen_at, lang, native_token)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(token) DO UPDATE SET last_seen_at = excluded.last_seen_at,
                                               platform = COALESCE(excluded.platform, device_tokens.platform),
-                                              lang = COALESCE(excluded.lang, device_tokens.lang)
+                                              lang = COALESCE(excluded.lang, device_tokens.lang),
+                                              native_token = COALESCE(excluded.native_token, device_tokens.native_token)
             """,
-            (token, platform, now, now, lang or None),
+            (token, platform, now, now, lang or None, native_token or None),
         )
+
+
+def get_native_token(token: str) -> Optional[str]:
+    """The Android app's FCM token registered with this Expo token, if any."""
+    try:
+        with _connect() as conn:
+            row = conn.execute("SELECT native_token FROM device_tokens WHERE token = ?", (token,)).fetchone()
+        return row[0] if row and row[0] else None
+    except Exception:  # noqa: BLE001 - never break a push; Expo is the fallback
+        return None
+
+
+def clear_native_token(token: str) -> None:
+    """Forget a native FCM token Firebase reported as no longer valid."""
+    try:
+        with _connect() as conn:
+            conn.execute("UPDATE device_tokens SET native_token = NULL WHERE token = ?", (token,))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def get_token_lang(token: str) -> str:

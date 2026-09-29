@@ -13,6 +13,7 @@
 //      user presses Stop.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Platform } from "react-native";
 import { registerPushToken, setPushLanguage, setTrackingInterval, startBackgroundTracking, stopBackgroundTracking, resumeTrackingInterval } from "../api/railwayApi";
 import { getLanguage, hasChosenLanguage, saveLanguage } from "../utils/notifyLanguage";
 import { registerForPushNotifications, refreshWebPushToken } from "./pushNotifications";
@@ -154,6 +155,20 @@ export async function disableBackgroundTracking(apiBaseUrl, { trainNumber, date 
  * device tracks (under its current and earlier push tokens). Never prompts,
  * never throws. Returns true when the server accepted it.
  */
+/**
+ * Android app start: re-send this phone's push token with its FCM token
+ * (railwayApi.registerPushToken adds it), so a phone that was already
+ * tracking gets data-only train pushes — with their buttons — without
+ * re-enabling anything. Never throws.
+ */
+export async function syncNativePushToken(apiBaseUrl) {
+  if (Platform.OS !== "android" || !apiBaseUrl) return;
+  let token = null;
+  try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
+  if (!token) return;
+  try { await registerPushToken(apiBaseUrl, token, "android", hasChosenLanguage() ? getLanguage() : null); } catch (e) { /* next start retries */ }
+}
+
 export async function applyStatusEveryOnServer(apiBaseUrl, minutes) {
   let token = null;
   try {

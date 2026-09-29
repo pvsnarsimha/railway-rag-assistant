@@ -528,6 +528,7 @@ export const STATUS_ON_COLOR = "#D32F2F";
 export const STATUS_OFF_COLOR = "#2E7D32";
 export async function registerNotificationActions() {
   if (Platform.OS === "web") return;
+  await ensureTrainChannels();
   try {
     // opensAppToForeground: false — the button works right in the
     // notification shade (src/services/notificationActions.js runs in the
@@ -544,6 +545,47 @@ export async function registerNotificationActions() {
       { identifier: "ride_rapido", buttonTitle: "Rapido", options: { opensAppToForeground: true } },
     ]);
   } catch (e) { /* older OS / Expo Go — the notification just has no button */ }
+}
+
+/**
+ * Android channels the server's data-only train pushes name
+ * (backend push_notifications._send_via_native_fcm): "train-status" for
+ * the silent in-place status refresh, "delay-alerts" for alerting ones.
+ */
+let _trainChannelsReady = false;
+async function ensureTrainChannels() {
+  if (Platform.OS !== "android" || _trainChannelsReady) return;
+  try {
+    await Notifications.setNotificationChannelAsync("train-status", {
+      name: "Live train status",
+      importance: Notifications.AndroidImportance.DEFAULT,
+      sound: null,
+      enableVibrate: false,
+      lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    });
+    await Notifications.setNotificationChannelAsync("delay-alerts", {
+      name: "Delay alerts",
+      importance: Notifications.AndroidImportance.HIGH,
+    });
+    _trainChannelsReady = true;
+  } catch (e) { /* default channel is used instead */ }
+}
+
+/**
+ * Android app: this phone's own FCM token. Sent to the server next to the
+ * Expo token (railwayApi.registerPushToken) so train notifications come
+ * data-only through Firebase and keep their "Turn off updates" button with
+ * the app closed. null on web / iOS / Expo Go or when unavailable.
+ */
+let _nativeToken = null;
+export async function getNativePushToken() {
+  if (Platform.OS !== "android" || IS_EXPO_GO) return null;
+  if (_nativeToken) return _nativeToken;
+  try {
+    const t = await Notifications.getDevicePushTokenAsync();
+    _nativeToken = t && typeof t.data === "string" ? t.data : null;
+  } catch (e) { _nativeToken = null; }
+  return _nativeToken;
 }
 
 /** Dismiss one delivered notification (e.g. after its Off button). */
