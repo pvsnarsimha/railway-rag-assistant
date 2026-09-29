@@ -272,7 +272,11 @@ async function registerForWebPushNotifications({ prompt = true } = {}) {
 // startup (see App.js).
 export function configureForegroundNotificationHandler() {
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({
+    // The server's silent test message (kind native_ping) is never shown.
+    handleNotification: async (n) => (n?.request?.content?.data?.kind === "native_ping" ? {
+      shouldShowAlert: false, shouldPlaySound: false, shouldSetBadge: false,
+      shouldShowBanner: false, shouldShowList: false,
+    } : {
       shouldShowAlert: true,
       shouldPlaySound: false,
       shouldSetBadge: false,

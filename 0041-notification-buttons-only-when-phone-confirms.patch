@@ -1,0 +1,358 @@
+diff --git a/backend/app.py b/backend/app.py
+index 13b4a2e..100703e 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -5202,8 +5202,31 @@ def api_push_register_token(req: RegisterTokenRequest):
+         return {"ok": False, "error": "Empty token."}
+     native = (req.native_token or "").strip() or None
+     push_store.register_token(req.token.strip(), req.platform, _clean_lang(req.lang), native)
+-    return {"ok": True, "push_configured": push_notifications.status()["configured"],
+-            "native_push": bool(native) and push_notifications.status()["configured"]}
++    configured = push_notifications.status()["configured"]
++    if native and configured:
++        # Silent test message; the app confirms it (/api/push/native-ack).
++        push_notifications.send_native_ping(req.token.strip())
++    return {"ok": True, "push_configured": configured,
++            "native_push": bool(native) and configured}
++
++
++class NativeAckRequest(BaseModel):
++    token: str
++
++
++@app.post("/api/push/native-ack")
++def api_push_native_ack(req: NativeAckRequest):
++    """The Android app got a data-only FCM message (it woke up for it), so
++    train notifications can keep coming that way, with their buttons."""
++    return {"ok": push_store.mark_native_ack(req.token.strip())}
++
++
++@app.get("/api/push/native-status")
++def api_push_native_status(token: str):
++    """Settings check: does this phone confirm data-only messages?"""
++    state = push_store.get_native_state(token.strip())
++    return {"registered": bool(state),
++            "confirmed": bool(state) and push_notifications._native_confirmed(state)}
+ 
+ 
+ class PushLanguageRequest(BaseModel):
+diff --git a/backend/push_notifications.py b/backend/push_notifications.py
+index 9359522..22e9b16 100644
+--- a/backend/push_notifications.py
++++ b/backend/push_notifications.py
+@@ -67,11 +67,22 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
+     # Android app registered its own FCM token, send data-only straight
+     # through Firebase instead: expo-notifications then builds the
+     # notification natively, with the buttons, even with the app swiped away.
+-    native = _native_token_for(token)
+-    if native:
+-        res = _send_via_native_fcm(token, native, title, body, data, sound=sound, category_id=category_id)
++    #
++    # Some phones (e.g. Realme/ColorOS without "Auto-launch" / unrestricted
++    # battery) never wake the app for a data-only message, so it would show
++    # nothing. The app confirms each one it gets (/api/push/native-ack); the
++    # data-only route is used only while those confirmations arrive. Until
++    # then — or once one goes missing — the notification goes through Expo
++    # as before (no buttons, but always shown) and a silent test message
++    # checks again.
++    state = _native_state_for(token)
++    if state and _native_confirmed(state):
++        res = _send_via_native_fcm(token, state["native_token"], title, body, data, sound=sound,
++                                   category_id=category_id)
+         if res.get("sent"):
+             return res
++    elif state:
++        _maybe_send_native_ping(token, state)
+     try:
+         resp = requests.post(
+             _EXPO_PUSH_URL,
+@@ -113,14 +124,66 @@ _NATIVE_ALERT_CHANNEL = "delay-alerts"
+ _NATIVE_MAX_BYTES = 3800
+ 
+ 
+-def _native_token_for(token: str) -> Optional[str]:
++# A data-only send counts as delivered once the phone confirms it; an
++# unconfirmed one this old means the phone didn't wake for it.
++_NATIVE_ACK_GRACE_SECONDS = 180
++# Silent test messages while unconfirmed: at most this often.
++_NATIVE_PING_EVERY_SECONDS = 10 * 60
++
++
++def _native_state_for(token: str) -> Optional[dict]:
+     try:
+         import push_store
+-        return push_store.get_native_token(token)
++        return push_store.get_native_state(token)
+     except Exception:  # noqa: BLE001
+         return None
+ 
+ 
++def _native_confirmed(state: dict, now: Optional[float] = None) -> bool:
++    """True while the phone confirms data-only messages: it has confirmed
++    one, and the last one sent was confirmed or is still within the grace."""
++    now = time.time() if now is None else now
++    ack, sent = state.get("ack_at"), state.get("sent_at")
++    if not ack:
++        return False
++    return sent is None or ack >= sent - 1 or now - sent < _NATIVE_ACK_GRACE_SECONDS
++
++
++def _maybe_send_native_ping(token: str, state: dict, force: bool = False) -> None:
++    """Silent data-only message (nothing is shown); the app confirms it."""
++    sent = state.get("sent_at")
++    if not force and sent and time.time() - sent < _NATIVE_PING_EVERY_SECONDS:
++        return
++    if not _ensure_initialized():
++        return
++    try:
++        import json
++        from firebase_admin import messaging
++        import push_store
++
++        messaging.send(messaging.Message(
++            token=state["native_token"],
++            data={"native": "1", "kind": "native_ping",
++                  "body": json.dumps({"kind": "native_ping", "sent_at": str(int(time.time()))})},
++            android=messaging.AndroidConfig(priority="high", ttl=timedelta(minutes=10)),
++        ))
++        push_store.mark_native_sent(token)
++    except Exception as e:  # noqa: BLE001
++        if "registration-token-not-registered" in str(e) or "UNREGISTERED" in str(e):
++            try:
++                import push_store
++                push_store.clear_native_token(token)
++            except Exception:  # noqa: BLE001
++                pass
++
++
++def send_native_ping(token: str) -> None:
++    """Right after the app registers its FCM token: test it straight away."""
++    state = _native_state_for(token)
++    if state:
++        _maybe_send_native_ping(token, state, force=True)
++
++
+ def _native_tag(data: dict) -> Optional[str]:
+     """One notification per train, replaced in place as it moves (same
+     slots as the web push tags)."""
+@@ -150,6 +213,7 @@ def _send_via_native_fcm(token: str, native: str, title: str, body: str, data: d
+         visible.setdefault("title", title)
+         visible.setdefault("body", body)
+         payload = {
++            "native": "1",  # the app confirms these (see _native_confirmed)
+             "title": title,
+             "message": body,
+             "body": json.dumps(visible, ensure_ascii=False),
+@@ -179,6 +243,11 @@ def _send_via_native_fcm(token: str, native: str, title: str, body: str, data: d
+             data={k: str(v) for k, v in payload.items()},
+             android=messaging.AndroidConfig(priority="high", ttl=timedelta(hours=1)),
+         ))
++        try:
++            import push_store
++            push_store.mark_native_sent(token)
++        except Exception:  # noqa: BLE001
++            pass
+         return {"sent": True, "error": None}
+     except Exception as e:  # noqa: BLE001
+         msg = str(e)
+diff --git a/backend/push_store.py b/backend/push_store.py
+index cad4279..996bd6f 100644
+--- a/backend/push_store.py
++++ b/backend/push_store.py
+@@ -85,6 +85,10 @@ def _init_db():
+             # so train notifications can be sent data-only straight through
+             # Firebase (push_notifications._send_via_native_fcm).
+             "ALTER TABLE device_tokens ADD COLUMN native_token TEXT",
++            # When a data-only FCM message was last sent / confirmed by the
++            # phone (push_notifications: buttons only while it confirms).
++            "ALTER TABLE device_tokens ADD COLUMN native_sent_at REAL",
++            "ALTER TABLE device_tokens ADD COLUMN native_ack_at REAL",
+         ):
+             try:
+                 conn.execute(stmt)
+@@ -226,6 +230,12 @@ def register_token(token: str, platform: Optional[str] = None, lang: Optional[st
+     Android app's FCM token) are kept when omitted."""
+     now = time.time()
+     with _connect() as conn:
++        if native_token:
++            # A new FCM token must prove itself again (native_ack_at).
++            old = conn.execute("SELECT native_token FROM device_tokens WHERE token = ?", (token,)).fetchone()
++            if old and old[0] and old[0] != native_token:
++                conn.execute("UPDATE device_tokens SET native_sent_at = NULL, native_ack_at = NULL WHERE token = ?",
++                             (token,))
+         conn.execute(
+             """
+             INSERT INTO device_tokens (token, platform, created_at, last_seen_at, lang, native_token)
+@@ -239,16 +249,39 @@ def register_token(token: str, platform: Optional[str] = None, lang: Optional[st
+         )
+ 
+ 
+-def get_native_token(token: str) -> Optional[str]:
+-    """The Android app's FCM token registered with this Expo token, if any."""
++def get_native_state(token: str) -> Optional[dict]:
++    """{native_token, sent_at, ack_at} for a device, or None."""
+     try:
+         with _connect() as conn:
+-            row = conn.execute("SELECT native_token FROM device_tokens WHERE token = ?", (token,)).fetchone()
+-        return row[0] if row and row[0] else None
+-    except Exception:  # noqa: BLE001 - never break a push; Expo is the fallback
++            row = conn.execute(
++                "SELECT native_token, native_sent_at, native_ack_at FROM device_tokens WHERE token = ?",
++                (token,)).fetchone()
++        if not row or not row[0]:
++            return None
++        return {"native_token": row[0], "sent_at": row[1], "ack_at": row[2]}
++    except Exception:  # noqa: BLE001
+         return None
+ 
+ 
++def mark_native_sent(token: str) -> None:
++    try:
++        with _connect() as conn:
++            conn.execute("UPDATE device_tokens SET native_sent_at = ? WHERE token = ?", (time.time(), token))
++    except Exception:  # noqa: BLE001
++        pass
++
++
++def mark_native_ack(token: str) -> bool:
++    """The phone confirmed it received a data-only message. True if known."""
++    try:
++        with _connect() as conn:
++            cur = conn.execute("UPDATE device_tokens SET native_ack_at = ? WHERE token = ? AND native_token IS NOT NULL",
++                               (time.time(), token))
++            return cur.rowcount > 0
++    except Exception:  # noqa: BLE001
++        return False
++
++
+ def clear_native_token(token: str) -> None:
+     """Forget a native FCM token Firebase reported as no longer valid."""
+     try:
+diff --git a/mobile-app/src/api/railwayApi.js b/mobile-app/src/api/railwayApi.js
+index 88d90fb..d459b53 100644
+--- a/mobile-app/src/api/railwayApi.js
++++ b/mobile-app/src/api/railwayApi.js
+@@ -350,6 +350,21 @@ export async function setPushLanguage(baseUrl, token, lang) {
+   return data;
+ }
+ 
++/** Android app: "I received the server's data-only message" (see backend
++ * push_notifications._native_confirmed — buttons only while it confirms). */
++export async function ackNativePush(baseUrl, token) {
++  const client = makeClient(baseUrl);
++  const { data } = await client.post("/api/push/native-ack", { token });
++  return data;
++}
++
++/** Settings check: { registered, confirmed } for this phone's data-only route. */
++export async function getNativePushStatus(baseUrl, token) {
++  const client = makeClient(baseUrl);
++  const { data } = await client.get("/api/push/native-status", { params: { token } });
++  return data;
++}
++
+ export async function unregisterPushToken(baseUrl, token) {
+   const client = makeClient(baseUrl);
+   const { data } = await client.post("/api/push/unregister", { token });
+diff --git a/mobile-app/src/screens/SettingsScreen.js b/mobile-app/src/screens/SettingsScreen.js
+index 3a7375f..3b3f52f 100644
+--- a/mobile-app/src/screens/SettingsScreen.js
++++ b/mobile-app/src/screens/SettingsScreen.js
+@@ -7,7 +7,7 @@ import SectionCard from "../components/SectionCard";
+ import LabeledInput from "../components/LabeledInput";
+ import PrimaryButton from "../components/PrimaryButton";
+ import { useSettings } from "../context/SettingsContext";
+-import { checkHealth, registerPushToken } from "../api/railwayApi";
++import { checkHealth, registerPushToken, getNativePushStatus } from "../api/railwayApi";
+ import AsyncStorage from "@react-native-async-storage/async-storage";
+ import { describeApiError } from "../api/client";
+ import LanguagePickerModal from "../components/LanguagePickerModal";
+@@ -17,7 +17,7 @@ import { Platform } from "react-native";
+ import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission, STATUS_ON_COLOR, getNativePushToken } from "../services/pushNotifications";
+ 
+ // Shown in Settings so it's easy to tell which build is installed.
+-export const NOTIFY_BUTTONS_VERSION = "notification buttons v5";
++export const NOTIFY_BUTTONS_VERSION = "notification buttons v6";
+ 
+ export default function SettingsScreen() {
+   const { apiBaseUrl, setApiBaseUrl, wsBaseUrl } = useSettings();
+@@ -59,9 +59,20 @@ export default function SettingsScreen() {
+       if (!native) { setServerButtons("This phone didn't give a Firebase token — train updates will come without buttons."); return; }
+       const r = await registerPushToken(apiBaseUrl, token, "android");
+       if (r && r.native_push === undefined) { setServerButtons("✖ The server on Render is an older version — redeploy it, then check again."); return; }
+-      setServerButtons(r && r.native_push
++      if (!(r && r.native_push)) {
++        setServerButtons("✖ The server can't send through Firebase (FIREBASE_SERVICE_ACCOUNT_JSON not set on Render) — train updates come without buttons.");
++        return;
++      }
++      // The server just sent a silent test message; wait for this phone to
++      // confirm it (background task -> /api/push/native-ack).
++      let confirmed = false;
++      for (let i = 0; i < 8 && !confirmed; i++) {
++        await new Promise((res) => setTimeout(res, 1500));
++        try { confirmed = !!(await getNativePushStatus(apiBaseUrl, token)).confirmed; } catch (e) { /* retry */ }
++      }
++      setServerButtons(confirmed
+         ? "✔ Train updates from the server will show Turn off updates, even with the app closed."
+-        : "✖ The server can't send through Firebase (FIREBASE_SERVICE_ACCOUNT_JSON not set on Render) — train updates come without buttons.");
++        : "✖ This phone didn't confirm the server's test message, so train updates come the normal way (no buttons). Allow Auto-launch and set Battery to Unrestricted for this app, then check again.");
+     } catch (e) {
+       setServerButtons("Couldn't reach the server to check — try again when online.");
+     }
+diff --git a/mobile-app/src/services/pushNotifications.js b/mobile-app/src/services/pushNotifications.js
+index 579fc6d..f8db0e1 100644
+--- a/mobile-app/src/services/pushNotifications.js
++++ b/mobile-app/src/services/pushNotifications.js
+@@ -272,7 +272,11 @@ async function registerForWebPushNotifications({ prompt = true } = {}) {
+ // startup (see App.js).
+ export function configureForegroundNotificationHandler() {
+   Notifications.setNotificationHandler({
+-    handleNotification: async () => ({
++    // The server's silent test message (kind native_ping) is never shown.
++    handleNotification: async (n) => (n?.request?.content?.data?.kind === "native_ping" ? {
++      shouldShowAlert: false, shouldPlaySound: false, shouldSetBadge: false,
++      shouldShowBanner: false, shouldShowList: false,
++    } : {
+       shouldShowAlert: true,
+       shouldPlaySound: false,
+       shouldSetBadge: false,
+diff --git a/mobile-app/src/services/readAloudTask.js b/mobile-app/src/services/readAloudTask.js
+index 6dcd162..2e2eb47 100644
+--- a/mobile-app/src/services/readAloudTask.js
++++ b/mobile-app/src/services/readAloudTask.js
+@@ -25,6 +25,22 @@ import { Platform } from "react-native";
+ import { loadReadAloudAsync, speak, shouldSpeakPush } from "../utils/speakNotifications";
+ import { loadLanguage } from "../utils/notifyLanguage";
+ import { handleStatusAction } from "./notificationActions";
++import AsyncStorage from "@react-native-async-storage/async-storage";
++import { ackNativePush } from "../api/railwayApi";
++import { DEFAULT_API_BASE_URL, STORAGE_KEYS } from "../config";
++
++// The server's data-only train pushes (and its silent test message) carry
++// native: "1". Confirming each one tells the server this phone wakes up
++// for them, so it keeps sending train notifications that way — with their
++// buttons. Unconfirmed, it falls back to the ordinary kind.
++async function ackNative() {
++  try {
++    const token = await AsyncStorage.getItem("moreTools.pushToken");
++    if (!token) return;
++    const base = (await AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)) || DEFAULT_API_BASE_URL;
++    await ackNativePush(base, token);
++  } catch (e) { /* the server falls back to Expo */ }
++}
+ 
+ export const READ_ALOUD_TASK = "railway-read-aloud-notification";
+ 
+@@ -59,6 +75,12 @@ if (Platform.OS !== "web") {
+         await handleStatusAction(data);
+         return;
+       }
++      // Delivered as the FCM message itself, or wrapped under `notification`.
++      const fcm = data?.data?.native ? data.data : data?.notification?.data?.native ? data.notification.data : null;
++      if (fcm && fcm.native === "1") {
++        await ackNative();
++        if (fcm.kind === "native_ping") return;
++      }
+       if (!(await loadReadAloudAsync())) return;
+       await loadLanguage();
+       speakPushData(extract(data));

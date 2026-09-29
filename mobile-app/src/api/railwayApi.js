@@ -350,6 +350,21 @@ export async function setPushLanguage(baseUrl, token, lang) {
   return data;
 }
 
+/** Android app: "I received the server's data-only message" (see backend
+ * push_notifications._native_confirmed — buttons only while it confirms). */
+export async function ackNativePush(baseUrl, token) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.post("/api/push/native-ack", { token });
+  return data;
+}
+
+/** Settings check: { registered, confirmed } for this phone's data-only route. */
+export async function getNativePushStatus(baseUrl, token) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.get("/api/push/native-status", { params: { token } });
+  return data;
+}
+
 export async function unregisterPushToken(baseUrl, token) {
   const client = makeClient(baseUrl);
   const { data } = await client.post("/api/push/unregister", { token });
