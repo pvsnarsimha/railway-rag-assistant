@@ -7,16 +7,17 @@ import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
 import { useSettings } from "../context/SettingsContext";
-import { checkHealth } from "../api/railwayApi";
+import { checkHealth, registerPushToken } from "../api/railwayApi";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { describeApiError } from "../api/client";
 import LanguagePickerModal from "../components/LanguagePickerModal";
 import { getLanguage, languageInfo, loadLanguage } from "../utils/notifyLanguage";
 import { useT } from "../context/LanguageContext";
 import { Platform } from "react-native";
-import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission, STATUS_ON_COLOR } from "../services/pushNotifications";
+import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission, STATUS_ON_COLOR, getNativePushToken } from "../services/pushNotifications";
 
 // Shown in Settings so it's easy to tell which build is installed.
-export const NOTIFY_BUTTONS_VERSION = "notification buttons v4";
+export const NOTIFY_BUTTONS_VERSION = "notification buttons v5";
 
 export default function SettingsScreen() {
   const { apiBaseUrl, setApiBaseUrl, wsBaseUrl } = useSettings();
@@ -31,6 +32,7 @@ export default function SettingsScreen() {
   useEffect(() => { loadLanguage().then((c) => { if (c) setLang(c); }); }, []);
 
   const [notifyTest, setNotifyTest] = useState(null);
+  const [serverButtons, setServerButtons] = useState(null);
   // Shows a sample train notification with the "Turn off updates" button
   // straight from this phone (no server) — proves the installed app has the
   // buttons. Tapping the button there works like on a real update.
@@ -47,6 +49,22 @@ export default function SettingsScreen() {
       data: { type: "running_status", train_number: "12760", interval_minutes: "10" },
     });
     setNotifyTest(id ? "Sent — pull down the notification shade and expand it." : "Couldn't show a notification (Expo Go can't show buttons — use the installed app).");
+    // Real train updates come from the server: check it can send them with
+    // the buttons (data-only through Firebase) to this phone.
+    setServerButtons("Checking train updates from the server…");
+    try {
+      const token = await AsyncStorage.getItem("moreTools.pushToken");
+      const native = await getNativePushToken();
+      if (!token) { setServerButtons("Start Live Tracking with notifications on once — then train updates get the buttons."); return; }
+      if (!native) { setServerButtons("This phone didn't give a Firebase token — train updates will come without buttons."); return; }
+      const r = await registerPushToken(apiBaseUrl, token, "android");
+      if (r && r.native_push === undefined) { setServerButtons("✖ The server on Render is an older version — redeploy it, then check again."); return; }
+      setServerButtons(r && r.native_push
+        ? "✔ Train updates from the server will show Turn off updates, even with the app closed."
+        : "✖ The server can't send through Firebase (FIREBASE_SERVICE_ACCOUNT_JSON not set on Render) — train updates come without buttons.");
+    } catch (e) {
+      setServerButtons("Couldn't reach the server to check — try again when online.");
+    }
   }
 
   async function handleSave() {
@@ -140,6 +158,7 @@ export default function SettingsScreen() {
       <SectionCard title="Notification buttons" subtitle="Check that this installed app shows Turn off updates on train notifications.">
         <PrimaryButton title="Test notification buttons" variant="secondary" onPress={handleNotifyTest} />
         {notifyTest ? <Text style={styles.aboutText}>{notifyTest}</Text> : null}
+        {serverButtons ? <Text style={styles.aboutText}>{serverButtons}</Text> : null}
         <Text style={styles.aboutText}>Build: {NOTIFY_BUTTONS_VERSION}</Text>
       </SectionCard>
 

@@ -14,6 +14,9 @@ import { SpeakScope } from "./src/i18n/Localized";
 import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
 import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification } from "./src/services/pushNotifications";
 import { handleStatusAction } from "./src/services/notificationActions";
+import { syncNativePushToken } from "./src/services/backgroundTracking";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { DEFAULT_API_BASE_URL, STORAGE_KEYS } from "./src/config";
 import * as Notifications from "expo-notifications";
 import { openRide } from "./src/components/BookRideCard";
 // Registers the headless "read notifications aloud" task at module scope.
@@ -133,6 +136,13 @@ export default function App() {
     configureForegroundNotificationHandler();
     registerOfflineShell();
     registerNotificationActions();
+    // Android: give the server this phone's FCM token so train pushes come
+    // data-only and keep their Turn off / Turn on buttons with the app closed.
+    if (Platform.OS === "android") {
+      AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)
+        .then((b) => syncNativePushToken(b || DEFAULT_API_BASE_URL))
+        .catch(() => {});
+    }
     // "Turn off updates" / "Turn on updates" on a train notification — also
     // handled in the background when the app isn't open (readAloudTask.js).
     const handled = new Set();

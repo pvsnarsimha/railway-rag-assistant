@@ -60,6 +60,18 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
                    category_id: Optional[str] = None) -> dict:
     """Never raises — same never-raises contract as the FCM senders below,
     so alert_scheduler.py can keep going on a per-token failure."""
+    # FEATURE: buttons on train notifications with the app closed. Expo's
+    # push service sends an FCM *notification* message, which Android shows
+    # by itself while the app is in the background — without the
+    # notification category, so no "Turn off updates" button. When the
+    # Android app registered its own FCM token, send data-only straight
+    # through Firebase instead: expo-notifications then builds the
+    # notification natively, with the buttons, even with the app swiped away.
+    native = _native_token_for(token)
+    if native:
+        res = _send_via_native_fcm(token, native, title, body, data, sound=sound, category_id=category_id)
+        if res.get("sent"):
+            return res
     try:
         resp = requests.post(
             _EXPO_PUSH_URL,
@@ -87,6 +99,97 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
         return {"sent": True, "error": None}
     except requests.exceptions.RequestException as e:
         return {"sent": False, "error": f"Expo push API request failed: {e}"}
+
+
+# Accent colour of train notifications — Android tints the button text
+# with it (red "Turn off updates"; the app flips it to green "Turn on").
+_NATIVE_COLOR = "#D32F2F"
+# Android channels the app creates (pushNotifications.registerNotificationActions):
+# silent in-place status refreshes vs. alerting pushes. A missing channel
+# falls back to the default one.
+_NATIVE_SILENT_CHANNEL = "train-status"
+_NATIVE_ALERT_CHANNEL = "delay-alerts"
+# FCM's data payload limit is 4096 bytes.
+_NATIVE_MAX_BYTES = 3800
+
+
+def _native_token_for(token: str) -> Optional[str]:
+    try:
+        import push_store
+        return push_store.get_native_token(token)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _native_tag(data: dict) -> Optional[str]:
+    """One notification per train, replaced in place as it moves (same
+    slots as the web push tags)."""
+    d = data or {}
+    train = d.get("train_number")
+    if d.get("type") == "smart_alarm":
+        return f"smart_alarm-{train or ''}-{d.get('station') or ''}"
+    if d.get("type") == "fare_alert":
+        return f"fare_alert-{train or ''}"
+    return f"train-{train}" if train else None
+
+
+def _send_via_native_fcm(token: str, native: str, title: str, body: str, data: dict,
+                         sound: Optional[str] = "default", category_id: Optional[str] = None) -> dict:
+    """Data-only FCM message in expo-notifications' Android format (title /
+    message / body JSON / categoryId / channelId / color / tag). The same
+    message wakes the app's background task, which reads it aloud when the
+    rider turned that on — so no separate "speak" message is sent.
+    Never raises; {"sent": False} lets the caller fall back to Expo."""
+    if not _ensure_initialized():
+        return {"sent": False, "error": _init_error}
+    try:
+        import json
+        from firebase_admin import messaging
+
+        visible = {k: v for k, v in (data or {}).items() if k != "speak_text_en"}
+        visible.setdefault("title", title)
+        visible.setdefault("body", body)
+        payload = {
+            "title": title,
+            "message": body,
+            "body": json.dumps(visible, ensure_ascii=False),
+            "color": _NATIVE_COLOR,
+            "channelId": _NATIVE_ALERT_CHANNEL if sound else _NATIVE_SILENT_CHANNEL,
+        }
+        if category_id:
+            payload["categoryId"] = category_id
+        tag = _native_tag(data)
+        if tag:
+            payload["tag"] = tag
+        def _size(p):
+            return len(json.dumps(p, ensure_ascii=False).encode("utf-8"))
+
+        # Keep under FCM's limit: the spoken copy goes first (read-aloud then
+        # speaks the title and text).
+        if _size(payload) > _NATIVE_MAX_BYTES:
+            visible.pop("speak_text", None)
+            payload["body"] = json.dumps(visible, ensure_ascii=False)
+        if sound and (data or {}).get("speak_text_en"):
+            with_en = dict(visible, speak_text_en=data["speak_text_en"])
+            candidate = dict(payload, body=json.dumps(with_en, ensure_ascii=False))
+            if _size(candidate) <= _NATIVE_MAX_BYTES:
+                payload = candidate
+        messaging.send(messaging.Message(
+            token=native,
+            data={k: str(v) for k, v in payload.items()},
+            android=messaging.AndroidConfig(priority="high", ttl=timedelta(hours=1)),
+        ))
+        return {"sent": True, "error": None}
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "registration-token-not-registered" in msg or "Requested entity was not found" in msg \
+                or "UNREGISTERED" in msg or "NotRegistered" in msg:
+            try:
+                import push_store
+                push_store.clear_native_token(token)
+            except Exception:  # noqa: BLE001
+                pass
+        return {"sent": False, "error": msg}
 
 
 def _visible_expo_data(data: Optional[dict], title: str, body: str) -> dict:

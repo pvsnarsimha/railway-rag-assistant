@@ -328,7 +328,18 @@ export async function checkDelayAlerts(baseUrl, watches) {
 /** Registers this device's push token with the backend (push_store.py). */
 export async function registerPushToken(baseUrl, token, platform, lang) {
   const client = makeClient(baseUrl);
-  const { data } = await client.post("/api/push/register-token", { token, platform: platform || null, lang: lang || null });
+  // Android app: its FCM token rides along, so the server can send train
+  // notifications data-only (their buttons then show with the app closed).
+  let nativeToken = null;
+  if (token && /^Expo(nent)?PushToken\[/.test(String(token))) {
+    try {
+      const { getNativePushToken } = require("../services/pushNotifications");
+      nativeToken = await getNativePushToken();
+    } catch (e) { nativeToken = null; }
+  }
+  const { data } = await client.post("/api/push/register-token", {
+    token, platform: platform || null, lang: lang || null, native_token: nativeToken,
+  });
   return data;
 }
 

@@ -166,8 +166,11 @@ export function onTrainPush(handler) {
  *  - silent in-place status refreshes (alert="0") are not read,
  *  - a push older than 3 minutes (delivered late, e.g. after reopening the
  *    browser) is past news and is not read,
- *  - an older push arriving after a newer one for the same train is skipped. */
+ *  - an older push arriving after a newer one for the same train is skipped,
+ *  - the same push reaching both the open app and its background task is
+ *    read once. */
 const lastSentAt = new Map(); // train -> newest sent_at seen
+const spoken = new Set(); // train|sent_at|type already read
 export function shouldSpeakPush(m) {
   if (!m) return false;
   if (m.type === "running_status" && m.alert === "0") return false;
@@ -178,6 +181,10 @@ export function shouldSpeakPush(m) {
     const prev = lastSentAt.get(key) || 0;
     if (sent < prev) return false;
     lastSentAt.set(key, sent);
+    const once = `${key}|${sent}|${m.type || ""}`;
+    if (spoken.has(once)) return false;
+    spoken.add(once);
+    if (spoken.size > 50) spoken.delete(spoken.values().next().value);
   }
   return true;
 }

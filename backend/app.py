@@ -5184,6 +5184,9 @@ class RegisterTokenRequest(BaseModel):
     token: str
     platform: Optional[str] = None  # "web" | "android" | "ios", informational only
     lang: Optional[str] = None  # notification language code (i18n_notify.LANGUAGES)
+    # Android app only: its FCM token, so train notifications can be sent
+    # data-only through Firebase and show their buttons with the app closed.
+    native_token: Optional[str] = None
 
 
 def _clean_lang(lang: Optional[str]) -> Optional[str]:
@@ -5197,8 +5200,10 @@ def _clean_lang(lang: Optional[str]) -> Optional[str]:
 def api_push_register_token(req: RegisterTokenRequest):
     if not req.token.strip():
         return {"ok": False, "error": "Empty token."}
-    push_store.register_token(req.token.strip(), req.platform, _clean_lang(req.lang))
-    return {"ok": True, "push_configured": push_notifications.status()["configured"]}
+    native = (req.native_token or "").strip() or None
+    push_store.register_token(req.token.strip(), req.platform, _clean_lang(req.lang), native)
+    return {"ok": True, "push_configured": push_notifications.status()["configured"],
+            "native_push": bool(native) and push_notifications.status()["configured"]}
 
 
 class PushLanguageRequest(BaseModel):
