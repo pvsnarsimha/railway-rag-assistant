@@ -360,7 +360,7 @@ def send_delay_alert(
     _localize(data, _lang_for(token), title, body, title, body, speak=_speak)
 
     if _is_expo_token(token):
-        return _send_via_expo(token, title, body, data)
+        return _send_via_expo(token, title, body, data, category_id=STATUS_UPDATES_CATEGORY)
 
     if not _ensure_initialized():
         return {"sent": False, "error": _init_error}
@@ -371,11 +371,12 @@ def send_delay_alert(
     # push for the SAME train while an earlier one is still unread should
     # re-alert in place with the latest number, not pile up as a separate
     # notification the user has to individually clear.
+    data = {**data, "push_token": token}  # for the web "Turn off updates" button
     message = messaging.Message(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=_webpush_config(title, body, tag=_delay_tag(train_number)),
+        webpush=_webpush_config(title, body, tag=_delay_tag(train_number), actions=STATUS_WEB_ACTIONS),
     )
     try:
         messaging.send(message)
@@ -558,15 +559,16 @@ def send_approach_alert(
                                   delay_minutes=delay_minutes, train_name=(running or {}).get("train_name"))
     _localize(data, lang, title_en, body_en, title, body, speak=_speak)
     if _is_expo_token(token):
-        return _send_via_expo(token, title, body, data, sound="default")
+        return _send_via_expo(token, title, body, data, sound="default", category_id=STATUS_UPDATES_CATEGORY)
     if not _ensure_initialized():
         return {"sent": False, "error": _init_error}
     from firebase_admin import messaging
+    data = {**data, "push_token": token}  # for the web "Turn off updates" button
     fcm_message = messaging.Message(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=_webpush_config(title, body, tag=f"approach-{train_number}-{station or ''}"),
+        webpush=_webpush_config(title, body, tag=f"approach-{train_number}-{station or ''}", actions=STATUS_WEB_ACTIONS),
     )
     try:
         messaging.send(fcm_message)
@@ -615,18 +617,19 @@ def send_station_status_alert(
     _localize(data, lang, title_en, body_en, title, body)
 
     if _is_expo_token(token):
-        return _send_via_expo(token, title, body, data)
+        return _send_via_expo(token, title, body, data, category_id=STATUS_UPDATES_CATEGORY)
 
     if not _ensure_initialized():
         return {"sent": False, "error": _init_error}
 
     from firebase_admin import messaging
 
+    data = {**data, "push_token": token}  # for the web "Turn off updates" button
     fcm_message = messaging.Message(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
-        webpush=_webpush_config(title, body, tag=_delay_tag(train_number)),
+        webpush=_webpush_config(title, body, tag=_delay_tag(train_number), actions=STATUS_WEB_ACTIONS),
     )
     try:
         messaging.send(fcm_message)
@@ -635,12 +638,16 @@ def send_station_status_alert(
         return {"sent": False, "error": str(e)}
 
 
-# FEATURE: "Turn off updates" button on the live-status notification itself.
-# Tapping it sets "notify me every N min" to Off for every train this device
-# tracks (same as the Off chip on Live Tracking). Station alerts, alarms and
-# the final "Reached" notification are not affected.
+# FEATURE: "Turn off updates" button on every train notification (live
+# status, delay alert, station reached, arriving soon — they share one
+# notification slot per train, so each must carry it). Tapping it sets
+# "notify me every N min" to Off for every train this device tracks (same
+# as the Off chip on Live Tracking); the notification then turns into
+# "Updates off" with "Turn on updates". Station alerts, alarms and the
+# final "Reached" notification keep coming.
 STATUS_UPDATES_CATEGORY = "train_status"
 STATUS_OFF_ACTION = "status_off"
+STATUS_WEB_ACTIONS = [(STATUS_OFF_ACTION, "Turn off updates")]
 
 
 def send_running_status(token: str, train_number: str, running: dict, final: bool = False,
@@ -717,7 +724,7 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
         data=data,
         webpush=_webpush_config(title, body, tag=_train_tag(train_number),
                                 renotify=final or alert, silent=not (final or alert),
-                                actions=None if final else [(STATUS_OFF_ACTION, "Turn off updates")]),
+                                actions=None if final else STATUS_WEB_ACTIONS),
     )
     try:
         messaging.send(fcm_message)

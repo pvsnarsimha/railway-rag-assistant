@@ -5569,6 +5569,20 @@ def api_push_tracking_interval(req: TrackingIntervalRequest):
     return {"ok": True, "updated": changed}
 
 
+class TrackingResumeRequest(BaseModel):
+    token: str
+    previous_tokens: Optional[List[str]] = None
+
+
+@app.post("/api/push/tracking/resume")
+def api_push_tracking_resume(req: TrackingResumeRequest):
+    """"Turn on updates" (after "Turn off updates"): restore the interval
+    every paused train of this device had before Off."""
+    tokens = [req.token] + list(req.previous_tokens or [])[:10]
+    minutes = push_store.resume_tracking_interval(tokens)
+    return {"ok": True, "interval_minutes": minutes}
+
+
 @app.post("/api/push/tracking/stop")
 def api_push_stop_tracking(req: TrackingWatchDeleteRequest):
     removed = push_store.delete_tracking_watch(

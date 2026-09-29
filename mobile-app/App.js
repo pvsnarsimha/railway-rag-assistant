@@ -12,7 +12,7 @@ import { colors } from "./src/theme/colors";
 import { View } from "react-native";
 import { SpeakScope } from "./src/i18n/Localized";
 import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
-import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification, STATUS_OFF_ACTION, STATUS_ON_ACTION, scheduleLocalReminder } from "./src/services/pushNotifications";
+import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification, STATUS_OFF_ACTION, STATUS_ON_ACTION, replaceNotification } from "./src/services/pushNotifications";
 import { turnOffStatusUpdates, turnOnStatusUpdates } from "./src/services/backgroundTracking";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
@@ -146,32 +146,39 @@ export default function App() {
       const action = response?.actionIdentifier;
       if (action !== STATUS_OFF_ACTION && action !== STATUS_ON_ACTION) return false;
       const id = response?.notification?.request?.identifier;
-      if (id && handled.has(id)) return true;
-      if (id) handled.add(id);
-      const data = response?.notification?.request?.content?.data || {};
+      // The replaced notification keeps its identifier, so include its date
+      // — tapping Off, On, Off again on one notification must all work.
+      const key = `${id}|${action}|${response?.notification?.date || ""}`;
+      if (handled.has(key)) return true;
+      handled.add(key);
+      const content = response?.notification?.request?.content || {};
+      const data = content.data || {};
+      const train = data.train_number ? `${data.train_number}: ` : "";
       const base = await apiBase();
-      dismissNotification(id);
       if (action === STATUS_ON_ACTION) {
-        // "Turn on again" on the confirmation: restore the old interval.
-        await turnOnStatusUpdates(base, { minutes: data.interval_minutes });
+        // "Turn on updates": restore the old interval and flip the same
+        // notification back to one with "Turn off updates".
+        const n = await turnOnStatusUpdates(base, { minutes: data.interval_minutes });
+        replaceNotification(id, {
+          title: "Live updates on",
+          body: `${train}status updates every ${n} min again.`,
+          categoryIdentifier: "train_status",
+          data: { ...data, type: "status_on_confirm", interval_minutes: String(n) },
+        });
         return true;
       }
       stopSpeaking();
       const prev = await turnOffStatusUpdates(base, { previous: data.interval_minutes });
-      // One last notification so it's a single tap to undo — e.g. when
-      // the rider still needs updates while on the train.
-      scheduleLocalReminder(
-        "Live updates turned off",
-        `${data.train_number ? `${data.train_number}: ` : ""}no more status updates. Station alerts and alarms still work. Tap "Turn on again" to get updates every ${prev} min.`,
-        1,
-        { categoryIdentifier: "train_status_off", data: { type: "status_off_confirm", interval_minutes: prev, train_number: data.train_number || "" } },
-      );
+      // Same notification turns into "Updates off" with "Turn on updates" —
+      // one tap to undo, e.g. when the rider still needs updates on the train.
+      replaceNotification(id, {
+        title: "Live updates off",
+        body: `${train}no more status updates. Station alerts and alarms still work.`,
+        categoryIdentifier: "train_status_off",
+        data: { ...data, type: "status_off_confirm", interval_minutes: String(prev) },
+      });
       return true;
     };
-    if (Platform.OS !== "web") {
-      // App opened from the button while it was closed.
-      Notifications.getLastNotificationResponseAsync().then((r) => r && handleOff(r)).catch(() => {});
-    }
     // Ola / Uber / Rapido buttons on the "book your ride" reminder.
     const handleRide = (response) => {
       const action = response?.actionIdentifier || "";

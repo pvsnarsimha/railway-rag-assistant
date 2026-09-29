@@ -193,6 +193,9 @@ def _init_db():
         for stmt in (
             "ALTER TABLE tracking_watches ADD COLUMN interval_minutes INTEGER NOT NULL DEFAULT 10",
             "ALTER TABLE tracking_watches ADD COLUMN last_alert_at REAL",
+            # The interval in use before "Turn off updates", so "Turn on
+            # updates" (from any notification) can bring it back.
+            "ALTER TABLE tracking_watches ADD COLUMN paused_interval_minutes INTEGER",
         ):
             try:
                 conn.execute(stmt)
@@ -634,8 +637,34 @@ def set_tracking_interval(tokens: List[str], interval_minutes: int) -> int:
     n = max(0, min(720, int(interval_minutes)))
     marks = ",".join("?" for _ in tokens)
     with _connect() as conn:
-        cur = conn.execute(f"UPDATE tracking_watches SET interval_minutes = ? WHERE token IN ({marks})", (n, *tokens))
+        if n == 0:
+            cur = conn.execute(
+                f"UPDATE tracking_watches SET paused_interval_minutes = CASE WHEN interval_minutes > 0 "
+                f"THEN interval_minutes ELSE paused_interval_minutes END, interval_minutes = 0 "
+                f"WHERE token IN ({marks})", tuple(tokens))
+        else:
+            cur = conn.execute(f"UPDATE tracking_watches SET interval_minutes = ? WHERE token IN ({marks})", (n, *tokens))
         return cur.rowcount
+
+
+def resume_tracking_interval(tokens: List[str]) -> Optional[int]:
+    """"Turn on updates": give every paused (Off) watch of this device back
+    the interval it had before Off (10 min if unknown). Returns the interval
+    restored, or None when nothing was paused."""
+    tokens = [t.strip() for t in (tokens or []) if t and t.strip()]
+    if not tokens:
+        return None
+    marks = ",".join("?" for _ in tokens)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT COALESCE(paused_interval_minutes, 10) FROM tracking_watches "
+            f"WHERE token IN ({marks}) AND interval_minutes = 0", tuple(tokens)).fetchall()
+        if not rows:
+            return None
+        conn.execute(
+            f"UPDATE tracking_watches SET interval_minutes = COALESCE(paused_interval_minutes, 10) "
+            f"WHERE token IN ({marks}) AND interval_minutes = 0", tuple(tokens))
+        return max(int(r[0]) for r in rows)
 
 
 def delete_tracking_watch(token: str, train_number: Optional[str] = None, date: Optional[str] = None) -> int:

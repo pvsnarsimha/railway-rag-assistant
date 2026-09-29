@@ -210,21 +210,32 @@ async function registerForWebPushNotifications({ prompt = true } = {}) {
       const body = payload.notification?.body || "";
       playDelayAlertChime();
       if (Notification.permission === "granted") {
-        try {
-          // vibrate + requireInteraction match the background service
-          // worker's presentation (see public/firebase-messaging-sw.js) so a
-          // push looks/feels the same whether the tab is focused or not.
-          new Notification(title, {
-            body,
-            icon: NOTIFICATION_ICON,
-            vibrate: [200, 100, 200, 100, 200],
-            requireInteraction: true,
-            // Per train (and station for station-specific types), so an
-            // alert for one train never replaces another train's alert.
-            tag: notificationTag(payload.data),
-            renotify: true,
+        // vibrate + requireInteraction match the background service
+        // worker's presentation (see public/firebase-messaging-sw.js) so a
+        // push looks/feels the same whether the tab is focused or not.
+        const d = payload.data || {};
+        const opts = {
+          body,
+          icon: NOTIFICATION_ICON,
+          vibrate: [200, 100, 200, 100, 200],
+          requireInteraction: true,
+          // Per train (and station for station-specific types), so an
+          // alert for one train never replaces another train's alert.
+          tag: notificationTag(d),
+          renotify: true,
+        };
+        // Train notifications carry "Turn off updates" (handled by the
+        // service worker) — only a service-worker notification can show
+        // buttons, so show it through the registration when possible.
+        if (d.push_token && ["delay_alert", "station_reached", "approach_alert"].includes(d.type)) {
+          opts.actions = [{ action: "status_off", title: "Turn off updates" }];
+          opts.data = { push_token: d.push_token, train_number: d.train_number || "", interval_minutes: d.interval_minutes || "" };
+        }
+        navigator.serviceWorker.getRegistration("/mobile-app/")
+          .then((reg) => (reg ? reg.showNotification(title, opts) : Promise.reject(new Error("no sw"))))
+          .catch(() => {
+            try { delete opts.actions; new Notification(title, opts); } catch (e) { /* ignore */ }
           });
-        } catch (e) { /* ignore */ }
       }
     });
     }
@@ -483,7 +494,7 @@ export async function registerNotificationActions() {
       { identifier: STATUS_OFF_ACTION, buttonTitle: "Turn off updates", options: { opensAppToForeground: true } },
     ]);
     await Notifications.setNotificationCategoryAsync("train_status_off", [
-      { identifier: STATUS_ON_ACTION, buttonTitle: "Turn on again", options: { opensAppToForeground: true } },
+      { identifier: STATUS_ON_ACTION, buttonTitle: "Turn on updates", options: { opensAppToForeground: true } },
     ]);
     await Notifications.setNotificationCategoryAsync("ride_book", [
       { identifier: "ride_ola", buttonTitle: "Ola", options: { opensAppToForeground: true } },
@@ -545,4 +556,22 @@ export async function cancelLocalReminder(identifier) {
     return;
   }
   try { await Notifications.cancelScheduledNotificationAsync(identifier); } catch (e) { /* already fired */ }
+}
+
+/**
+ * Native: replace a notification that is already showing (same
+ * identifier) — used to flip "Turn off updates" into "Updates off · Turn
+ * on updates" in place. Falls back to a new notification.
+ */
+export async function replaceNotification(identifier, { title, body, data, categoryIdentifier }) {
+  if (Platform.OS === "web") return null;
+  try {
+    return await Notifications.scheduleNotificationAsync({
+      ...(identifier ? { identifier } : {}),
+      content: { title, body, data: data || {}, ...(categoryIdentifier ? { categoryIdentifier } : {}) },
+      trigger: null,
+    });
+  } catch (e) {
+    return null;
+  }
 }

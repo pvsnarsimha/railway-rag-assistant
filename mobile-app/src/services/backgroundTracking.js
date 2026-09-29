@@ -13,7 +13,7 @@
 //      user presses Stop.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { registerPushToken, setPushLanguage, setTrackingInterval, startBackgroundTracking, stopBackgroundTracking } from "../api/railwayApi";
+import { registerPushToken, setPushLanguage, setTrackingInterval, startBackgroundTracking, stopBackgroundTracking, resumeTrackingInterval } from "../api/railwayApi";
 import { getLanguage, hasChosenLanguage, saveLanguage } from "../utils/notifyLanguage";
 import { registerForPushNotifications, refreshWebPushToken } from "./pushNotifications";
 
@@ -219,9 +219,17 @@ export async function turnOffStatusUpdates(apiBaseUrl, { serverDone = false, pre
   return prev > 0 ? prev : 10;
 }
 
-/** "Turn on again": restore the interval the rider had before Off (10 min if unknown). */
+/**
+ * "Turn on updates": the server restores the interval each paused train had
+ * before Off (so it works from any notification); this phone's setting
+ * follows. Falls back to the last interval saved here (10 min if unknown).
+ */
 export async function turnOnStatusUpdates(apiBaseUrl, { minutes, serverDone = false } = {}) {
   let n = Number(minutes);
+  if (!serverDone && apiBaseUrl) {
+    const restored = await resumeStatusEveryOnServer(apiBaseUrl);
+    if (restored > 0) { n = restored; serverDone = true; }
+  }
   if (!(n > 0)) {
     try { n = parseInt((await AsyncStorage.getItem(LAST_ON_KEY)) || "", 10); } catch (e) { n = NaN; }
   }
@@ -230,6 +238,19 @@ export async function turnOnStatusUpdates(apiBaseUrl, { minutes, serverDone = fa
   statusEveryListeners.forEach((fn) => { try { fn(n); } catch (e) { /* ignore */ } });
   if (!serverDone && apiBaseUrl) await applyStatusEveryOnServer(apiBaseUrl, n);
   return n;
+}
+
+async function resumeStatusEveryOnServer(apiBaseUrl) {
+  let token = null;
+  try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
+  if (!token) return null;
+  const past = (await loadPastTokens()).filter((t) => t !== token);
+  try {
+    const res = await resumeTrackingInterval(apiBaseUrl, token, past);
+    return res && res.interval_minutes > 0 ? res.interval_minutes : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // Web: the service worker can't write the page's storage, so when "Turn
