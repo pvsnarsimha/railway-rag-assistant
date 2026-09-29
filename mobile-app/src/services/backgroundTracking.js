@@ -208,24 +208,43 @@ export function onStatusEveryChanged(fn) {
   return () => statusEveryListeners.delete(fn);
 }
 
-export async function turnOffStatusUpdates(apiBaseUrl, { serverDone = false } = {}) {
+const LAST_ON_KEY = "liveTracking.statusEveryLastOn"; // interval to restore on "Turn on again"
+
+export async function turnOffStatusUpdates(apiBaseUrl, { serverDone = false, previous } = {}) {
+  const prev = Number(previous) > 0 ? Number(previous) : await loadStatusEvery();
+  if (prev > 0) { try { await AsyncStorage.setItem(LAST_ON_KEY, String(prev)); } catch (e) { /* ignore */ } }
   await saveStatusEvery(0);
   statusEveryListeners.forEach((fn) => { try { fn(0); } catch (e) { /* ignore */ } });
   if (!serverDone && apiBaseUrl) await applyStatusEveryOnServer(apiBaseUrl, 0);
+  return prev > 0 ? prev : 10;
 }
 
-// Web: the service worker can't write the page's storage, so it leaves a
-// flag in Cache Storage when "Turn off updates" is tapped with the app
-// closed. Returns true (and clears it) when one is waiting.
-export async function consumeWebStatusOffFlag() {
+/** "Turn on again": restore the interval the rider had before Off (10 min if unknown). */
+export async function turnOnStatusUpdates(apiBaseUrl, { minutes, serverDone = false } = {}) {
+  let n = Number(minutes);
+  if (!(n > 0)) {
+    try { n = parseInt((await AsyncStorage.getItem(LAST_ON_KEY)) || "", 10); } catch (e) { n = NaN; }
+  }
+  if (!(n > 0)) n = 10;
+  await saveStatusEvery(n);
+  statusEveryListeners.forEach((fn) => { try { fn(n); } catch (e) { /* ignore */ } });
+  if (!serverDone && apiBaseUrl) await applyStatusEveryOnServer(apiBaseUrl, n);
+  return n;
+}
+
+// Web: the service worker can't write the page's storage, so when "Turn
+// off updates" / "Turn on again" is tapped it leaves the latest choice in
+// Cache Storage. Returns { on, minutes } (and clears it), or null.
+export async function consumeWebStatusFlag() {
   try {
-    if (typeof caches === "undefined") return false;
+    if (typeof caches === "undefined") return null;
     const cache = await caches.open("railway-flags");
-    const hit = await cache.match("/__status_off");
-    if (!hit) return false;
-    await cache.delete("/__status_off");
-    return true;
+    const hit = await cache.match("/__status_flag");
+    if (!hit) return null;
+    await cache.delete("/__status_flag");
+    const v = JSON.parse(await hit.text());
+    return v && typeof v === "object" ? { on: !!v.on, minutes: Number(v.minutes) || null } : null;
   } catch (e) {
-    return false;
+    return null;
   }
 }

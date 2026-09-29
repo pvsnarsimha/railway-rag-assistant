@@ -718,7 +718,8 @@ def run_tracking_check_once(status_fn: Callable[[str, Optional[str]], dict]) -> 
         if not (interval_due or silent_refresh or final):
             continue
         alert = interval_due or final
-        res = push_notifications.send_running_status(w["token"], w["train_number"], rs, final=final, alert=alert)
+        res = push_notifications.send_running_status(w["token"], w["train_number"], rs, final=final, alert=alert,
+                                                     interval_minutes=interval)
         if res["sent"]:
             pushed += 1
             if final:

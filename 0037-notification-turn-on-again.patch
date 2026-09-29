@@ -1,0 +1,258 @@
+diff --git a/backend/alert_scheduler.py b/backend/alert_scheduler.py
+index b79b32b..cea14e3 100644
+--- a/backend/alert_scheduler.py
++++ b/backend/alert_scheduler.py
+@@ -718,7 +718,8 @@ def run_tracking_check_once(status_fn: Callable[[str, Optional[str]], dict]) ->
+         if not (interval_due or silent_refresh or final):
+             continue
+         alert = interval_due or final
+-        res = push_notifications.send_running_status(w["token"], w["train_number"], rs, final=final, alert=alert)
++        res = push_notifications.send_running_status(w["token"], w["train_number"], rs, final=final, alert=alert,
++                                                     interval_minutes=interval)
+         if res["sent"]:
+             pushed += 1
+             if final:
+diff --git a/backend/push_notifications.py b/backend/push_notifications.py
+index 065fd9a..fe87223 100644
+--- a/backend/push_notifications.py
++++ b/backend/push_notifications.py
+@@ -644,7 +644,7 @@ STATUS_OFF_ACTION = "status_off"
+ 
+ 
+ def send_running_status(token: str, train_number: str, running: dict, final: bool = False,
+-                        alert: bool = False) -> dict:
++                        alert: bool = False, interval_minutes: Optional[int] = None) -> dict:
+     """
+     FEATURE: background Live Tracking (RailYatri-style ongoing status).
+     Sent by alert_scheduler.run_tracking_check_once for every train a
+@@ -693,6 +693,9 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
+         "alert": "1" if (final or alert) else "0",
+         "checked_at": checked_at.strftime("%H:%M"),
+         "sent_at": str(int(time.time())),
++        # The rider's "every N min" — lets "Turn on again" (after "Turn off
++        # updates") restore exactly this interval.
++        "interval_minutes": "" if interval_minutes is None else str(interval_minutes),
+     }
+     _localize(data, lang, title_en, body_en, title, body, speak=_speak)
+ 
+diff --git a/mobile-app/App.js b/mobile-app/App.js
+index 91d4fe7..40959e4 100644
+--- a/mobile-app/App.js
++++ b/mobile-app/App.js
+@@ -12,8 +12,8 @@ import { colors } from "./src/theme/colors";
+ import { View } from "react-native";
+ import { SpeakScope } from "./src/i18n/Localized";
+ import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
+-import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification, STATUS_OFF_ACTION } from "./src/services/pushNotifications";
+-import { turnOffStatusUpdates } from "./src/services/backgroundTracking";
++import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification, STATUS_OFF_ACTION, STATUS_ON_ACTION, scheduleLocalReminder } from "./src/services/pushNotifications";
++import { turnOffStatusUpdates, turnOnStatusUpdates } from "./src/services/backgroundTracking";
+ import AsyncStorage from "@react-native-async-storage/async-storage";
+ import * as Notifications from "expo-notifications";
+ import { DEFAULT_API_BASE_URL, STORAGE_KEYS } from "./src/config";
+@@ -139,16 +139,33 @@ export default function App() {
+     // "Turn off updates" on the live-status notification: switch the
+     // periodic status updates Off (this phone + the server) and clear it.
+     const handled = new Set();
++    const apiBase = async () => {
++      try { return (await AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)) || DEFAULT_API_BASE_URL; } catch (e) { return DEFAULT_API_BASE_URL; }
++    };
+     const handleOff = async (response) => {
+-      if (response?.actionIdentifier !== STATUS_OFF_ACTION) return false;
++      const action = response?.actionIdentifier;
++      if (action !== STATUS_OFF_ACTION && action !== STATUS_ON_ACTION) return false;
+       const id = response?.notification?.request?.identifier;
+       if (id && handled.has(id)) return true;
+       if (id) handled.add(id);
+-      stopSpeaking();
+-      let base = DEFAULT_API_BASE_URL;
+-      try { base = (await AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)) || DEFAULT_API_BASE_URL; } catch (e) { /* default */ }
+-      await turnOffStatusUpdates(base);
++      const data = response?.notification?.request?.content?.data || {};
++      const base = await apiBase();
+       dismissNotification(id);
++      if (action === STATUS_ON_ACTION) {
++        // "Turn on again" on the confirmation: restore the old interval.
++        await turnOnStatusUpdates(base, { minutes: data.interval_minutes });
++        return true;
++      }
++      stopSpeaking();
++      const prev = await turnOffStatusUpdates(base, { previous: data.interval_minutes });
++      // One last notification so it's a single tap to undo — e.g. when
++      // the rider still needs updates while on the train.
++      scheduleLocalReminder(
++        "Live updates turned off",
++        `${data.train_number ? `${data.train_number}: ` : ""}no more status updates. Station alerts and alarms still work. Tap "Turn on again" to get updates every ${prev} min.`,
++        1,
++        { categoryIdentifier: "train_status_off", data: { type: "status_off_confirm", interval_minutes: prev, train_number: data.train_number || "" } },
++      );
+       return true;
+     };
+     if (Platform.OS !== "web") {
+diff --git a/mobile-app/public/firebase-messaging-sw.js b/mobile-app/public/firebase-messaging-sw.js
+index 37f368a..590660f 100644
+--- a/mobile-app/public/firebase-messaging-sw.js
++++ b/mobile-app/public/firebase-messaging-sw.js
+@@ -142,21 +142,41 @@ self.addEventListener("notificationclick", (event) => {
+   // "Turn off updates" on the live-status notification: switch the
+   // periodic status updates Off on the server for this device, tell an
+   // open app page, and leave a flag for a closed one. No page is opened.
+-  if (event.action === "status_off") {
++  // "Turn off updates" on the live-status notification: switch the periodic
++  // status updates Off on the server for this device, show one last
++  // notification with "Turn on again" (one tap to undo), tell an open app
++  // page and leave a flag for a closed one. "Turn on again" restores the
++  // interval the rider had. No page is opened for either.
++  if (event.action === "status_off" || event.action === "status_on") {
+     var nd = event.notification.data || {};
+-    var d = (nd.FCM_MSG && nd.FCM_MSG.data) || nd.data || nd;
++    var d = (nd.FCM_MSG && nd.FCM_MSG.data) || nd;
+     var token = d && d.push_token;
+-    event.waitUntil(Promise.all([
++    var on = event.action === "status_on";
++    var prev = parseInt(d && d.interval_minutes, 10);
++    if (!(prev > 0)) prev = 10;
++    var minutes = on ? prev : 0;
++    var jobs = [
+       token ? fetch("/api/push/tracking/interval", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+-        body: JSON.stringify({ token: token, previous_tokens: [], interval_minutes: 0 }),
++        body: JSON.stringify({ token: token, previous_tokens: [], interval_minutes: minutes }),
+       }).catch(function () {}) : Promise.resolve(),
+-      caches.open("railway-flags").then(function (c) { return c.put("/__status_off", new Response(String(Date.now()))); }).catch(function () {}),
++      caches.open("railway-flags").then(function (c) {
++        return c.put("/__status_flag", new Response(JSON.stringify({ on: on, minutes: prev })));
++      }).catch(function () {}),
+       clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (list) {
+-        list.forEach(function (c) { c.postMessage({ type: "status_off" }); });
++        list.forEach(function (c) { c.postMessage({ type: on ? "status_on" : "status_off" }); });
+       }),
+-    ]));
++    ];
++    if (!on) {
++      jobs.push(self.registration.showNotification("Live updates turned off", {
++        body: (d.train_number ? d.train_number + ": " : "") + "no more status updates. Station alerts and alarms still work.",
++        tag: "status-off",
++        actions: [{ action: "status_on", title: "Turn on again" }],
++        data: { push_token: token, interval_minutes: String(prev), train_number: d.train_number || "" },
++      }).catch(function () {}));
++    }
++    event.waitUntil(Promise.all(jobs));
+     return;
+   }
+   // Ola / Uber / Rapido buttons on the "book your ride" reminder.
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.js b/mobile-app/src/screens/LiveTrackingScreen.js
+index 727e5a6..9082730 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.js
+@@ -32,7 +32,7 @@ import { useT } from "../context/LanguageContext";
+ import {
+   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
+   loadStatusEvery, saveStatusEvery, applyNotifyLanguage, applyStatusEveryOnServer,
+-  onStatusEveryChanged, turnOffStatusUpdates, consumeWebStatusOffFlag,
++  onStatusEveryChanged, turnOffStatusUpdates, turnOnStatusUpdates, consumeWebStatusFlag,
+ } from "../services/backgroundTracking";
+ 
+ // FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
+@@ -867,12 +867,16 @@ export default function LiveTrackingScreen({ navigation }) {
+   // too. Web: the service worker posts a message (page open) or leaves a
+   // flag (page closed) that is picked up when the app is next shown.
+   useEffect(() => {
+-    const setOff = () => { statusEveryRef.current = 0; setStatusEvery(0); stopSpeaking(); };
+-    const unsub = onStatusEveryChanged(setOff);
++    const setTo = (n) => { statusEveryRef.current = n; setStatusEvery(n); if (n === 0) stopSpeaking(); };
++    const unsub = onStatusEveryChanged(setTo);
+     if (!IS_WEB) return unsub;
+-    const check = () => consumeWebStatusOffFlag().then((hit) => { if (hit) turnOffStatusUpdates(apiBaseUrl, { serverDone: true }); });
++    const check = () => consumeWebStatusFlag().then((f) => {
++      if (!f) return;
++      if (f.on) turnOnStatusUpdates(apiBaseUrl, { minutes: f.minutes, serverDone: true });
++      else turnOffStatusUpdates(apiBaseUrl, { serverDone: true });
++    });
+     check();
+-    const onMsg = (e) => { if (e?.data?.type === "status_off") check(); };
++    const onMsg = (e) => { if (e?.data?.type === "status_off" || e?.data?.type === "status_on") check(); };
+     const onVis = () => { if (document.visibilityState === "visible") check(); };
+     try { navigator.serviceWorker?.addEventListener("message", onMsg); } catch (e) { /* ignore */ }
+     document.addEventListener("visibilitychange", onVis);
+diff --git a/mobile-app/src/services/backgroundTracking.js b/mobile-app/src/services/backgroundTracking.js
+index 90bb130..e2243d5 100644
+--- a/mobile-app/src/services/backgroundTracking.js
++++ b/mobile-app/src/services/backgroundTracking.js
+@@ -208,24 +208,43 @@ export function onStatusEveryChanged(fn) {
+   return () => statusEveryListeners.delete(fn);
+ }
+ 
+-export async function turnOffStatusUpdates(apiBaseUrl, { serverDone = false } = {}) {
++const LAST_ON_KEY = "liveTracking.statusEveryLastOn"; // interval to restore on "Turn on again"
++
++export async function turnOffStatusUpdates(apiBaseUrl, { serverDone = false, previous } = {}) {
++  const prev = Number(previous) > 0 ? Number(previous) : await loadStatusEvery();
++  if (prev > 0) { try { await AsyncStorage.setItem(LAST_ON_KEY, String(prev)); } catch (e) { /* ignore */ } }
+   await saveStatusEvery(0);
+   statusEveryListeners.forEach((fn) => { try { fn(0); } catch (e) { /* ignore */ } });
+   if (!serverDone && apiBaseUrl) await applyStatusEveryOnServer(apiBaseUrl, 0);
++  return prev > 0 ? prev : 10;
++}
++
++/** "Turn on again": restore the interval the rider had before Off (10 min if unknown). */
++export async function turnOnStatusUpdates(apiBaseUrl, { minutes, serverDone = false } = {}) {
++  let n = Number(minutes);
++  if (!(n > 0)) {
++    try { n = parseInt((await AsyncStorage.getItem(LAST_ON_KEY)) || "", 10); } catch (e) { n = NaN; }
++  }
++  if (!(n > 0)) n = 10;
++  await saveStatusEvery(n);
++  statusEveryListeners.forEach((fn) => { try { fn(n); } catch (e) { /* ignore */ } });
++  if (!serverDone && apiBaseUrl) await applyStatusEveryOnServer(apiBaseUrl, n);
++  return n;
+ }
+ 
+-// Web: the service worker can't write the page's storage, so it leaves a
+-// flag in Cache Storage when "Turn off updates" is tapped with the app
+-// closed. Returns true (and clears it) when one is waiting.
+-export async function consumeWebStatusOffFlag() {
++// Web: the service worker can't write the page's storage, so when "Turn
++// off updates" / "Turn on again" is tapped it leaves the latest choice in
++// Cache Storage. Returns { on, minutes } (and clears it), or null.
++export async function consumeWebStatusFlag() {
+   try {
+-    if (typeof caches === "undefined") return false;
++    if (typeof caches === "undefined") return null;
+     const cache = await caches.open("railway-flags");
+-    const hit = await cache.match("/__status_off");
+-    if (!hit) return false;
+-    await cache.delete("/__status_off");
+-    return true;
++    const hit = await cache.match("/__status_flag");
++    if (!hit) return null;
++    await cache.delete("/__status_flag");
++    const v = JSON.parse(await hit.text());
++    return v && typeof v === "object" ? { on: !!v.on, minutes: Number(v.minutes) || null } : null;
+   } catch (e) {
+-    return false;
++    return null;
+   }
+ }
+diff --git a/mobile-app/src/services/pushNotifications.js b/mobile-app/src/services/pushNotifications.js
+index e4a8f54..064afb2 100644
+--- a/mobile-app/src/services/pushNotifications.js
++++ b/mobile-app/src/services/pushNotifications.js
+@@ -475,12 +475,16 @@ export async function ensureLocalNotificationPermission() {
+  * off updates" button is handled in App.js. Call once at app start.
+  */
+ export const STATUS_OFF_ACTION = "status_off";
++export const STATUS_ON_ACTION = "status_on";
+ export async function registerNotificationActions() {
+   if (Platform.OS === "web") return;
+   try {
+     await Notifications.setNotificationCategoryAsync("train_status", [
+       { identifier: STATUS_OFF_ACTION, buttonTitle: "Turn off updates", options: { opensAppToForeground: true } },
+     ]);
++    await Notifications.setNotificationCategoryAsync("train_status_off", [
++      { identifier: STATUS_ON_ACTION, buttonTitle: "Turn on again", options: { opensAppToForeground: true } },
++    ]);
+     await Notifications.setNotificationCategoryAsync("ride_book", [
+       { identifier: "ride_ola", buttonTitle: "Ola", options: { opensAppToForeground: true } },
+       { identifier: "ride_uber", buttonTitle: "Uber", options: { opensAppToForeground: true } },

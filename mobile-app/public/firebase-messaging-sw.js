@@ -142,21 +142,41 @@ self.addEventListener("notificationclick", (event) => {
   // "Turn off updates" on the live-status notification: switch the
   // periodic status updates Off on the server for this device, tell an
   // open app page, and leave a flag for a closed one. No page is opened.
-  if (event.action === "status_off") {
+  // "Turn off updates" on the live-status notification: switch the periodic
+  // status updates Off on the server for this device, show one last
+  // notification with "Turn on again" (one tap to undo), tell an open app
+  // page and leave a flag for a closed one. "Turn on again" restores the
+  // interval the rider had. No page is opened for either.
+  if (event.action === "status_off" || event.action === "status_on") {
     var nd = event.notification.data || {};
-    var d = (nd.FCM_MSG && nd.FCM_MSG.data) || nd.data || nd;
+    var d = (nd.FCM_MSG && nd.FCM_MSG.data) || nd;
     var token = d && d.push_token;
-    event.waitUntil(Promise.all([
+    var on = event.action === "status_on";
+    var prev = parseInt(d && d.interval_minutes, 10);
+    if (!(prev > 0)) prev = 10;
+    var minutes = on ? prev : 0;
+    var jobs = [
       token ? fetch("/api/push/tracking/interval", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: token, previous_tokens: [], interval_minutes: 0 }),
+        body: JSON.stringify({ token: token, previous_tokens: [], interval_minutes: minutes }),
       }).catch(function () {}) : Promise.resolve(),
-      caches.open("railway-flags").then(function (c) { return c.put("/__status_off", new Response(String(Date.now()))); }).catch(function () {}),
+      caches.open("railway-flags").then(function (c) {
+        return c.put("/__status_flag", new Response(JSON.stringify({ on: on, minutes: prev })));
+      }).catch(function () {}),
       clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (list) {
-        list.forEach(function (c) { c.postMessage({ type: "status_off" }); });
+        list.forEach(function (c) { c.postMessage({ type: on ? "status_on" : "status_off" }); });
       }),
-    ]));
+    ];
+    if (!on) {
+      jobs.push(self.registration.showNotification("Live updates turned off", {
+        body: (d.train_number ? d.train_number + ": " : "") + "no more status updates. Station alerts and alarms still work.",
+        tag: "status-off",
+        actions: [{ action: "status_on", title: "Turn on again" }],
+        data: { push_token: token, interval_minutes: String(prev), train_number: d.train_number || "" },
+      }).catch(function () {}));
+    }
+    event.waitUntil(Promise.all(jobs));
     return;
   }
   // Ola / Uber / Rapido buttons on the "book your ride" reminder.

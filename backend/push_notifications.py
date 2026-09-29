@@ -644,7 +644,7 @@ STATUS_OFF_ACTION = "status_off"
 
 
 def send_running_status(token: str, train_number: str, running: dict, final: bool = False,
-                        alert: bool = False) -> dict:
+                        alert: bool = False, interval_minutes: Optional[int] = None) -> dict:
     """
     FEATURE: background Live Tracking (RailYatri-style ongoing status).
     Sent by alert_scheduler.run_tracking_check_once for every train a
@@ -693,6 +693,9 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
         "alert": "1" if (final or alert) else "0",
         "checked_at": checked_at.strftime("%H:%M"),
         "sent_at": str(int(time.time())),
+        # The rider's "every N min" — lets "Turn on again" (after "Turn off
+        # updates") restore exactly this interval.
+        "interval_minutes": "" if interval_minutes is None else str(interval_minutes),
     }
     _localize(data, lang, title_en, body_en, title, body, speak=_speak)
 

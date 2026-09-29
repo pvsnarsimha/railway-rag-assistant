@@ -12,8 +12,8 @@ import { colors } from "./src/theme/colors";
 import { View } from "react-native";
 import { SpeakScope } from "./src/i18n/Localized";
 import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
-import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification, STATUS_OFF_ACTION } from "./src/services/pushNotifications";
-import { turnOffStatusUpdates } from "./src/services/backgroundTracking";
+import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification, STATUS_OFF_ACTION, STATUS_ON_ACTION, scheduleLocalReminder } from "./src/services/pushNotifications";
+import { turnOffStatusUpdates, turnOnStatusUpdates } from "./src/services/backgroundTracking";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import { DEFAULT_API_BASE_URL, STORAGE_KEYS } from "./src/config";
@@ -139,16 +139,33 @@ export default function App() {
     // "Turn off updates" on the live-status notification: switch the
     // periodic status updates Off (this phone + the server) and clear it.
     const handled = new Set();
+    const apiBase = async () => {
+      try { return (await AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)) || DEFAULT_API_BASE_URL; } catch (e) { return DEFAULT_API_BASE_URL; }
+    };
     const handleOff = async (response) => {
-      if (response?.actionIdentifier !== STATUS_OFF_ACTION) return false;
+      const action = response?.actionIdentifier;
+      if (action !== STATUS_OFF_ACTION && action !== STATUS_ON_ACTION) return false;
       const id = response?.notification?.request?.identifier;
       if (id && handled.has(id)) return true;
       if (id) handled.add(id);
-      stopSpeaking();
-      let base = DEFAULT_API_BASE_URL;
-      try { base = (await AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)) || DEFAULT_API_BASE_URL; } catch (e) { /* default */ }
-      await turnOffStatusUpdates(base);
+      const data = response?.notification?.request?.content?.data || {};
+      const base = await apiBase();
       dismissNotification(id);
+      if (action === STATUS_ON_ACTION) {
+        // "Turn on again" on the confirmation: restore the old interval.
+        await turnOnStatusUpdates(base, { minutes: data.interval_minutes });
+        return true;
+      }
+      stopSpeaking();
+      const prev = await turnOffStatusUpdates(base, { previous: data.interval_minutes });
+      // One last notification so it's a single tap to undo — e.g. when
+      // the rider still needs updates while on the train.
+      scheduleLocalReminder(
+        "Live updates turned off",
+        `${data.train_number ? `${data.train_number}: ` : ""}no more status updates. Station alerts and alarms still work. Tap "Turn on again" to get updates every ${prev} min.`,
+        1,
+        { categoryIdentifier: "train_status_off", data: { type: "status_off_confirm", interval_minutes: prev, train_number: data.train_number || "" } },
+      );
       return true;
     };
     if (Platform.OS !== "web") {
