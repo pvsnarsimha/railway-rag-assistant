@@ -85,6 +85,10 @@ def _init_db():
             # so train notifications can be sent data-only straight through
             # Firebase (push_notifications._send_via_native_fcm).
             "ALTER TABLE device_tokens ADD COLUMN native_token TEXT",
+            # When a data-only FCM message was last sent / confirmed by the
+            # phone (push_notifications: buttons only while it confirms).
+            "ALTER TABLE device_tokens ADD COLUMN native_sent_at REAL",
+            "ALTER TABLE device_tokens ADD COLUMN native_ack_at REAL",
         ):
             try:
                 conn.execute(stmt)
@@ -226,6 +230,12 @@ def register_token(token: str, platform: Optional[str] = None, lang: Optional[st
     Android app's FCM token) are kept when omitted."""
     now = time.time()
     with _connect() as conn:
+        if native_token:
+            # A new FCM token must prove itself again (native_ack_at).
+            old = conn.execute("SELECT native_token FROM device_tokens WHERE token = ?", (token,)).fetchone()
+            if old and old[0] and old[0] != native_token:
+                conn.execute("UPDATE device_tokens SET native_sent_at = NULL, native_ack_at = NULL WHERE token = ?",
+                             (token,))
         conn.execute(
             """
             INSERT INTO device_tokens (token, platform, created_at, last_seen_at, lang, native_token)
@@ -239,14 +249,37 @@ def register_token(token: str, platform: Optional[str] = None, lang: Optional[st
         )
 
 
-def get_native_token(token: str) -> Optional[str]:
-    """The Android app's FCM token registered with this Expo token, if any."""
+def get_native_state(token: str) -> Optional[dict]:
+    """{native_token, sent_at, ack_at} for a device, or None."""
     try:
         with _connect() as conn:
-            row = conn.execute("SELECT native_token FROM device_tokens WHERE token = ?", (token,)).fetchone()
-        return row[0] if row and row[0] else None
-    except Exception:  # noqa: BLE001 - never break a push; Expo is the fallback
+            row = conn.execute(
+                "SELECT native_token, native_sent_at, native_ack_at FROM device_tokens WHERE token = ?",
+                (token,)).fetchone()
+        if not row or not row[0]:
+            return None
+        return {"native_token": row[0], "sent_at": row[1], "ack_at": row[2]}
+    except Exception:  # noqa: BLE001
         return None
+
+
+def mark_native_sent(token: str) -> None:
+    try:
+        with _connect() as conn:
+            conn.execute("UPDATE device_tokens SET native_sent_at = ? WHERE token = ?", (time.time(), token))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def mark_native_ack(token: str) -> bool:
+    """The phone confirmed it received a data-only message. True if known."""
+    try:
+        with _connect() as conn:
+            cur = conn.execute("UPDATE device_tokens SET native_ack_at = ? WHERE token = ? AND native_token IS NOT NULL",
+                               (time.time(), token))
+            return cur.rowcount > 0
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def clear_native_token(token: str) -> None:

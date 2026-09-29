@@ -25,6 +25,22 @@ import { Platform } from "react-native";
 import { loadReadAloudAsync, speak, shouldSpeakPush } from "../utils/speakNotifications";
 import { loadLanguage } from "../utils/notifyLanguage";
 import { handleStatusAction } from "./notificationActions";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { ackNativePush } from "../api/railwayApi";
+import { DEFAULT_API_BASE_URL, STORAGE_KEYS } from "../config";
+
+// The server's data-only train pushes (and its silent test message) carry
+// native: "1". Confirming each one tells the server this phone wakes up
+// for them, so it keeps sending train notifications that way — with their
+// buttons. Unconfirmed, it falls back to the ordinary kind.
+async function ackNative() {
+  try {
+    const token = await AsyncStorage.getItem("moreTools.pushToken");
+    if (!token) return;
+    const base = (await AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)) || DEFAULT_API_BASE_URL;
+    await ackNativePush(base, token);
+  } catch (e) { /* the server falls back to Expo */ }
+}
 
 export const READ_ALOUD_TASK = "railway-read-aloud-notification";
 
@@ -58,6 +74,12 @@ if (Platform.OS !== "web") {
       if (data && typeof data === "object" && "actionIdentifier" in data) {
         await handleStatusAction(data);
         return;
+      }
+      // Delivered as the FCM message itself, or wrapped under `notification`.
+      const fcm = data?.data?.native ? data.data : data?.notification?.data?.native ? data.notification.data : null;
+      if (fcm && fcm.native === "1") {
+        await ackNative();
+        if (fcm.kind === "native_ping") return;
       }
       if (!(await loadReadAloudAsync())) return;
       await loadLanguage();

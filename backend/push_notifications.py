@@ -67,11 +67,22 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
     # Android app registered its own FCM token, send data-only straight
     # through Firebase instead: expo-notifications then builds the
     # notification natively, with the buttons, even with the app swiped away.
-    native = _native_token_for(token)
-    if native:
-        res = _send_via_native_fcm(token, native, title, body, data, sound=sound, category_id=category_id)
+    #
+    # Some phones (e.g. Realme/ColorOS without "Auto-launch" / unrestricted
+    # battery) never wake the app for a data-only message, so it would show
+    # nothing. The app confirms each one it gets (/api/push/native-ack); the
+    # data-only route is used only while those confirmations arrive. Until
+    # then — or once one goes missing — the notification goes through Expo
+    # as before (no buttons, but always shown) and a silent test message
+    # checks again.
+    state = _native_state_for(token)
+    if state and _native_confirmed(state):
+        res = _send_via_native_fcm(token, state["native_token"], title, body, data, sound=sound,
+                                   category_id=category_id)
         if res.get("sent"):
             return res
+    elif state:
+        _maybe_send_native_ping(token, state)
     try:
         resp = requests.post(
             _EXPO_PUSH_URL,
@@ -113,12 +124,64 @@ _NATIVE_ALERT_CHANNEL = "delay-alerts"
 _NATIVE_MAX_BYTES = 3800
 
 
-def _native_token_for(token: str) -> Optional[str]:
+# A data-only send counts as delivered once the phone confirms it; an
+# unconfirmed one this old means the phone didn't wake for it.
+_NATIVE_ACK_GRACE_SECONDS = 180
+# Silent test messages while unconfirmed: at most this often.
+_NATIVE_PING_EVERY_SECONDS = 10 * 60
+
+
+def _native_state_for(token: str) -> Optional[dict]:
     try:
         import push_store
-        return push_store.get_native_token(token)
+        return push_store.get_native_state(token)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _native_confirmed(state: dict, now: Optional[float] = None) -> bool:
+    """True while the phone confirms data-only messages: it has confirmed
+    one, and the last one sent was confirmed or is still within the grace."""
+    now = time.time() if now is None else now
+    ack, sent = state.get("ack_at"), state.get("sent_at")
+    if not ack:
+        return False
+    return sent is None or ack >= sent - 1 or now - sent < _NATIVE_ACK_GRACE_SECONDS
+
+
+def _maybe_send_native_ping(token: str, state: dict, force: bool = False) -> None:
+    """Silent data-only message (nothing is shown); the app confirms it."""
+    sent = state.get("sent_at")
+    if not force and sent and time.time() - sent < _NATIVE_PING_EVERY_SECONDS:
+        return
+    if not _ensure_initialized():
+        return
+    try:
+        import json
+        from firebase_admin import messaging
+        import push_store
+
+        messaging.send(messaging.Message(
+            token=state["native_token"],
+            data={"native": "1", "kind": "native_ping",
+                  "body": json.dumps({"kind": "native_ping", "sent_at": str(int(time.time()))})},
+            android=messaging.AndroidConfig(priority="high", ttl=timedelta(minutes=10)),
+        ))
+        push_store.mark_native_sent(token)
+    except Exception as e:  # noqa: BLE001
+        if "registration-token-not-registered" in str(e) or "UNREGISTERED" in str(e):
+            try:
+                import push_store
+                push_store.clear_native_token(token)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def send_native_ping(token: str) -> None:
+    """Right after the app registers its FCM token: test it straight away."""
+    state = _native_state_for(token)
+    if state:
+        _maybe_send_native_ping(token, state, force=True)
 
 
 def _native_tag(data: dict) -> Optional[str]:
@@ -150,6 +213,7 @@ def _send_via_native_fcm(token: str, native: str, title: str, body: str, data: d
         visible.setdefault("title", title)
         visible.setdefault("body", body)
         payload = {
+            "native": "1",  # the app confirms these (see _native_confirmed)
             "title": title,
             "message": body,
             "body": json.dumps(visible, ensure_ascii=False),
@@ -179,6 +243,11 @@ def _send_via_native_fcm(token: str, native: str, title: str, body: str, data: d
             data={k: str(v) for k, v in payload.items()},
             android=messaging.AndroidConfig(priority="high", ttl=timedelta(hours=1)),
         ))
+        try:
+            import push_store
+            push_store.mark_native_sent(token)
+        except Exception:  # noqa: BLE001
+            pass
         return {"sent": True, "error": None}
     except Exception as e:  # noqa: BLE001
         msg = str(e)

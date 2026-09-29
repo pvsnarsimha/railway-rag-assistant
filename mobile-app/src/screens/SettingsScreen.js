@@ -7,7 +7,7 @@ import SectionCard from "../components/SectionCard";
 import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
 import { useSettings } from "../context/SettingsContext";
-import { checkHealth, registerPushToken } from "../api/railwayApi";
+import { checkHealth, registerPushToken, getNativePushStatus } from "../api/railwayApi";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { describeApiError } from "../api/client";
 import LanguagePickerModal from "../components/LanguagePickerModal";
@@ -17,7 +17,7 @@ import { Platform } from "react-native";
 import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission, STATUS_ON_COLOR, getNativePushToken } from "../services/pushNotifications";
 
 // Shown in Settings so it's easy to tell which build is installed.
-export const NOTIFY_BUTTONS_VERSION = "notification buttons v5";
+export const NOTIFY_BUTTONS_VERSION = "notification buttons v6";
 
 export default function SettingsScreen() {
   const { apiBaseUrl, setApiBaseUrl, wsBaseUrl } = useSettings();
@@ -59,9 +59,20 @@ export default function SettingsScreen() {
       if (!native) { setServerButtons("This phone didn't give a Firebase token — train updates will come without buttons."); return; }
       const r = await registerPushToken(apiBaseUrl, token, "android");
       if (r && r.native_push === undefined) { setServerButtons("✖ The server on Render is an older version — redeploy it, then check again."); return; }
-      setServerButtons(r && r.native_push
+      if (!(r && r.native_push)) {
+        setServerButtons("✖ The server can't send through Firebase (FIREBASE_SERVICE_ACCOUNT_JSON not set on Render) — train updates come without buttons.");
+        return;
+      }
+      // The server just sent a silent test message; wait for this phone to
+      // confirm it (background task -> /api/push/native-ack).
+      let confirmed = false;
+      for (let i = 0; i < 8 && !confirmed; i++) {
+        await new Promise((res) => setTimeout(res, 1500));
+        try { confirmed = !!(await getNativePushStatus(apiBaseUrl, token)).confirmed; } catch (e) { /* retry */ }
+      }
+      setServerButtons(confirmed
         ? "✔ Train updates from the server will show Turn off updates, even with the app closed."
-        : "✖ The server can't send through Firebase (FIREBASE_SERVICE_ACCOUNT_JSON not set on Render) — train updates come without buttons.");
+        : "✖ This phone didn't confirm the server's test message, so train updates come the normal way (no buttons). Allow Auto-launch and set Battery to Unrestricted for this app, then check again.");
     } catch (e) {
       setServerButtons("Couldn't reach the server to check — try again when online.");
     }

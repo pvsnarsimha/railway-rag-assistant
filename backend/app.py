@@ -5202,8 +5202,31 @@ def api_push_register_token(req: RegisterTokenRequest):
         return {"ok": False, "error": "Empty token."}
     native = (req.native_token or "").strip() or None
     push_store.register_token(req.token.strip(), req.platform, _clean_lang(req.lang), native)
-    return {"ok": True, "push_configured": push_notifications.status()["configured"],
-            "native_push": bool(native) and push_notifications.status()["configured"]}
+    configured = push_notifications.status()["configured"]
+    if native and configured:
+        # Silent test message; the app confirms it (/api/push/native-ack).
+        push_notifications.send_native_ping(req.token.strip())
+    return {"ok": True, "push_configured": configured,
+            "native_push": bool(native) and configured}
+
+
+class NativeAckRequest(BaseModel):
+    token: str
+
+
+@app.post("/api/push/native-ack")
+def api_push_native_ack(req: NativeAckRequest):
+    """The Android app got a data-only FCM message (it woke up for it), so
+    train notifications can keep coming that way, with their buttons."""
+    return {"ok": push_store.mark_native_ack(req.token.strip())}
+
+
+@app.get("/api/push/native-status")
+def api_push_native_status(token: str):
+    """Settings check: does this phone confirm data-only messages?"""
+    state = push_store.get_native_state(token.strip())
+    return {"registered": bool(state),
+            "confirmed": bool(state) and push_notifications._native_confirmed(state)}
 
 
 class PushLanguageRequest(BaseModel):
