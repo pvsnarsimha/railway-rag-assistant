@@ -12,7 +12,13 @@ import { colors } from "./src/theme/colors";
 import { View } from "react-native";
 import { SpeakScope } from "./src/i18n/Localized";
 import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
-import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell } from "./src/services/pushNotifications";
+import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification, STATUS_OFF_ACTION } from "./src/services/pushNotifications";
+import { turnOffStatusUpdates } from "./src/services/backgroundTracking";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Notifications from "expo-notifications";
+import { DEFAULT_API_BASE_URL, STORAGE_KEYS } from "./src/config";
+import { stopSpeaking } from "./src/utils/speakNotifications";
+import { openRide } from "./src/components/BookRideCard";
 // Registers the headless "read notifications aloud" task at module scope.
 import { registerReadAloudTask, speakPushData } from "./src/services/readAloudTask";
 import { loadReadAloudAsync } from "./src/utils/speakNotifications";
@@ -129,7 +135,43 @@ export default function App() {
   useEffect(() => {
     configureForegroundNotificationHandler();
     registerOfflineShell();
+    registerNotificationActions();
+    // "Turn off updates" on the live-status notification: switch the
+    // periodic status updates Off (this phone + the server) and clear it.
+    const handled = new Set();
+    const handleOff = async (response) => {
+      if (response?.actionIdentifier !== STATUS_OFF_ACTION) return false;
+      const id = response?.notification?.request?.identifier;
+      if (id && handled.has(id)) return true;
+      if (id) handled.add(id);
+      stopSpeaking();
+      let base = DEFAULT_API_BASE_URL;
+      try { base = (await AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)) || DEFAULT_API_BASE_URL; } catch (e) { /* default */ }
+      await turnOffStatusUpdates(base);
+      dismissNotification(id);
+      return true;
+    };
+    if (Platform.OS !== "web") {
+      // App opened from the button while it was closed.
+      Notifications.getLastNotificationResponseAsync().then((r) => r && handleOff(r)).catch(() => {});
+    }
+    // Ola / Uber / Rapido buttons on the "book your ride" reminder.
+    const handleRide = (response) => {
+      const action = response?.actionIdentifier || "";
+      if (!action.startsWith("ride_")) return;
+      const id = response?.notification?.request?.identifier;
+      if (id && handled.has(id)) return;
+      if (id) handled.add(id);
+      const data = response?.notification?.request?.content?.data || {};
+      openRide(action.slice(5), data.stop);
+      dismissNotification(id);
+    };
+    if (Platform.OS !== "web") {
+      Notifications.getLastNotificationResponseAsync().then((r) => r && handleRide(r)).catch(() => {});
+    }
     const unsubscribe = addNotificationResponseListener((response) => {
+      handleOff(response);
+      handleRide(response);
       const data = response?.notification?.request?.content?.data;
       if (data?.type === "delay_alert" || data?.type === "station_reached" || data?.type === "running_status") {
         console.log("[push] notification tapped:", data);

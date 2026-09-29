@@ -139,6 +139,32 @@ self.addEventListener("fetch", function (event) {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  // "Turn off updates" on the live-status notification: switch the
+  // periodic status updates Off on the server for this device, tell an
+  // open app page, and leave a flag for a closed one. No page is opened.
+  if (event.action === "status_off") {
+    var nd = event.notification.data || {};
+    var d = (nd.FCM_MSG && nd.FCM_MSG.data) || nd.data || nd;
+    var token = d && d.push_token;
+    event.waitUntil(Promise.all([
+      token ? fetch("/api/push/tracking/interval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: token, previous_tokens: [], interval_minutes: 0 }),
+      }).catch(function () {}) : Promise.resolve(),
+      caches.open("railway-flags").then(function (c) { return c.put("/__status_off", new Response(String(Date.now()))); }).catch(function () {}),
+      clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (list) {
+        list.forEach(function (c) { c.postMessage({ type: "status_off" }); });
+      }),
+    ]));
+    return;
+  }
+  // Ola / Uber / Rapido buttons on the "book your ride" reminder.
+  if (event.action && event.action.indexOf("ride_") === 0) {
+    var rd = event.notification.data || {};
+    var url = rd.links && rd.links[event.action.slice(5)];
+    if (url) { event.waitUntil(clients.openWindow(url)); return; }
+  }
   event.waitUntil(clients.openWindow("/mobile-app/"));
 });
 

@@ -56,7 +56,8 @@ def _is_expo_token(token: str) -> bool:
     return token.startswith("ExponentPushToken[") or token.startswith("ExpoPushToken[")
 
 
-def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optional[str] = "default") -> dict:
+def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optional[str] = "default",
+                   category_id: Optional[str] = None) -> dict:
     """Never raises — same never-raises contract as the FCM senders below,
     so alert_scheduler.py can keep going on a per-token failure."""
     try:
@@ -66,7 +67,10 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
             # (keeps the visible push well under Expo's 4 KB limit).
             json={k: v for k, v in {"to": token, "title": title, "body": body,
                                     "data": _visible_expo_data(data, title, body),
-                                    "sound": sound}.items() if v is not None},
+                                    "sound": sound,
+                                    # Action buttons (e.g. "Turn off updates") —
+                                    # the app registers the category on start.
+                                    "categoryId": category_id}.items() if v is not None},
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=10,
         )
@@ -232,7 +236,8 @@ def _train_tag(train_number) -> str:
     return f"train-{train_number}"
 
 
-def _webpush_config(title: str, body: str, tag: str, renotify: bool = True, silent: bool = False):
+def _webpush_config(title: str, body: str, tag: str, renotify: bool = True, silent: bool = False,
+                    actions: Optional[list] = None):
     """
     FEATURE: SMS-style push presentation. A bare WebpushNotification(title,
     body) — what every send_* below used before this — renders as a thin,
@@ -263,6 +268,7 @@ def _webpush_config(title: str, body: str, tag: str, renotify: bool = True, sile
         silent=silent or None,
         require_interaction=True,
         vibrate=None if silent else [200, 100, 200, 100, 200],
+        actions=[messaging.WebpushNotificationAction(action=a, title=t) for a, t in (actions or [])] or None,
     )
     webpush_kwargs = {"notification": webpush_notification}
     public_url = os.environ.get("PUBLIC_APP_URL", "").strip()
@@ -629,6 +635,14 @@ def send_station_status_alert(
         return {"sent": False, "error": str(e)}
 
 
+# FEATURE: "Turn off updates" button on the live-status notification itself.
+# Tapping it sets "notify me every N min" to Off for every train this device
+# tracks (same as the Off chip on Live Tracking). Station alerts, alarms and
+# the final "Reached" notification are not affected.
+STATUS_UPDATES_CATEGORY = "train_status"
+STATUS_OFF_ACTION = "status_off"
+
+
 def send_running_status(token: str, train_number: str, running: dict, final: bool = False,
                         alert: bool = False) -> dict:
     """
@@ -683,19 +697,24 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
     _localize(data, lang, title_en, body_en, title, body, speak=_speak)
 
     if _is_expo_token(token):
-        return _send_via_expo(token, title, body, data, sound="default" if (final or alert) else None)
+        return _send_via_expo(token, title, body, data, sound="default" if (final or alert) else None,
+                              category_id=None if final else STATUS_UPDATES_CATEGORY)
 
     if not _ensure_initialized():
         return {"sent": False, "error": _init_error}
 
     from firebase_admin import messaging
 
+    # The browser's service worker needs the token to switch updates off
+    # from the notification's "Turn off updates" button.
+    data = {**data, "push_token": token}
     fcm_message = messaging.Message(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=data,
         webpush=_webpush_config(title, body, tag=_train_tag(train_number),
-                                renotify=final or alert, silent=not (final or alert)),
+                                renotify=final or alert, silent=not (final or alert),
+                                actions=None if final else [(STATUS_OFF_ACTION, "Turn off updates")]),
     )
     try:
         messaging.send(fcm_message)

@@ -468,3 +468,77 @@ export async function ensureLocalNotificationPermission() {
     return false;
   }
 }
+
+/**
+ * Native: action buttons shown on train notifications. "train_status" is
+ * the live-status notification (backend send_running_status) — its "Turn
+ * off updates" button is handled in App.js. Call once at app start.
+ */
+export const STATUS_OFF_ACTION = "status_off";
+export async function registerNotificationActions() {
+  if (Platform.OS === "web") return;
+  try {
+    await Notifications.setNotificationCategoryAsync("train_status", [
+      { identifier: STATUS_OFF_ACTION, buttonTitle: "Turn off updates", options: { opensAppToForeground: true } },
+    ]);
+    await Notifications.setNotificationCategoryAsync("ride_book", [
+      { identifier: "ride_ola", buttonTitle: "Ola", options: { opensAppToForeground: true } },
+      { identifier: "ride_uber", buttonTitle: "Uber", options: { opensAppToForeground: true } },
+      { identifier: "ride_rapido", buttonTitle: "Rapido", options: { opensAppToForeground: true } },
+    ]);
+  } catch (e) { /* older OS / Expo Go — the notification just has no button */ }
+}
+
+/** Dismiss one delivered notification (e.g. after its Off button). */
+export async function dismissNotification(identifier) {
+  if (Platform.OS === "web" || !identifier) return;
+  try { await Notifications.dismissNotificationAsync(identifier); } catch (e) { /* ignore */ }
+}
+
+/**
+ * A gentle reminder notification (no alarm tone), optionally with action
+ * buttons: native = a scheduled OS notification with `categoryIdentifier`
+ * (fires even if the app is closed); web = shown by the service worker
+ * after a timer while the page is open, with `webActions`.
+ */
+const _webReminderTimers = new Map();
+export async function scheduleLocalReminder(title, body, fireInSeconds, { data, categoryIdentifier, webActions } = {}) {
+  const secs = Math.max(1, Math.round(fireInSeconds));
+  if (Platform.OS === "web") {
+    const id = `web-reminder-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const timer = setTimeout(async () => {
+      _webReminderTimers.delete(id);
+      try {
+        if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+          const reg = navigator.serviceWorker && navigator.serviceWorker.getRegistration
+            ? await navigator.serviceWorker.getRegistration("/mobile-app/") : null;
+          if (reg) { await reg.showNotification(title, { body, data: data || {}, actions: webActions || [], requireInteraction: true, tag: id }); return; }
+          new Notification(title, { body });
+          return;
+        }
+      } catch (e) { /* fall through */ }
+      try { window.alert(`${title}\n\n${body}`); } catch (e) { /* ignore */ }
+    }, secs * 1000);
+    _webReminderTimers.set(id, timer);
+    return id;
+  }
+  if (IS_EXPO_GO && Platform.OS === "android") return null;
+  try {
+    return await Notifications.scheduleNotificationAsync({
+      content: { title, body, data: data || {}, ...(categoryIdentifier ? { categoryIdentifier } : {}) },
+      trigger: { seconds: secs },
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function cancelLocalReminder(identifier) {
+  if (!identifier) return;
+  if (String(identifier).startsWith("web-reminder-")) {
+    clearTimeout(_webReminderTimers.get(identifier));
+    _webReminderTimers.delete(identifier);
+    return;
+  }
+  try { await Notifications.cancelScheduledNotificationAsync(identifier); } catch (e) { /* already fired */ }
+}

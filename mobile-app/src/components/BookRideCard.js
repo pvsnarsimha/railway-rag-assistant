@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { View, StyleSheet, TouchableOpacity, Linking, Platform, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { Text } from "../i18n/Localized";
+import { scheduleLocalReminder, cancelLocalReminder, ensureLocalNotificationPermission } from "../services/pushNotifications";
 
 /**
  * "Book a ride" on Live Tracking: pick Ola, Uber or Rapido and we open that
@@ -23,6 +24,22 @@ const PROVIDERS = [
 
 const titleCase = (s) => String(s || "").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+
+const LEADS = [15, 30, 45];
+
+/** Minutes from now until the train reaches `s` (live minutes_away, else its ETA clock time). */
+function minutesUntil(s) {
+  if (s?.minutes_away != null && Number.isFinite(Number(s.minutes_away))) return Number(s.minutes_away);
+  const eta = stopEta(s);
+  const m = eta && /^(\d{1,2}):(\d{2})$/.exec(eta);
+  if (!m) return null;
+  const now = new Date();
+  const t = new Date(now);
+  t.setHours(Number(m[1]), Number(m[2]), 0, 0);
+  let diff = (t - now) / 60000;
+  if (diff < -360) diff += 1440; // past midnight on an overnight run
+  return Math.round(diff);
+}
 
 function stopEta(s) {
   return hhmm(s?.predicted_eta || s?.arrival?.expected || s?.arrival?.scheduled);
@@ -74,8 +91,12 @@ export async function openRide(provider, stop) {
  * arrival, predicted_eta}); dest: the "Dest" station code the rider typed
  * (optional); preferredCodes: stations with an armed alert bell.
  */
-export default function BookRideCard({ timeline, dest, preferredCodes }) {
+export default function BookRideCard({ timeline, dest, preferredCodes, trainNumber }) {
   const [open, setOpen] = useState(false);
+  const [remindOn, setRemindOn] = useState(false);
+  const [lead, setLead] = useState(30);
+  const [remindNote, setRemindNote] = useState(null);
+  const reminderRef = useRef({ id: null, fireAt: null, key: null });
   const [picked, setPicked] = useState(null);
   const [chooseStop, setChooseStop] = useState(false);
   const [stopCode, setStopCode] = useState(null);
@@ -97,12 +118,63 @@ export default function BookRideCard({ timeline, dest, preferredCodes }) {
     return codes[codes.length - 1] || null;
   }, [halts, dest, preferredCodes]);
 
-  if (!halts.length) return null;
   const code = stopCode && halts.some((s) => String(s.code).toUpperCase() === stopCode) ? stopCode : defaultCode;
-  const stop = halts.find((s) => String(s.code).toUpperCase() === code) || halts[halts.length - 1];
+  const stop = halts.find((s) => String(s.code).toUpperCase() === code) || halts[halts.length - 1] || null;
   const eta = stopEta(stop);
-  const stationLabel = titleCase(stop.name || stop.code);
+  const stationLabel = stop ? titleCase(stop.name || stop.code) : "";
   const chosen = PROVIDERS.find((p) => p.key === picked);
+  const minsAway = stop ? minutesUntil(stop) : null;
+
+  // "Remind me to book a ride": one notification `lead` min before the
+  // train reaches the chosen station, with Ola / Uber / Rapido buttons.
+  // Re-planned as the live ETA moves (only when it shifts by 2+ min).
+  useEffect(() => {
+    const r = reminderRef.current;
+    const cancel = () => { if (r.id) cancelLocalReminder(r.id); r.id = null; r.fireAt = null; r.key = null; };
+    if (!remindOn || !stop || minsAway == null) { cancel(); setRemindNote(null); return; }
+    const inSec = (minsAway - lead) * 60;
+    if (inSec <= 30) {
+      cancel();
+      setRemindNote(minsAway > 0 ? `${stationLabel} is only ${minsAway} min away — book your ride now.` : null);
+      return;
+    }
+    const fireAt = Date.now() + inSec * 1000;
+    const key = `${stop.code}|${lead}`;
+    if (r.id && r.key === key && Math.abs(r.fireAt - fireAt) < 2 * 60 * 1000) return;
+    cancel();
+    const links = Object.fromEntries(PROVIDERS.map((p) => [p.key, rideLinks(p.key, stop).web]));
+    const whenText = new Date(fireAt).toTimeString().slice(0, 5);
+    setRemindNote(`We'll remind you at ${whenText}, ${lead} min before ${stationLabel}.`);
+    scheduleLocalReminder(
+      `Book your ride — ${stationLabel} in ~${lead} min`,
+      `${trainNumber ? `${trainNumber} ` : ""}reaches ${stationLabel}${eta ? ` at about ${eta}` : ""}. Pick Ola, Uber or Rapido to have a ride waiting at the exit.`,
+      inSec,
+      {
+        categoryIdentifier: "ride_book",
+        data: { type: "ride_reminder", stop: { code: stop.code, name: stop.name, lat: stop.lat, lng: stop.lng }, links },
+        webActions: [{ action: "ride_uber", title: "Uber" }, { action: "ride_ola", title: "Ola" }],
+      },
+    ).then((id) => { r.id = id; r.fireAt = fireAt; r.key = key; });
+  }, [remindOn, lead, stop?.code, minsAway]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Stop reminders when the card goes away (tracking stopped / trip over).
+  useEffect(() => () => { const r = reminderRef.current; if (r.id) cancelLocalReminder(r.id); }, []);
+
+  if (!halts.length || !stop) return null;
+
+  const stopChips = (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.stopChips}>
+      {halts.map((s) => {
+        const c = String(s.code).toUpperCase();
+        const on = c === code;
+        return (
+          <TouchableOpacity key={c} onPress={() => { setStopCode(c); setChooseStop(false); }} style={[styles.stopChip, on && styles.stopChipOn]}>
+            <Text noTranslate style={[styles.stopChipText, on && { color: "#fff" }]}>{titleCase(s.name || c)}</Text>
+          </TouchableOpacity>
+        );
+      })}
+    </ScrollView>
+  );
 
   return (
     <View style={styles.card}>
@@ -110,6 +182,41 @@ export default function BookRideCard({ timeline, dest, preferredCodes }) {
         <Text style={{ fontWeight: "800" }}>{eta ? `Reaching ${stationLabel} at ${eta}.` : `Getting off at ${stationLabel}.`}</Text>
         {" "}Get a ride waiting at the exit.
       </Text>
+
+      <View style={styles.remind}>
+        <TouchableOpacity
+          style={styles.remindRow}
+          activeOpacity={0.8}
+          onPress={() => { if (!remindOn) ensureLocalNotificationPermission(); setRemindOn((v) => !v); }}
+          accessibilityState={{ checked: remindOn }}
+        >
+          <Ionicons name={remindOn ? "notifications" : "notifications-outline"} size={18} color={remindOn ? "#E4570F" : "#6B7280"} />
+          <Text style={styles.remindText}>Remind me to book a ride</Text>
+          <View style={[styles.switch, remindOn && styles.switchOn]}>
+            <View style={[styles.knob, remindOn && styles.knobOn]} />
+          </View>
+        </TouchableOpacity>
+        {remindOn ? (
+          <>
+            <TouchableOpacity style={styles.pickupRow} onPress={() => setChooseStop((v) => !v)} activeOpacity={0.7}>
+              <Ionicons name="location" size={15} color="#E4570F" />
+              <Text style={styles.pickupText} numberOfLines={1}>Before {stationLabel} ({stop.code}){eta ? ` · ${eta}` : ""}</Text>
+              <Text style={styles.changeLink}>{chooseStop ? "Done" : "Change"}</Text>
+            </TouchableOpacity>
+            {chooseStop ? stopChips : null}
+            <View style={styles.leadRow}>
+              <Text style={styles.leadLabel}>Notify</Text>
+              {LEADS.map((m) => (
+                <TouchableOpacity key={m} onPress={() => setLead(m)} style={[styles.leadChip, lead === m && styles.leadChipOn]}>
+                  <Text style={[styles.leadText, lead === m && { color: "#fff" }]}>{m} min</Text>
+                </TouchableOpacity>
+              ))}
+              <Text style={styles.leadLabel}>before</Text>
+            </View>
+            {remindNote ? <Text style={styles.note}>{remindNote}</Text> : null}
+          </>
+        ) : null}
+      </View>
 
       {open ? (
         <View style={styles.panel}>
@@ -120,19 +227,7 @@ export default function BookRideCard({ timeline, dest, preferredCodes }) {
             </Text>
             <Text style={styles.changeLink}>{chooseStop ? "Done" : "Change"}</Text>
           </TouchableOpacity>
-          {chooseStop ? (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.stopChips}>
-              {halts.map((s) => {
-                const c = String(s.code).toUpperCase();
-                const on = c === code;
-                return (
-                  <TouchableOpacity key={c} onPress={() => { setStopCode(c); setChooseStop(false); }} style={[styles.stopChip, on && styles.stopChipOn]}>
-                    <Text noTranslate style={[styles.stopChipText, on && { color: "#fff" }]}>{titleCase(s.name || c)}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          ) : null}
+          {chooseStop && !remindOn ? stopChips : null}
 
           {PROVIDERS.map((p) => {
             const on = picked === p.key;
@@ -193,6 +288,18 @@ const styles = StyleSheet.create({
     shadowColor: "#0F1B33", shadowOpacity: 0.06, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 2,
   },
   lead: { fontSize: 13.5, color: "#374151", lineHeight: 19 },
+  remind: { marginTop: 12, borderRadius: 16, backgroundColor: "#FFF7ED", padding: 10, gap: 8 },
+  remindRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  remindText: { flex: 1, fontSize: 14, fontWeight: "800", color: "#111827" },
+  switch: { width: 40, height: 24, borderRadius: 12, backgroundColor: "#D1D5DB", padding: 2, justifyContent: "center" },
+  switchOn: { backgroundColor: "#E4570F" },
+  knob: { width: 20, height: 20, borderRadius: 10, backgroundColor: "#fff" },
+  knobOn: { alignSelf: "flex-end" },
+  leadRow: { flexDirection: "row", gap: 6, flexWrap: "wrap", alignItems: "center" },
+  leadLabel: { fontSize: 12.5, color: "#6B7280", marginRight: 2 },
+  leadChip: { paddingHorizontal: 11, paddingVertical: 7, borderRadius: 999, backgroundColor: "#fff", borderWidth: 1, borderColor: "#F3D5BE" },
+  leadChipOn: { backgroundColor: "#E4570F", borderColor: "#E4570F" },
+  leadText: { fontSize: 12.5, fontWeight: "700", color: "#9A3412" },
   panel: { marginTop: 12, borderRadius: 16, backgroundColor: "#F7F8FA", padding: 10, gap: 8 },
   pickupRow: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 2, paddingBottom: 2 },
   pickupText: { flex: 1, fontSize: 12.5, color: "#4B5563" },
