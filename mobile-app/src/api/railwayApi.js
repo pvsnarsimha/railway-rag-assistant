@@ -842,6 +842,15 @@ export async function setTrackingInterval(baseUrl, token, previousTokens, interv
   return data;
 }
 
+/** "Turn on updates": server restores the interval each paused train had. */
+export async function resumeTrackingInterval(baseUrl, token, previousTokens) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.post("/api/push/tracking/resume", {
+    token, previous_tokens: previousTokens || [],
+  });
+  return data;
+}
+
 export async function stopBackgroundTracking(baseUrl, token, { trainNumber, date } = {}) {
   const client = makeClient(baseUrl);
   const { data } = await client.post("/api/push/tracking/stop", {
