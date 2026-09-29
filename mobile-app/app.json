@@ -28,7 +28,7 @@
       "adaptiveIcon": {
         "backgroundColor": "#0B3D91"
       },
-      "permissions": ["CAMERA", "READ_EXTERNAL_STORAGE", "POST_NOTIFICATIONS", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"],
+      "permissions": ["CAMERA", "READ_EXTERNAL_STORAGE", "POST_NOTIFICATIONS", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "SCHEDULE_EXACT_ALARM", "USE_EXACT_ALARM", "RECEIVE_BOOT_COMPLETED"],
       "config": {
         "googleMaps": {
           "apiKey": "YOUR_ANDROID_GOOGLE_MAPS_API_KEY"
@@ -46,7 +46,7 @@
       [
         "expo-notifications",
         {
-          "color": "#0B3D91"
+          "color": "#D32F2F"
         }
       ],
       [

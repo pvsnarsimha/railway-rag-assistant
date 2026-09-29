@@ -13,10 +13,10 @@ import LanguagePickerModal from "../components/LanguagePickerModal";
 import { getLanguage, languageInfo, loadLanguage } from "../utils/notifyLanguage";
 import { useT } from "../context/LanguageContext";
 import { Platform } from "react-native";
-import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission } from "../services/pushNotifications";
+import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission, STATUS_ON_COLOR } from "../services/pushNotifications";
 
 // Shown in Settings so it's easy to tell which build is installed.
-export const NOTIFY_BUTTONS_VERSION = "notification buttons v3";
+export const NOTIFY_BUTTONS_VERSION = "notification buttons v4";
 
 export default function SettingsScreen() {
   const { apiBaseUrl, setApiBaseUrl, wsBaseUrl } = useSettings();
@@ -41,8 +41,9 @@ export default function SettingsScreen() {
     await registerNotificationActions();
     const id = await replaceNotification(null, {
       title: "Test: 12760 Charminar Exp · on time",
-      body: "Crossed Kazipet Jn at 18:44. Expand this notification to see Turn off updates.",
+      body: "Crossed Kazipet Jn at 18:44. Expand this notification and tap Turn off updates — it turns green without opening the app.",
       categoryIdentifier: "train_status",
+      color: STATUS_ON_COLOR,
       data: { type: "running_status", train_number: "12760", interval_minutes: "10" },
     });
     setNotifyTest(id ? "Sent — pull down the notification shade and expand it." : "Couldn't show a notification (Expo Go can't show buttons — use the installed app).");

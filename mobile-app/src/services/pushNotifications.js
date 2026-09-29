@@ -228,7 +228,7 @@ async function registerForWebPushNotifications({ prompt = true } = {}) {
         // service worker) — only a service-worker notification can show
         // buttons, so show it through the registration when possible.
         if (d.push_token && ["delay_alert", "station_reached", "approach_alert"].includes(d.type)) {
-          opts.actions = [{ action: "status_off", title: "Turn off updates" }];
+          opts.actions = [{ action: "status_off", title: "🔴 Turn off updates" }];
           opts.data = { push_token: d.push_token, train_number: d.train_number || "", interval_minutes: d.interval_minutes || "" };
         }
         navigator.serviceWorker.getRegistration("/mobile-app/")
@@ -396,6 +396,38 @@ export async function registerForPushNotifications() {
 // setTimeout-based local alarm, which fires as long as this browser tab
 // stays open, and is at least an honest, working "foreground" alarm
 // instead of a silent no-op.
+// BUG FIX: expo-notifications (SDK 54) rejects a trigger without a `type`
+// — the old `{ seconds }` form threw, the try/catch returned null, and the
+// Smart Alarm / "book a ride" reminders were never scheduled on the phone.
+// An absolute date, on a high-importance channel, is scheduled with
+// AlarmManager so it fires with the phone asleep or the app swiped away
+// (exact while idle when SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM is granted —
+// see app.json).
+export const REMINDER_CHANNEL = "reminders";
+function fireAt(seconds) {
+  return {
+    type: Notifications.SchedulableTriggerInputTypes.DATE,
+    date: new Date(Date.now() + Math.max(1, Math.round(seconds)) * 1000),
+    // Only once the channel exists — Android drops a notification sent to
+    // a missing channel.
+    ...(_reminderChannelReady ? { channelId: REMINDER_CHANNEL } : {}),
+  };
+}
+
+let _reminderChannelReady = false;
+async function ensureReminderChannel() {
+  if (Platform.OS !== "android" || _reminderChannelReady) return;
+  try {
+    await Notifications.setNotificationChannelAsync(REMINDER_CHANNEL, {
+      name: "Reminders and alarms",
+      importance: Notifications.AndroidImportance.HIGH,
+      lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      vibrationPattern: [0, 300, 150, 300],
+    });
+    _reminderChannelReady = true;
+  } catch (e) { /* the notification still goes to the default channel */ }
+}
+
 const _webAlarmTimers = new Map(); // id -> { timer, stopRinging }
 let _webAlarmSeq = 0;
 
@@ -425,9 +457,10 @@ export async function scheduleLocalAlarm(title, body, fireInSeconds) {
   if (Platform.OS === "web") return scheduleWebAlarm(title, body, fireInSeconds);
   if (IS_EXPO_GO && Platform.OS === "android") return null;
   try {
+    await ensureReminderChannel();
     return await Notifications.scheduleNotificationAsync({
       content: { title, body },
-      trigger: { seconds: Math.max(1, Math.round(fireInSeconds)) },
+      trigger: fireAt(fireInSeconds),
     });
   } catch (e) {
     return null;
@@ -487,14 +520,23 @@ export async function ensureLocalNotificationPermission() {
  */
 export const STATUS_OFF_ACTION = "status_off";
 export const STATUS_ON_ACTION = "status_on";
+// Android tints a notification's button text with its accent colour: red
+// while updates are on ("Turn off updates"), green once they are off
+// ("Turn on updates"). Server pushes use the app's default accent colour
+// (app.json expo-notifications "color"), which is this red.
+export const STATUS_ON_COLOR = "#D32F2F";
+export const STATUS_OFF_COLOR = "#2E7D32";
 export async function registerNotificationActions() {
   if (Platform.OS === "web") return;
   try {
+    // opensAppToForeground: false — the button works right in the
+    // notification shade (src/services/notificationActions.js runs in the
+    // background); the app does not open.
     await Notifications.setNotificationCategoryAsync("train_status", [
-      { identifier: STATUS_OFF_ACTION, buttonTitle: "Turn off updates", options: { opensAppToForeground: true } },
+      { identifier: STATUS_OFF_ACTION, buttonTitle: "🔴 Turn off updates", options: { opensAppToForeground: false } },
     ]);
     await Notifications.setNotificationCategoryAsync("train_status_off", [
-      { identifier: STATUS_ON_ACTION, buttonTitle: "Turn on updates", options: { opensAppToForeground: true } },
+      { identifier: STATUS_ON_ACTION, buttonTitle: "🟢 Turn on updates", options: { opensAppToForeground: false } },
     ]);
     await Notifications.setNotificationCategoryAsync("ride_book", [
       { identifier: "ride_ola", buttonTitle: "Ola", options: { opensAppToForeground: true } },
@@ -517,7 +559,7 @@ export async function dismissNotification(identifier) {
  * after a timer while the page is open, with `webActions`.
  */
 const _webReminderTimers = new Map();
-export async function scheduleLocalReminder(title, body, fireInSeconds, { data, categoryIdentifier, webActions } = {}) {
+export async function scheduleLocalReminder(title, body, fireInSeconds, { data, categoryIdentifier, webActions, color } = {}) {
   const secs = Math.max(1, Math.round(fireInSeconds));
   if (Platform.OS === "web") {
     const id = `web-reminder-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -539,9 +581,10 @@ export async function scheduleLocalReminder(title, body, fireInSeconds, { data, 
   }
   if (IS_EXPO_GO && Platform.OS === "android") return null;
   try {
+    await ensureReminderChannel();
     return await Notifications.scheduleNotificationAsync({
-      content: { title, body, data: data || {}, ...(categoryIdentifier ? { categoryIdentifier } : {}) },
-      trigger: { seconds: secs },
+      content: { title, body, data: data || {}, ...(categoryIdentifier ? { categoryIdentifier } : {}), ...(color ? { color } : {}) },
+      trigger: fireAt(secs),
     });
   } catch (e) {
     return null;
@@ -563,12 +606,12 @@ export async function cancelLocalReminder(identifier) {
  * identifier) — used to flip "Turn off updates" into "Updates off · Turn
  * on updates" in place. Falls back to a new notification.
  */
-export async function replaceNotification(identifier, { title, body, data, categoryIdentifier }) {
+export async function replaceNotification(identifier, { title, body, data, categoryIdentifier, color }) {
   if (Platform.OS === "web") return null;
   try {
     return await Notifications.scheduleNotificationAsync({
       ...(identifier ? { identifier } : {}),
-      content: { title, body, data: data || {}, ...(categoryIdentifier ? { categoryIdentifier } : {}) },
+      content: { title, body, data: data || {}, ...(categoryIdentifier ? { categoryIdentifier } : {}), ...(color ? { color } : {}) },
       trigger: null,
     });
   } catch (e) {

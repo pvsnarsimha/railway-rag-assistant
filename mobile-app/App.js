@@ -12,12 +12,9 @@ import { colors } from "./src/theme/colors";
 import { View } from "react-native";
 import { SpeakScope } from "./src/i18n/Localized";
 import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
-import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification, STATUS_OFF_ACTION, STATUS_ON_ACTION, replaceNotification } from "./src/services/pushNotifications";
-import { turnOffStatusUpdates, turnOnStatusUpdates } from "./src/services/backgroundTracking";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification } from "./src/services/pushNotifications";
+import { handleStatusAction } from "./src/services/notificationActions";
 import * as Notifications from "expo-notifications";
-import { DEFAULT_API_BASE_URL, STORAGE_KEYS } from "./src/config";
-import { stopSpeaking } from "./src/utils/speakNotifications";
 import { openRide } from "./src/components/BookRideCard";
 // Registers the headless "read notifications aloud" task at module scope.
 import { registerReadAloudTask, speakPushData } from "./src/services/readAloudTask";
@@ -136,49 +133,9 @@ export default function App() {
     configureForegroundNotificationHandler();
     registerOfflineShell();
     registerNotificationActions();
-    // "Turn off updates" on the live-status notification: switch the
-    // periodic status updates Off (this phone + the server) and clear it.
+    // "Turn off updates" / "Turn on updates" on a train notification — also
+    // handled in the background when the app isn't open (readAloudTask.js).
     const handled = new Set();
-    const apiBase = async () => {
-      try { return (await AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)) || DEFAULT_API_BASE_URL; } catch (e) { return DEFAULT_API_BASE_URL; }
-    };
-    const handleOff = async (response) => {
-      const action = response?.actionIdentifier;
-      if (action !== STATUS_OFF_ACTION && action !== STATUS_ON_ACTION) return false;
-      const id = response?.notification?.request?.identifier;
-      // The replaced notification keeps its identifier, so include its date
-      // — tapping Off, On, Off again on one notification must all work.
-      const key = `${id}|${action}|${response?.notification?.date || ""}`;
-      if (handled.has(key)) return true;
-      handled.add(key);
-      const content = response?.notification?.request?.content || {};
-      const data = content.data || {};
-      const train = data.train_number ? `${data.train_number}: ` : "";
-      const base = await apiBase();
-      if (action === STATUS_ON_ACTION) {
-        // "Turn on updates": restore the old interval and flip the same
-        // notification back to one with "Turn off updates".
-        const n = await turnOnStatusUpdates(base, { minutes: data.interval_minutes });
-        replaceNotification(id, {
-          title: "Live updates on",
-          body: `${train}status updates every ${n} min again.`,
-          categoryIdentifier: "train_status",
-          data: { ...data, type: "status_on_confirm", interval_minutes: String(n) },
-        });
-        return true;
-      }
-      stopSpeaking();
-      const prev = await turnOffStatusUpdates(base, { previous: data.interval_minutes });
-      // Same notification turns into "Updates off" with "Turn on updates" —
-      // one tap to undo, e.g. when the rider still needs updates on the train.
-      replaceNotification(id, {
-        title: "Live updates off",
-        body: `${train}no more status updates. Station alerts and alarms still work.`,
-        categoryIdentifier: "train_status_off",
-        data: { ...data, type: "status_off_confirm", interval_minutes: String(prev) },
-      });
-      return true;
-    };
     // Ola / Uber / Rapido buttons on the "book your ride" reminder.
     const handleRide = (response) => {
       const action = response?.actionIdentifier || "";
@@ -191,10 +148,10 @@ export default function App() {
       dismissNotification(id);
     };
     if (Platform.OS !== "web") {
-      Notifications.getLastNotificationResponseAsync().then((r) => r && handleRide(r)).catch(() => {});
+      Notifications.getLastNotificationResponseAsync().then((r) => { if (r) { handleStatusAction(r); handleRide(r); } }).catch(() => {});
     }
     const unsubscribe = addNotificationResponseListener((response) => {
-      handleOff(response);
+      handleStatusAction(response);
       handleRide(response);
       const data = response?.notification?.request?.content?.data;
       if (data?.type === "delay_alert" || data?.type === "station_reached" || data?.type === "running_status") {
