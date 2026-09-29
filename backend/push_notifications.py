@@ -647,7 +647,7 @@ def send_station_status_alert(
 # final "Reached" notification keep coming.
 STATUS_UPDATES_CATEGORY = "train_status"
 STATUS_OFF_ACTION = "status_off"
-STATUS_WEB_ACTIONS = [(STATUS_OFF_ACTION, "Turn off updates")]
+STATUS_WEB_ACTIONS = [(STATUS_OFF_ACTION, "🔴 Turn off updates")]
 
 
 def send_running_status(token: str, train_number: str, running: dict, final: bool = False,

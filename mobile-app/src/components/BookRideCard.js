@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { View, StyleSheet, TouchableOpacity, Linking, Platform, ScrollView } from "react-native";
+import { View, StyleSheet, TouchableOpacity, Linking, Platform, ScrollView, TextInput } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import { Text } from "../i18n/Localized";
 import { scheduleLocalReminder, cancelLocalReminder, ensureLocalNotificationPermission } from "../services/pushNotifications";
@@ -26,6 +27,41 @@ const titleCase = (s) => String(s || "").toLowerCase().replace(/\b\w/g, (c) => c
 const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
 
 const LEADS = [15, 30, 45];
+const MAX_LEAD = 12 * 60;
+
+/**
+ * "Custom" reminder time typed by the rider: "5 min", "1 hr 20 min",
+ * "1h20m", "1:20" (hh:mm) or a plain number of minutes. Minutes, or null.
+ */
+export function parseLead(text) {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return null;
+  let mins = null;
+  const clock = /^(\d{1,2})\s*[:.]\s*(\d{1,2})$/.exec(t);
+  if (clock) {
+    if (Number(clock[2]) > 59) return null;
+    mins = Number(clock[1]) * 60 + Number(clock[2]);
+  } else if (/^\d+$/.test(t)) {
+    mins = Number(t);
+  } else {
+    const h = /(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)\b/.exec(t) || /(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)(?=\s*\d)/.exec(t);
+    const m = /(\d+)\s*(?:m|min|mins|minute|minutes)\b/.exec(t);
+    if (!h && !m) return null;
+    const rest = t.replace(/(\d+(?:\.\d+)?)\s*(?:hours|hour|hrs|hr|h)/, "").replace(/(\d+)\s*(?:minutes|minute|mins|min|m)/, "").replace(/[\s,&+]|and/g, "");
+    if (rest) return null;
+    mins = Math.round((h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0));
+  }
+  return mins >= 1 && mins <= MAX_LEAD ? mins : null;
+}
+
+export function formatLead(mins) {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (!h) return `${m} min`;
+  return m ? `${h} hr ${m} min` : `${h} hr`;
+}
+
+const reminderKey = (train) => `bookRide.reminder.${train || "any"}`;
 
 /** Minutes from now until the train reaches `s` (live minutes_away, else its ETA clock time). */
 function minutesUntil(s) {
@@ -100,6 +136,46 @@ export default function BookRideCard({ timeline, dest, preferredCodes, trainNumb
   const [picked, setPicked] = useState(null);
   const [chooseStop, setChooseStop] = useState(false);
   const [stopCode, setStopCode] = useState(null);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customText, setCustomText] = useState("");
+  const [customErr, setCustomErr] = useState(null);
+  const [restored, setRestored] = useState(false);
+
+  // The reminder is an OS alarm, so it fires with the phone asleep or the
+  // app swiped away. Its settings (and the alarm's id) are saved per train
+  // so reopening the app shows it on — and doesn't schedule a second one.
+  useEffect(() => {
+    let alive = true;
+    AsyncStorage.getItem(reminderKey(trainNumber)).then((raw) => {
+      if (!alive) return;
+      try {
+        const v = JSON.parse(raw || "null");
+        if (v) {
+          if (v.lead > 0) setLead(v.lead);
+          if (v.stopCode) setStopCode(v.stopCode);
+          if (v.id) Object.assign(reminderRef.current, { id: v.id, fireAt: v.fireAt, key: v.key });
+          setRemindOn(!!v.remindOn);
+        }
+      } catch (e) { /* start fresh */ }
+      setRestored(true);
+    }).catch(() => setRestored(true));
+    return () => { alive = false; };
+  }, [trainNumber]);
+
+  const saveReminder = (extra = {}) => {
+    const r = reminderRef.current;
+    AsyncStorage.setItem(reminderKey(trainNumber), JSON.stringify({
+      remindOn, lead, stopCode, id: r.id, fireAt: r.fireAt, key: r.key, ...extra,
+    })).catch(() => {});
+  };
+
+  const applyCustom = () => {
+    const mins = parseLead(customText);
+    if (mins == null) { setCustomErr("Type a time like 5 min, 1 hr 20 min or 1:20 (hh:mm), up to 12 hr."); return; }
+    setCustomErr(null);
+    setLead(mins);
+    setCustomOpen(false);
+  };
 
   // Upcoming halts the rider could get off at.
   const halts = useMemo(() => {
@@ -129,24 +205,34 @@ export default function BookRideCard({ timeline, dest, preferredCodes, trainNumb
   // train reaches the chosen station, with Ola / Uber / Rapido buttons.
   // Re-planned as the live ETA moves (only when it shifts by 2+ min).
   useEffect(() => {
+    if (!restored) return;
     const r = reminderRef.current;
     const cancel = () => { if (r.id) cancelLocalReminder(r.id); r.id = null; r.fireAt = null; r.key = null; };
-    if (!remindOn || !stop || minsAway == null) { cancel(); setRemindNote(null); return; }
+    if (!remindOn || !stop || minsAway == null) {
+      if (!remindOn) cancel();
+      setRemindNote(null);
+      saveReminder();
+      return;
+    }
     const inSec = (minsAway - lead) * 60;
     if (inSec <= 30) {
       cancel();
       setRemindNote(minsAway > 0 ? `${stationLabel} is only ${minsAway} min away — book your ride now.` : null);
+      saveReminder();
       return;
     }
     const fireAt = Date.now() + inSec * 1000;
     const key = `${stop.code}|${lead}`;
-    if (r.id && r.key === key && Math.abs(r.fireAt - fireAt) < 2 * 60 * 1000) return;
+    if (r.id && r.key === key && Math.abs(r.fireAt - fireAt) < 2 * 60 * 1000) {
+      setRemindNote(`We'll remind you at ${new Date(r.fireAt).toTimeString().slice(0, 5)}, ${formatLead(lead)} before ${stationLabel}.`);
+      return;
+    }
     cancel();
     const links = Object.fromEntries(PROVIDERS.map((p) => [p.key, rideLinks(p.key, stop).web]));
     const whenText = new Date(fireAt).toTimeString().slice(0, 5);
-    setRemindNote(`We'll remind you at ${whenText}, ${lead} min before ${stationLabel}.`);
+    setRemindNote(`We'll remind you at ${whenText}, ${formatLead(lead)} before ${stationLabel}.`);
     scheduleLocalReminder(
-      `Book your ride — ${stationLabel} in ~${lead} min`,
+      `Book your ride — ${stationLabel} in ~${formatLead(lead)}`,
       `${trainNumber ? `${trainNumber} ` : ""}reaches ${stationLabel}${eta ? ` at about ${eta}` : ""}. Pick Ola, Uber or Rapido to have a ride waiting at the exit.`,
       inSec,
       {
@@ -154,11 +240,17 @@ export default function BookRideCard({ timeline, dest, preferredCodes, trainNumb
         data: { type: "ride_reminder", stop: { code: stop.code, name: stop.name, lat: stop.lat, lng: stop.lng }, links },
         webActions: [{ action: "ride_uber", title: "Uber" }, { action: "ride_ola", title: "Ola" }],
       },
-    ).then((id) => { r.id = id; r.fireAt = fireAt; r.key = key; });
-  }, [remindOn, lead, stop?.code, minsAway]); // eslint-disable-line react-hooks/exhaustive-deps
+    ).then((id) => {
+      r.id = id; r.fireAt = fireAt; r.key = key;
+      if (!id && Platform.OS !== "web") setRemindNote("Couldn't set the reminder — allow notifications for this app in Android settings.");
+      saveReminder({ id, fireAt, key });
+    });
+  }, [restored, remindOn, lead, stop?.code, minsAway]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Stop reminders when the card goes away (tracking stopped / trip over).
-  useEffect(() => () => { const r = reminderRef.current; if (r.id) cancelLocalReminder(r.id); }, []);
+  // Card gone (tracking stopped / trip over): cancel the alarm. The saved
+  // choice brings it back if this train is tracked again. A swiped-away
+  // app never gets here, so its alarm still fires.
+  useEffect(() => () => { const r = reminderRef.current; if (r.id) cancelLocalReminder(r.id); r.id = null; }, []);
 
   if (!halts.length || !stop) return null;
 
@@ -207,12 +299,53 @@ export default function BookRideCard({ timeline, dest, preferredCodes, trainNumb
             <View style={styles.leadRow}>
               <Text style={styles.leadLabel}>Notify</Text>
               {LEADS.map((m) => (
-                <TouchableOpacity key={m} onPress={() => setLead(m)} style={[styles.leadChip, lead === m && styles.leadChipOn]}>
-                  <Text style={[styles.leadText, lead === m && { color: "#fff" }]}>{m} min</Text>
+                <TouchableOpacity key={m} onPress={() => { setLead(m); setCustomOpen(false); }} style={[styles.leadChip, lead === m && !customOpen && styles.leadChipOn]}>
+                  <Text style={[styles.leadText, lead === m && !customOpen && { color: "#fff" }]}>{m} min</Text>
                 </TouchableOpacity>
               ))}
+              {(() => {
+                const isCustom = customOpen || !LEADS.includes(lead);
+                return (
+                  <TouchableOpacity
+                    onPress={() => { setCustomOpen(true); setCustomErr(null); setCustomText(LEADS.includes(lead) ? "" : formatLead(lead)); }}
+                    style={[styles.leadChip, isCustom && styles.leadChipOn]}
+                  >
+                    <Text style={[styles.leadText, isCustom && { color: "#fff" }]}>
+                      {!customOpen && !LEADS.includes(lead) ? formatLead(lead) : "Custom"}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })()}
               <Text style={styles.leadLabel}>before</Text>
             </View>
+            {customOpen ? (
+              <View style={styles.customBox}>
+                <Text style={styles.customLabel}>How long before {stationLabel}?</Text>
+                <View style={styles.customRow}>
+                  <TextInput
+                    value={customText}
+                    onChangeText={(v) => { setCustomText(v); setCustomErr(null); }}
+                    onSubmitEditing={applyCustom}
+                    placeholder="e.g. 5 min, 1 hr 20 min or 1:20"
+                    placeholderTextColor="#B08968"
+                    autoFocus
+                    returnKeyType="done"
+                    style={styles.customInput}
+                  />
+                  <TouchableOpacity onPress={applyCustom} style={styles.customSet}>
+                    <Text style={styles.customSetText}>Set</Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.customQuick}>
+                  {[5, 10, 60, 80].map((m) => (
+                    <TouchableOpacity key={m} onPress={() => { setCustomText(formatLead(m)); setCustomErr(null); }} style={styles.quickChip}>
+                      <Text style={styles.quickText}>{formatLead(m)}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                {customErr ? <Text style={styles.customErr}>{customErr}</Text> : null}
+              </View>
+            ) : null}
             {remindNote ? <Text style={styles.note}>{remindNote}</Text> : null}
           </>
         ) : null}
@@ -300,6 +433,19 @@ const styles = StyleSheet.create({
   leadChip: { paddingHorizontal: 11, paddingVertical: 7, borderRadius: 999, backgroundColor: "#fff", borderWidth: 1, borderColor: "#F3D5BE" },
   leadChipOn: { backgroundColor: "#E4570F", borderColor: "#E4570F" },
   leadText: { fontSize: 12.5, fontWeight: "700", color: "#9A3412" },
+  customBox: { backgroundColor: "#fff", borderRadius: 14, borderWidth: 1, borderColor: "#F3D5BE", padding: 10, gap: 8 },
+  customLabel: { fontSize: 12.5, fontWeight: "700", color: "#9A3412" },
+  customRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  customInput: {
+    flex: 1, borderWidth: 1, borderColor: "#F3D5BE", borderRadius: 12, paddingHorizontal: 12, paddingVertical: 9,
+    fontSize: 15, color: "#111827", backgroundColor: "#FFFBF7",
+  },
+  customSet: { backgroundColor: "#E4570F", borderRadius: 12, paddingHorizontal: 16, paddingVertical: 10 },
+  customSetText: { color: "#fff", fontWeight: "800", fontSize: 14 },
+  customQuick: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  quickChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: "#FFF7ED", borderWidth: 1, borderColor: "#F3D5BE" },
+  quickText: { fontSize: 12, fontWeight: "700", color: "#9A3412" },
+  customErr: { fontSize: 12, color: "#B91C1C", fontWeight: "600" },
   panel: { marginTop: 12, borderRadius: 16, backgroundColor: "#F7F8FA", padding: 10, gap: 8 },
   pickupRow: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 2, paddingBottom: 2 },
   pickupText: { flex: 1, fontSize: 12.5, color: "#4B5563" },

@@ -174,7 +174,7 @@ self.addEventListener("notificationclick", (event) => {
           tag: tag,
           renotify: false,
           icon: "/assets/icons/train-marker.png",
-          actions: [on ? { action: "status_off", title: "Turn off updates" } : { action: "status_on", title: "Turn on updates" }],
+          actions: [on ? { action: "status_off", title: "🔴 Turn off updates" } : { action: "status_on", title: "🟢 Turn on updates" }],
           data: { push_token: token, interval_minutes: String(minutes), train_number: d.train_number || "" },
         }).catch(function () {}),
         caches.open("railway-flags").then(function (c) {

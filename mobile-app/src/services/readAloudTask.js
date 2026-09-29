@@ -1,7 +1,8 @@
 // readAloudTask.js
 // ----------------
 // FEATURE (native Android/iOS build): read train notifications aloud even
-// when the app is CLOSED or in the background.
+// when the app is CLOSED or in the background. The same task also runs the
+// "Turn off / on updates" notification buttons (notificationActions.js).
 //
 // How: the backend sends every alerting train notification to an Expo push
 // token twice — the normal visible notification, plus a data-only "speak"
@@ -23,6 +24,7 @@ import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 import { loadReadAloudAsync, speak, shouldSpeakPush } from "../utils/speakNotifications";
 import { loadLanguage } from "../utils/notifyLanguage";
+import { handleStatusAction } from "./notificationActions";
 
 export const READ_ALOUD_TASK = "railway-read-aloud-notification";
 
@@ -51,6 +53,12 @@ if (Platform.OS !== "web") {
   TaskManager.defineTask(READ_ALOUD_TASK, async ({ data, error }) => {
     if (error) return;
     try {
+      // "Turn off updates" / "Turn on updates" tapped with the app in the
+      // background or closed — handled here, the app stays closed.
+      if (data && typeof data === "object" && "actionIdentifier" in data) {
+        await handleStatusAction(data);
+        return;
+      }
       if (!(await loadReadAloudAsync())) return;
       await loadLanguage();
       speakPushData(extract(data));
