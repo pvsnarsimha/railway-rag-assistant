@@ -32,7 +32,7 @@ import { useT } from "../context/LanguageContext";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
   loadStatusEvery, saveStatusEvery, applyNotifyLanguage, applyStatusEveryOnServer,
-  onStatusEveryChanged, turnOffStatusUpdates, consumeWebStatusOffFlag,
+  onStatusEveryChanged, turnOffStatusUpdates, turnOnStatusUpdates, consumeWebStatusFlag,
 } from "../services/backgroundTracking";
 
 // FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
@@ -867,12 +867,16 @@ export default function LiveTrackingScreen({ navigation }) {
   // too. Web: the service worker posts a message (page open) or leaves a
   // flag (page closed) that is picked up when the app is next shown.
   useEffect(() => {
-    const setOff = () => { statusEveryRef.current = 0; setStatusEvery(0); stopSpeaking(); };
-    const unsub = onStatusEveryChanged(setOff);
+    const setTo = (n) => { statusEveryRef.current = n; setStatusEvery(n); if (n === 0) stopSpeaking(); };
+    const unsub = onStatusEveryChanged(setTo);
     if (!IS_WEB) return unsub;
-    const check = () => consumeWebStatusOffFlag().then((hit) => { if (hit) turnOffStatusUpdates(apiBaseUrl, { serverDone: true }); });
+    const check = () => consumeWebStatusFlag().then((f) => {
+      if (!f) return;
+      if (f.on) turnOnStatusUpdates(apiBaseUrl, { minutes: f.minutes, serverDone: true });
+      else turnOffStatusUpdates(apiBaseUrl, { serverDone: true });
+    });
     check();
-    const onMsg = (e) => { if (e?.data?.type === "status_off") check(); };
+    const onMsg = (e) => { if (e?.data?.type === "status_off" || e?.data?.type === "status_on") check(); };
     const onVis = () => { if (document.visibilityState === "visible") check(); };
     try { navigator.serviceWorker?.addEventListener("message", onMsg); } catch (e) { /* ignore */ }
     document.addEventListener("visibilitychange", onVis);

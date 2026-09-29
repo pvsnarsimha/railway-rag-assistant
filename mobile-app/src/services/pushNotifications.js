@@ -475,11 +475,15 @@ export async function ensureLocalNotificationPermission() {
  * off updates" button is handled in App.js. Call once at app start.
  */
 export const STATUS_OFF_ACTION = "status_off";
+export const STATUS_ON_ACTION = "status_on";
 export async function registerNotificationActions() {
   if (Platform.OS === "web") return;
   try {
     await Notifications.setNotificationCategoryAsync("train_status", [
       { identifier: STATUS_OFF_ACTION, buttonTitle: "Turn off updates", options: { opensAppToForeground: true } },
+    ]);
+    await Notifications.setNotificationCategoryAsync("train_status_off", [
+      { identifier: STATUS_ON_ACTION, buttonTitle: "Turn on again", options: { opensAppToForeground: true } },
     ]);
     await Notifications.setNotificationCategoryAsync("ride_book", [
       { identifier: "ride_ola", buttonTitle: "Ola", options: { opensAppToForeground: true } },
