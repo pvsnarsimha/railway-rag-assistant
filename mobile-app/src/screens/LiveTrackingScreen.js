@@ -22,6 +22,7 @@ import { registerForPushNotifications, refreshWebPushToken, scheduleLocalAlarm, 
 import { formatDelayDuration } from "../utils/formatDelay";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 import OfflineTrackingCard from "../components/OfflineTrackingCard";
+import BookRideCard from "../components/BookRideCard";
 import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
 import { isSpeechSupported, loadReadAloud, loadReadAloudAsync, saveReadAloud, speak, stopSpeaking, onTrainPush, shouldSpeakPush } from "../utils/speakNotifications";
 import { getLanguage, hasChosenLanguage, languageInfo, loadLanguage, SAMPLE } from "../utils/notifyLanguage";
@@ -2348,6 +2349,11 @@ export default function LiveTrackingScreen({ navigation }) {
             </TouchableOpacity>
           </View>
           {mapError && <Text style={styles.errorText}>{mapError}</Text>}
+          {/* Book a ride home from the station you get off at (Ola / Uber /
+              Rapido, pickup pre-set) — hidden once the journey is over. */}
+          {bellsEnabledForPayload && !ltJourneyLikelyComplete && timeline.length ? (
+            <BookRideCard timeline={timeline} dest={dest} preferredCodes={Object.keys(stationWatches)} />
+          ) : null}
         </>
       ) : null}
       {IS_WEB ? (
