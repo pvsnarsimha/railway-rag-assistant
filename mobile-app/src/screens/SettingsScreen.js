@@ -12,6 +12,11 @@ import { describeApiError } from "../api/client";
 import LanguagePickerModal from "../components/LanguagePickerModal";
 import { getLanguage, languageInfo, loadLanguage } from "../utils/notifyLanguage";
 import { useT } from "../context/LanguageContext";
+import { Platform } from "react-native";
+import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission } from "../services/pushNotifications";
+
+// Shown in Settings so it's easy to tell which build is installed.
+export const NOTIFY_BUTTONS_VERSION = "notification buttons v3";
 
 export default function SettingsScreen() {
   const { apiBaseUrl, setApiBaseUrl, wsBaseUrl } = useSettings();
@@ -24,6 +29,24 @@ export default function SettingsScreen() {
   useEffect(() => { setLang(screenLang); }, [screenLang]);
   const [langOpen, setLangOpen] = useState(false);
   useEffect(() => { loadLanguage().then((c) => { if (c) setLang(c); }); }, []);
+
+  const [notifyTest, setNotifyTest] = useState(null);
+  // Shows a sample train notification with the "Turn off updates" button
+  // straight from this phone (no server) — proves the installed app has the
+  // buttons. Tapping the button there works like on a real update.
+  async function handleNotifyTest() {
+    if (Platform.OS === "web") { setNotifyTest("On the website, buttons appear on real train notifications."); return; }
+    const ok = await ensureLocalNotificationPermission();
+    if (!ok) { setNotifyTest("Notifications are blocked for this app — allow them in Android settings."); return; }
+    await registerNotificationActions();
+    const id = await replaceNotification(null, {
+      title: "Test: 12760 Charminar Exp · on time",
+      body: "Crossed Kazipet Jn at 18:44. Expand this notification to see Turn off updates.",
+      categoryIdentifier: "train_status",
+      data: { type: "running_status", train_number: "12760", interval_minutes: "10" },
+    });
+    setNotifyTest(id ? "Sent — pull down the notification shade and expand it." : "Couldn't show a notification (Expo Go can't show buttons — use the installed app).");
+  }
 
   async function handleSave() {
     await setApiBaseUrl(draftUrl);
@@ -111,6 +134,12 @@ export default function SettingsScreen() {
         <Tip text="Android Emulator: use http://10.0.2.2:8000 — localhost inside the emulator refers to the emulator itself." />
         <Tip text="Physical phone via Expo Go: use your computer's LAN IP, e.g. http://192.168.1.23:8000, and make sure the phone is on the same Wi-Fi as the server." />
         <Tip text="Run the backend with: uvicorn app:app --host 0.0.0.0 --port 8000  (the --host 0.0.0.0 part is required for LAN/emulator access)." />
+      </SectionCard>
+
+      <SectionCard title="Notification buttons" subtitle="Check that this installed app shows Turn off updates on train notifications.">
+        <PrimaryButton title="Test notification buttons" variant="secondary" onPress={handleNotifyTest} />
+        {notifyTest ? <Text style={styles.aboutText}>{notifyTest}</Text> : null}
+        <Text style={styles.aboutText}>Build: {NOTIFY_BUTTONS_VERSION}</Text>
       </SectionCard>
 
       <SectionCard title="About">
