@@ -32,6 +32,7 @@ import { useT } from "../context/LanguageContext";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
   loadStatusEvery, saveStatusEvery, applyNotifyLanguage, applyStatusEveryOnServer,
+  onStatusEveryChanged, turnOffStatusUpdates, consumeWebStatusOffFlag,
 } from "../services/backgroundTracking";
 
 // FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
@@ -862,6 +863,25 @@ export default function LiveTrackingScreen({ navigation }) {
   useEffect(() => {
     loadStatusEvery().then((n) => { statusEveryRef.current = n; setStatusEvery(n); });
   }, []);
+  // "Turn off updates" tapped on a live-status notification: show Off here
+  // too. Web: the service worker posts a message (page open) or leaves a
+  // flag (page closed) that is picked up when the app is next shown.
+  useEffect(() => {
+    const setOff = () => { statusEveryRef.current = 0; setStatusEvery(0); stopSpeaking(); };
+    const unsub = onStatusEveryChanged(setOff);
+    if (!IS_WEB) return unsub;
+    const check = () => consumeWebStatusOffFlag().then((hit) => { if (hit) turnOffStatusUpdates(apiBaseUrl, { serverDone: true }); });
+    check();
+    const onMsg = (e) => { if (e?.data?.type === "status_off") check(); };
+    const onVis = () => { if (document.visibilityState === "visible") check(); };
+    try { navigator.serviceWorker?.addEventListener("message", onMsg); } catch (e) { /* ignore */ }
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      unsub();
+      try { navigator.serviceWorker?.removeEventListener("message", onMsg); } catch (e) { /* ignore */ }
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [apiBaseUrl]); // eslint-disable-line react-hooks/exhaustive-deps
   const datePickForHeaderRef = useRef(false);
 
   // FEATURE: Smart Alarm — same station-arrival wake-up as
@@ -2352,7 +2372,7 @@ export default function LiveTrackingScreen({ navigation }) {
           {/* Book a ride home from the station you get off at (Ola / Uber /
               Rapido, pickup pre-set) — hidden once the journey is over. */}
           {bellsEnabledForPayload && !ltJourneyLikelyComplete && timeline.length ? (
-            <BookRideCard timeline={timeline} dest={dest} preferredCodes={Object.keys(stationWatches)} />
+            <BookRideCard timeline={timeline} dest={dest} preferredCodes={Object.keys(stationWatches)} trainNumber={activeTrack.trainNumber} />
           ) : null}
         </>
       ) : null}

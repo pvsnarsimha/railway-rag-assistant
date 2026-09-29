@@ -1,0 +1,559 @@
+diff --git a/backend/push_notifications.py b/backend/push_notifications.py
+index 07461b8..065fd9a 100644
+--- a/backend/push_notifications.py
++++ b/backend/push_notifications.py
+@@ -56,7 +56,8 @@ def _is_expo_token(token: str) -> bool:
+     return token.startswith("ExponentPushToken[") or token.startswith("ExpoPushToken[")
+ 
+ 
+-def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optional[str] = "default") -> dict:
++def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optional[str] = "default",
++                   category_id: Optional[str] = None) -> dict:
+     """Never raises — same never-raises contract as the FCM senders below,
+     so alert_scheduler.py can keep going on a per-token failure."""
+     try:
+@@ -66,7 +67,10 @@ def _send_via_expo(token: str, title: str, body: str, data: dict, sound: Optiona
+             # (keeps the visible push well under Expo's 4 KB limit).
+             json={k: v for k, v in {"to": token, "title": title, "body": body,
+                                     "data": _visible_expo_data(data, title, body),
+-                                    "sound": sound}.items() if v is not None},
++                                    "sound": sound,
++                                    # Action buttons (e.g. "Turn off updates") —
++                                    # the app registers the category on start.
++                                    "categoryId": category_id}.items() if v is not None},
+             headers={"Content-Type": "application/json", "Accept": "application/json"},
+             timeout=10,
+         )
+@@ -232,7 +236,8 @@ def _train_tag(train_number) -> str:
+     return f"train-{train_number}"
+ 
+ 
+-def _webpush_config(title: str, body: str, tag: str, renotify: bool = True, silent: bool = False):
++def _webpush_config(title: str, body: str, tag: str, renotify: bool = True, silent: bool = False,
++                    actions: Optional[list] = None):
+     """
+     FEATURE: SMS-style push presentation. A bare WebpushNotification(title,
+     body) — what every send_* below used before this — renders as a thin,
+@@ -263,6 +268,7 @@ def _webpush_config(title: str, body: str, tag: str, renotify: bool = True, sile
+         silent=silent or None,
+         require_interaction=True,
+         vibrate=None if silent else [200, 100, 200, 100, 200],
++        actions=[messaging.WebpushNotificationAction(action=a, title=t) for a, t in (actions or [])] or None,
+     )
+     webpush_kwargs = {"notification": webpush_notification}
+     public_url = os.environ.get("PUBLIC_APP_URL", "").strip()
+@@ -629,6 +635,14 @@ def send_station_status_alert(
+         return {"sent": False, "error": str(e)}
+ 
+ 
++# FEATURE: "Turn off updates" button on the live-status notification itself.
++# Tapping it sets "notify me every N min" to Off for every train this device
++# tracks (same as the Off chip on Live Tracking). Station alerts, alarms and
++# the final "Reached" notification are not affected.
++STATUS_UPDATES_CATEGORY = "train_status"
++STATUS_OFF_ACTION = "status_off"
++
++
+ def send_running_status(token: str, train_number: str, running: dict, final: bool = False,
+                         alert: bool = False) -> dict:
+     """
+@@ -683,19 +697,24 @@ def send_running_status(token: str, train_number: str, running: dict, final: boo
+     _localize(data, lang, title_en, body_en, title, body, speak=_speak)
+ 
+     if _is_expo_token(token):
+-        return _send_via_expo(token, title, body, data, sound="default" if (final or alert) else None)
++        return _send_via_expo(token, title, body, data, sound="default" if (final or alert) else None,
++                              category_id=None if final else STATUS_UPDATES_CATEGORY)
+ 
+     if not _ensure_initialized():
+         return {"sent": False, "error": _init_error}
+ 
+     from firebase_admin import messaging
+ 
++    # The browser's service worker needs the token to switch updates off
++    # from the notification's "Turn off updates" button.
++    data = {**data, "push_token": token}
+     fcm_message = messaging.Message(
+         token=token,
+         notification=messaging.Notification(title=title, body=body),
+         data=data,
+         webpush=_webpush_config(title, body, tag=_train_tag(train_number),
+-                                renotify=final or alert, silent=not (final or alert)),
++                                renotify=final or alert, silent=not (final or alert),
++                                actions=None if final else [(STATUS_OFF_ACTION, "Turn off updates")]),
+     )
+     try:
+         messaging.send(fcm_message)
+diff --git a/mobile-app/App.js b/mobile-app/App.js
+index 8f37a74..91d4fe7 100644
+--- a/mobile-app/App.js
++++ b/mobile-app/App.js
+@@ -12,7 +12,13 @@ import { colors } from "./src/theme/colors";
+ import { View } from "react-native";
+ import { SpeakScope } from "./src/i18n/Localized";
+ import ScreenLanguageBar from "./src/components/ScreenLanguageBar";
+-import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell } from "./src/services/pushNotifications";
++import { configureForegroundNotificationHandler, addNotificationResponseListener, addNotificationReceivedListener, registerOfflineShell, registerNotificationActions, dismissNotification, STATUS_OFF_ACTION } from "./src/services/pushNotifications";
++import { turnOffStatusUpdates } from "./src/services/backgroundTracking";
++import AsyncStorage from "@react-native-async-storage/async-storage";
++import * as Notifications from "expo-notifications";
++import { DEFAULT_API_BASE_URL, STORAGE_KEYS } from "./src/config";
++import { stopSpeaking } from "./src/utils/speakNotifications";
++import { openRide } from "./src/components/BookRideCard";
+ // Registers the headless "read notifications aloud" task at module scope.
+ import { registerReadAloudTask, speakPushData } from "./src/services/readAloudTask";
+ import { loadReadAloudAsync } from "./src/utils/speakNotifications";
+@@ -129,7 +135,43 @@ export default function App() {
+   useEffect(() => {
+     configureForegroundNotificationHandler();
+     registerOfflineShell();
++    registerNotificationActions();
++    // "Turn off updates" on the live-status notification: switch the
++    // periodic status updates Off (this phone + the server) and clear it.
++    const handled = new Set();
++    const handleOff = async (response) => {
++      if (response?.actionIdentifier !== STATUS_OFF_ACTION) return false;
++      const id = response?.notification?.request?.identifier;
++      if (id && handled.has(id)) return true;
++      if (id) handled.add(id);
++      stopSpeaking();
++      let base = DEFAULT_API_BASE_URL;
++      try { base = (await AsyncStorage.getItem(STORAGE_KEYS.API_BASE_URL)) || DEFAULT_API_BASE_URL; } catch (e) { /* default */ }
++      await turnOffStatusUpdates(base);
++      dismissNotification(id);
++      return true;
++    };
++    if (Platform.OS !== "web") {
++      // App opened from the button while it was closed.
++      Notifications.getLastNotificationResponseAsync().then((r) => r && handleOff(r)).catch(() => {});
++    }
++    // Ola / Uber / Rapido buttons on the "book your ride" reminder.
++    const handleRide = (response) => {
++      const action = response?.actionIdentifier || "";
++      if (!action.startsWith("ride_")) return;
++      const id = response?.notification?.request?.identifier;
++      if (id && handled.has(id)) return;
++      if (id) handled.add(id);
++      const data = response?.notification?.request?.content?.data || {};
++      openRide(action.slice(5), data.stop);
++      dismissNotification(id);
++    };
++    if (Platform.OS !== "web") {
++      Notifications.getLastNotificationResponseAsync().then((r) => r && handleRide(r)).catch(() => {});
++    }
+     const unsubscribe = addNotificationResponseListener((response) => {
++      handleOff(response);
++      handleRide(response);
+       const data = response?.notification?.request?.content?.data;
+       if (data?.type === "delay_alert" || data?.type === "station_reached" || data?.type === "running_status") {
+         console.log("[push] notification tapped:", data);
+diff --git a/mobile-app/public/firebase-messaging-sw.js b/mobile-app/public/firebase-messaging-sw.js
+index 8264309..37f368a 100644
+--- a/mobile-app/public/firebase-messaging-sw.js
++++ b/mobile-app/public/firebase-messaging-sw.js
+@@ -139,6 +139,32 @@ self.addEventListener("fetch", function (event) {
+ 
+ self.addEventListener("notificationclick", (event) => {
+   event.notification.close();
++  // "Turn off updates" on the live-status notification: switch the
++  // periodic status updates Off on the server for this device, tell an
++  // open app page, and leave a flag for a closed one. No page is opened.
++  if (event.action === "status_off") {
++    var nd = event.notification.data || {};
++    var d = (nd.FCM_MSG && nd.FCM_MSG.data) || nd.data || nd;
++    var token = d && d.push_token;
++    event.waitUntil(Promise.all([
++      token ? fetch("/api/push/tracking/interval", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ token: token, previous_tokens: [], interval_minutes: 0 }),
++      }).catch(function () {}) : Promise.resolve(),
++      caches.open("railway-flags").then(function (c) { return c.put("/__status_off", new Response(String(Date.now()))); }).catch(function () {}),
++      clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (list) {
++        list.forEach(function (c) { c.postMessage({ type: "status_off" }); });
++      }),
++    ]));
++    return;
++  }
++  // Ola / Uber / Rapido buttons on the "book your ride" reminder.
++  if (event.action && event.action.indexOf("ride_") === 0) {
++    var rd = event.notification.data || {};
++    var url = rd.links && rd.links[event.action.slice(5)];
++    if (url) { event.waitUntil(clients.openWindow(url)); return; }
++  }
+   event.waitUntil(clients.openWindow("/mobile-app/"));
+ });
+ 
+diff --git a/mobile-app/src/components/BookRideCard.js b/mobile-app/src/components/BookRideCard.js
+index 10217b8..2e97f16 100644
+--- a/mobile-app/src/components/BookRideCard.js
++++ b/mobile-app/src/components/BookRideCard.js
+@@ -1,7 +1,8 @@
+-import React, { useMemo, useState } from "react";
++import React, { useEffect, useMemo, useRef, useState } from "react";
+ import { View, StyleSheet, TouchableOpacity, Linking, Platform, ScrollView } from "react-native";
+ import { Ionicons } from "@expo/vector-icons";
+ import { Text } from "../i18n/Localized";
++import { scheduleLocalReminder, cancelLocalReminder, ensureLocalNotificationPermission } from "../services/pushNotifications";
+ 
+ /**
+  * "Book a ride" on Live Tracking: pick Ola, Uber or Rapido and we open that
+@@ -24,6 +25,22 @@ const PROVIDERS = [
+ const titleCase = (s) => String(s || "").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+ const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+ 
++const LEADS = [15, 30, 45];
++
++/** Minutes from now until the train reaches `s` (live minutes_away, else its ETA clock time). */
++function minutesUntil(s) {
++  if (s?.minutes_away != null && Number.isFinite(Number(s.minutes_away))) return Number(s.minutes_away);
++  const eta = stopEta(s);
++  const m = eta && /^(\d{1,2}):(\d{2})$/.exec(eta);
++  if (!m) return null;
++  const now = new Date();
++  const t = new Date(now);
++  t.setHours(Number(m[1]), Number(m[2]), 0, 0);
++  let diff = (t - now) / 60000;
++  if (diff < -360) diff += 1440; // past midnight on an overnight run
++  return Math.round(diff);
++}
++
+ function stopEta(s) {
+   return hhmm(s?.predicted_eta || s?.arrival?.expected || s?.arrival?.scheduled);
+ }
+@@ -74,8 +91,12 @@ export async function openRide(provider, stop) {
+  * arrival, predicted_eta}); dest: the "Dest" station code the rider typed
+  * (optional); preferredCodes: stations with an armed alert bell.
+  */
+-export default function BookRideCard({ timeline, dest, preferredCodes }) {
++export default function BookRideCard({ timeline, dest, preferredCodes, trainNumber }) {
+   const [open, setOpen] = useState(false);
++  const [remindOn, setRemindOn] = useState(false);
++  const [lead, setLead] = useState(30);
++  const [remindNote, setRemindNote] = useState(null);
++  const reminderRef = useRef({ id: null, fireAt: null, key: null });
+   const [picked, setPicked] = useState(null);
+   const [chooseStop, setChooseStop] = useState(false);
+   const [stopCode, setStopCode] = useState(null);
+@@ -97,12 +118,63 @@ export default function BookRideCard({ timeline, dest, preferredCodes }) {
+     return codes[codes.length - 1] || null;
+   }, [halts, dest, preferredCodes]);
+ 
+-  if (!halts.length) return null;
+   const code = stopCode && halts.some((s) => String(s.code).toUpperCase() === stopCode) ? stopCode : defaultCode;
+-  const stop = halts.find((s) => String(s.code).toUpperCase() === code) || halts[halts.length - 1];
++  const stop = halts.find((s) => String(s.code).toUpperCase() === code) || halts[halts.length - 1] || null;
+   const eta = stopEta(stop);
+-  const stationLabel = titleCase(stop.name || stop.code);
++  const stationLabel = stop ? titleCase(stop.name || stop.code) : "";
+   const chosen = PROVIDERS.find((p) => p.key === picked);
++  const minsAway = stop ? minutesUntil(stop) : null;
++
++  // "Remind me to book a ride": one notification `lead` min before the
++  // train reaches the chosen station, with Ola / Uber / Rapido buttons.
++  // Re-planned as the live ETA moves (only when it shifts by 2+ min).
++  useEffect(() => {
++    const r = reminderRef.current;
++    const cancel = () => { if (r.id) cancelLocalReminder(r.id); r.id = null; r.fireAt = null; r.key = null; };
++    if (!remindOn || !stop || minsAway == null) { cancel(); setRemindNote(null); return; }
++    const inSec = (minsAway - lead) * 60;
++    if (inSec <= 30) {
++      cancel();
++      setRemindNote(minsAway > 0 ? `${stationLabel} is only ${minsAway} min away — book your ride now.` : null);
++      return;
++    }
++    const fireAt = Date.now() + inSec * 1000;
++    const key = `${stop.code}|${lead}`;
++    if (r.id && r.key === key && Math.abs(r.fireAt - fireAt) < 2 * 60 * 1000) return;
++    cancel();
++    const links = Object.fromEntries(PROVIDERS.map((p) => [p.key, rideLinks(p.key, stop).web]));
++    const whenText = new Date(fireAt).toTimeString().slice(0, 5);
++    setRemindNote(`We'll remind you at ${whenText}, ${lead} min before ${stationLabel}.`);
++    scheduleLocalReminder(
++      `Book your ride — ${stationLabel} in ~${lead} min`,
++      `${trainNumber ? `${trainNumber} ` : ""}reaches ${stationLabel}${eta ? ` at about ${eta}` : ""}. Pick Ola, Uber or Rapido to have a ride waiting at the exit.`,
++      inSec,
++      {
++        categoryIdentifier: "ride_book",
++        data: { type: "ride_reminder", stop: { code: stop.code, name: stop.name, lat: stop.lat, lng: stop.lng }, links },
++        webActions: [{ action: "ride_uber", title: "Uber" }, { action: "ride_ola", title: "Ola" }],
++      },
++    ).then((id) => { r.id = id; r.fireAt = fireAt; r.key = key; });
++  }, [remindOn, lead, stop?.code, minsAway]); // eslint-disable-line react-hooks/exhaustive-deps
++
++  // Stop reminders when the card goes away (tracking stopped / trip over).
++  useEffect(() => () => { const r = reminderRef.current; if (r.id) cancelLocalReminder(r.id); }, []);
++
++  if (!halts.length || !stop) return null;
++
++  const stopChips = (
++    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.stopChips}>
++      {halts.map((s) => {
++        const c = String(s.code).toUpperCase();
++        const on = c === code;
++        return (
++          <TouchableOpacity key={c} onPress={() => { setStopCode(c); setChooseStop(false); }} style={[styles.stopChip, on && styles.stopChipOn]}>
++            <Text noTranslate style={[styles.stopChipText, on && { color: "#fff" }]}>{titleCase(s.name || c)}</Text>
++          </TouchableOpacity>
++        );
++      })}
++    </ScrollView>
++  );
+ 
+   return (
+     <View style={styles.card}>
+@@ -111,6 +183,41 @@ export default function BookRideCard({ timeline, dest, preferredCodes }) {
+         {" "}Get a ride waiting at the exit.
+       </Text>
+ 
++      <View style={styles.remind}>
++        <TouchableOpacity
++          style={styles.remindRow}
++          activeOpacity={0.8}
++          onPress={() => { if (!remindOn) ensureLocalNotificationPermission(); setRemindOn((v) => !v); }}
++          accessibilityState={{ checked: remindOn }}
++        >
++          <Ionicons name={remindOn ? "notifications" : "notifications-outline"} size={18} color={remindOn ? "#E4570F" : "#6B7280"} />
++          <Text style={styles.remindText}>Remind me to book a ride</Text>
++          <View style={[styles.switch, remindOn && styles.switchOn]}>
++            <View style={[styles.knob, remindOn && styles.knobOn]} />
++          </View>
++        </TouchableOpacity>
++        {remindOn ? (
++          <>
++            <TouchableOpacity style={styles.pickupRow} onPress={() => setChooseStop((v) => !v)} activeOpacity={0.7}>
++              <Ionicons name="location" size={15} color="#E4570F" />
++              <Text style={styles.pickupText} numberOfLines={1}>Before {stationLabel} ({stop.code}){eta ? ` · ${eta}` : ""}</Text>
++              <Text style={styles.changeLink}>{chooseStop ? "Done" : "Change"}</Text>
++            </TouchableOpacity>
++            {chooseStop ? stopChips : null}
++            <View style={styles.leadRow}>
++              <Text style={styles.leadLabel}>Notify</Text>
++              {LEADS.map((m) => (
++                <TouchableOpacity key={m} onPress={() => setLead(m)} style={[styles.leadChip, lead === m && styles.leadChipOn]}>
++                  <Text style={[styles.leadText, lead === m && { color: "#fff" }]}>{m} min</Text>
++                </TouchableOpacity>
++              ))}
++              <Text style={styles.leadLabel}>before</Text>
++            </View>
++            {remindNote ? <Text style={styles.note}>{remindNote}</Text> : null}
++          </>
++        ) : null}
++      </View>
++
+       {open ? (
+         <View style={styles.panel}>
+           <TouchableOpacity style={styles.pickupRow} onPress={() => setChooseStop((v) => !v)} activeOpacity={0.7}>
+@@ -120,19 +227,7 @@ export default function BookRideCard({ timeline, dest, preferredCodes }) {
+             </Text>
+             <Text style={styles.changeLink}>{chooseStop ? "Done" : "Change"}</Text>
+           </TouchableOpacity>
+-          {chooseStop ? (
+-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.stopChips}>
+-              {halts.map((s) => {
+-                const c = String(s.code).toUpperCase();
+-                const on = c === code;
+-                return (
+-                  <TouchableOpacity key={c} onPress={() => { setStopCode(c); setChooseStop(false); }} style={[styles.stopChip, on && styles.stopChipOn]}>
+-                    <Text noTranslate style={[styles.stopChipText, on && { color: "#fff" }]}>{titleCase(s.name || c)}</Text>
+-                  </TouchableOpacity>
+-                );
+-              })}
+-            </ScrollView>
+-          ) : null}
++          {chooseStop && !remindOn ? stopChips : null}
+ 
+           {PROVIDERS.map((p) => {
+             const on = picked === p.key;
+@@ -193,6 +288,18 @@ const styles = StyleSheet.create({
+     shadowColor: "#0F1B33", shadowOpacity: 0.06, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 2,
+   },
+   lead: { fontSize: 13.5, color: "#374151", lineHeight: 19 },
++  remind: { marginTop: 12, borderRadius: 16, backgroundColor: "#FFF7ED", padding: 10, gap: 8 },
++  remindRow: { flexDirection: "row", alignItems: "center", gap: 8 },
++  remindText: { flex: 1, fontSize: 14, fontWeight: "800", color: "#111827" },
++  switch: { width: 40, height: 24, borderRadius: 12, backgroundColor: "#D1D5DB", padding: 2, justifyContent: "center" },
++  switchOn: { backgroundColor: "#E4570F" },
++  knob: { width: 20, height: 20, borderRadius: 10, backgroundColor: "#fff" },
++  knobOn: { alignSelf: "flex-end" },
++  leadRow: { flexDirection: "row", gap: 6, flexWrap: "wrap", alignItems: "center" },
++  leadLabel: { fontSize: 12.5, color: "#6B7280", marginRight: 2 },
++  leadChip: { paddingHorizontal: 11, paddingVertical: 7, borderRadius: 999, backgroundColor: "#fff", borderWidth: 1, borderColor: "#F3D5BE" },
++  leadChipOn: { backgroundColor: "#E4570F", borderColor: "#E4570F" },
++  leadText: { fontSize: 12.5, fontWeight: "700", color: "#9A3412" },
+   panel: { marginTop: 12, borderRadius: 16, backgroundColor: "#F7F8FA", padding: 10, gap: 8 },
+   pickupRow: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 2, paddingBottom: 2 },
+   pickupText: { flex: 1, fontSize: 12.5, color: "#4B5563" },
+diff --git a/mobile-app/src/screens/LiveTrackingScreen.js b/mobile-app/src/screens/LiveTrackingScreen.js
+index f287396..727e5a6 100644
+--- a/mobile-app/src/screens/LiveTrackingScreen.js
++++ b/mobile-app/src/screens/LiveTrackingScreen.js
+@@ -32,6 +32,7 @@ import { useT } from "../context/LanguageContext";
+ import {
+   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
+   loadStatusEvery, saveStatusEvery, applyNotifyLanguage, applyStatusEveryOnServer,
++  onStatusEveryChanged, turnOffStatusUpdates, consumeWebStatusOffFlag,
+ } from "../services/backgroundTracking";
+ 
+ // FEATURE: Delay Alert / Smart Alarm, moved onto Live Tracking itself
+@@ -862,6 +863,25 @@ export default function LiveTrackingScreen({ navigation }) {
+   useEffect(() => {
+     loadStatusEvery().then((n) => { statusEveryRef.current = n; setStatusEvery(n); });
+   }, []);
++  // "Turn off updates" tapped on a live-status notification: show Off here
++  // too. Web: the service worker posts a message (page open) or leaves a
++  // flag (page closed) that is picked up when the app is next shown.
++  useEffect(() => {
++    const setOff = () => { statusEveryRef.current = 0; setStatusEvery(0); stopSpeaking(); };
++    const unsub = onStatusEveryChanged(setOff);
++    if (!IS_WEB) return unsub;
++    const check = () => consumeWebStatusOffFlag().then((hit) => { if (hit) turnOffStatusUpdates(apiBaseUrl, { serverDone: true }); });
++    check();
++    const onMsg = (e) => { if (e?.data?.type === "status_off") check(); };
++    const onVis = () => { if (document.visibilityState === "visible") check(); };
++    try { navigator.serviceWorker?.addEventListener("message", onMsg); } catch (e) { /* ignore */ }
++    document.addEventListener("visibilitychange", onVis);
++    return () => {
++      unsub();
++      try { navigator.serviceWorker?.removeEventListener("message", onMsg); } catch (e) { /* ignore */ }
++      document.removeEventListener("visibilitychange", onVis);
++    };
++  }, [apiBaseUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+   const datePickForHeaderRef = useRef(false);
+ 
+   // FEATURE: Smart Alarm — same station-arrival wake-up as
+@@ -2352,7 +2372,7 @@ export default function LiveTrackingScreen({ navigation }) {
+           {/* Book a ride home from the station you get off at (Ola / Uber /
+               Rapido, pickup pre-set) — hidden once the journey is over. */}
+           {bellsEnabledForPayload && !ltJourneyLikelyComplete && timeline.length ? (
+-            <BookRideCard timeline={timeline} dest={dest} preferredCodes={Object.keys(stationWatches)} />
++            <BookRideCard timeline={timeline} dest={dest} preferredCodes={Object.keys(stationWatches)} trainNumber={activeTrack.trainNumber} />
+           ) : null}
+         </>
+       ) : null}
+diff --git a/mobile-app/src/services/backgroundTracking.js b/mobile-app/src/services/backgroundTracking.js
+index 0e79619..90bb130 100644
+--- a/mobile-app/src/services/backgroundTracking.js
++++ b/mobile-app/src/services/backgroundTracking.js
+@@ -193,3 +193,39 @@ export async function applyNotifyLanguage(apiBaseUrl, code) {
+   }
+   return lang;
+ }
++
++// ---------------------------------------------------------------------------
++// FEATURE: "Turn off updates" button on the live-status notification.
++// Tapping it (native: App.js response listener; web: the service worker)
++// switches "notify me every N min" to Off for every tracked train — the
++// same as the Off chip on Live Tracking. Screens that show the setting
++// subscribe here so they flip to Off straight away.
++// ---------------------------------------------------------------------------
++const statusEveryListeners = new Set();
++
++export function onStatusEveryChanged(fn) {
++  statusEveryListeners.add(fn);
++  return () => statusEveryListeners.delete(fn);
++}
++
++export async function turnOffStatusUpdates(apiBaseUrl, { serverDone = false } = {}) {
++  await saveStatusEvery(0);
++  statusEveryListeners.forEach((fn) => { try { fn(0); } catch (e) { /* ignore */ } });
++  if (!serverDone && apiBaseUrl) await applyStatusEveryOnServer(apiBaseUrl, 0);
++}
++
++// Web: the service worker can't write the page's storage, so it leaves a
++// flag in Cache Storage when "Turn off updates" is tapped with the app
++// closed. Returns true (and clears it) when one is waiting.
++export async function consumeWebStatusOffFlag() {
++  try {
++    if (typeof caches === "undefined") return false;
++    const cache = await caches.open("railway-flags");
++    const hit = await cache.match("/__status_off");
++    if (!hit) return false;
++    await cache.delete("/__status_off");
++    return true;
++  } catch (e) {
++    return false;
++  }
++}
+diff --git a/mobile-app/src/services/pushNotifications.js b/mobile-app/src/services/pushNotifications.js
+index e850fa0..e4a8f54 100644
+--- a/mobile-app/src/services/pushNotifications.js
++++ b/mobile-app/src/services/pushNotifications.js
+@@ -468,3 +468,77 @@ export async function ensureLocalNotificationPermission() {
+     return false;
+   }
+ }
++
++/**
++ * Native: action buttons shown on train notifications. "train_status" is
++ * the live-status notification (backend send_running_status) — its "Turn
++ * off updates" button is handled in App.js. Call once at app start.
++ */
++export const STATUS_OFF_ACTION = "status_off";
++export async function registerNotificationActions() {
++  if (Platform.OS === "web") return;
++  try {
++    await Notifications.setNotificationCategoryAsync("train_status", [
++      { identifier: STATUS_OFF_ACTION, buttonTitle: "Turn off updates", options: { opensAppToForeground: true } },
++    ]);
++    await Notifications.setNotificationCategoryAsync("ride_book", [
++      { identifier: "ride_ola", buttonTitle: "Ola", options: { opensAppToForeground: true } },
++      { identifier: "ride_uber", buttonTitle: "Uber", options: { opensAppToForeground: true } },
++      { identifier: "ride_rapido", buttonTitle: "Rapido", options: { opensAppToForeground: true } },
++    ]);
++  } catch (e) { /* older OS / Expo Go — the notification just has no button */ }
++}
++
++/** Dismiss one delivered notification (e.g. after its Off button). */
++export async function dismissNotification(identifier) {
++  if (Platform.OS === "web" || !identifier) return;
++  try { await Notifications.dismissNotificationAsync(identifier); } catch (e) { /* ignore */ }
++}
++
++/**
++ * A gentle reminder notification (no alarm tone), optionally with action
++ * buttons: native = a scheduled OS notification with `categoryIdentifier`
++ * (fires even if the app is closed); web = shown by the service worker
++ * after a timer while the page is open, with `webActions`.
++ */
++const _webReminderTimers = new Map();
++export async function scheduleLocalReminder(title, body, fireInSeconds, { data, categoryIdentifier, webActions } = {}) {
++  const secs = Math.max(1, Math.round(fireInSeconds));
++  if (Platform.OS === "web") {
++    const id = `web-reminder-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
++    const timer = setTimeout(async () => {
++      _webReminderTimers.delete(id);
++      try {
++        if (typeof Notification !== "undefined" && Notification.permission === "granted") {
++          const reg = navigator.serviceWorker && navigator.serviceWorker.getRegistration
++            ? await navigator.serviceWorker.getRegistration("/mobile-app/") : null;
++          if (reg) { await reg.showNotification(title, { body, data: data || {}, actions: webActions || [], requireInteraction: true, tag: id }); return; }
++          new Notification(title, { body });
++          return;
++        }
++      } catch (e) { /* fall through */ }
++      try { window.alert(`${title}\n\n${body}`); } catch (e) { /* ignore */ }
++    }, secs * 1000);
++    _webReminderTimers.set(id, timer);
++    return id;
++  }
++  if (IS_EXPO_GO && Platform.OS === "android") return null;
++  try {
++    return await Notifications.scheduleNotificationAsync({
++      content: { title, body, data: data || {}, ...(categoryIdentifier ? { categoryIdentifier } : {}) },
++      trigger: { seconds: secs },
++    });
++  } catch (e) {
++    return null;
++  }
++}
++
++export async function cancelLocalReminder(identifier) {
++  if (!identifier) return;
++  if (String(identifier).startsWith("web-reminder-")) {
++    clearTimeout(_webReminderTimers.get(identifier));
++    _webReminderTimers.delete(identifier);
++    return;
++  }
++  try { await Notifications.cancelScheduledNotificationAsync(identifier); } catch (e) { /* already fired */ }
++}

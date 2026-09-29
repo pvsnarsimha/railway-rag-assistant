@@ -193,3 +193,39 @@ export async function applyNotifyLanguage(apiBaseUrl, code) {
   }
   return lang;
 }
+
+// ---------------------------------------------------------------------------
+// FEATURE: "Turn off updates" button on the live-status notification.
+// Tapping it (native: App.js response listener; web: the service worker)
+// switches "notify me every N min" to Off for every tracked train — the
+// same as the Off chip on Live Tracking. Screens that show the setting
+// subscribe here so they flip to Off straight away.
+// ---------------------------------------------------------------------------
+const statusEveryListeners = new Set();
+
+export function onStatusEveryChanged(fn) {
+  statusEveryListeners.add(fn);
+  return () => statusEveryListeners.delete(fn);
+}
+
+export async function turnOffStatusUpdates(apiBaseUrl, { serverDone = false } = {}) {
+  await saveStatusEvery(0);
+  statusEveryListeners.forEach((fn) => { try { fn(0); } catch (e) { /* ignore */ } });
+  if (!serverDone && apiBaseUrl) await applyStatusEveryOnServer(apiBaseUrl, 0);
+}
+
+// Web: the service worker can't write the page's storage, so it leaves a
+// flag in Cache Storage when "Turn off updates" is tapped with the app
+// closed. Returns true (and clears it) when one is waiting.
+export async function consumeWebStatusOffFlag() {
+  try {
+    if (typeof caches === "undefined") return false;
+    const cache = await caches.open("railway-flags");
+    const hit = await cache.match("/__status_off");
+    if (!hit) return false;
+    await cache.delete("/__status_off");
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
