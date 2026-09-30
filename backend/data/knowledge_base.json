@@ -565,5 +565,342 @@
       "average_speed",
       "running_status"
     ]
+  },
+  {
+    "id": "gk-ir-overview",
+    "category": "Railway Basics",
+    "text": "Indian Railways is the state-owned railway of India, run by the Ministry of Railways with the Railway Board as its policy body and headquarters at Rail Bhavan, New Delhi. It has about 68,000 route km and about 7,000+ stations, employs roughly 1.2 to 1.3 million people, and is among the four largest rail networks in the world with the United States, China and Russia. Most of the network is broad gauge and largely electrified at 25 kV AC.",
+    "entities": [
+      "indian railways",
+      "ministry of railways",
+      "railway board",
+      "network"
+    ]
+  },
+  {
+    "id": "gk-history-first-trains",
+    "category": "Railway History",
+    "text": "The first train run in India was on the Red Hill Railway near Madras (Chennai) in 1837, a goods line carrying granite. Short work-site lines followed in 1845 (Godavari Dam) and 1851 (Roorkee, Solani aqueduct). The first public passenger train ran on 16 April 1853 from Bori Bunder (Bombay) to Thane, about 34 km, on the Great Indian Peninsula Railway. Howrah to Hooghly opened in 1854 and Royapuram to Wallajah Road in Madras in 1856.",
+    "entities": [
+      "history",
+      "first train",
+      "1853",
+      "bombay",
+      "thane",
+      "red hill"
+    ]
+  },
+  {
+    "id": "gk-history-company-era",
+    "category": "Railway History",
+    "text": "From the 1850s private companies such as the Great Indian Peninsula Railway, East Indian Railway and Madras Railway built the main trunk lines under a government guarantee, following Lord Dalhousie's 1853 Railway Minute. Bombay and Calcutta were linked in 1870. The Railway Board was created in 1905, a separate Railway Budget began in 1924, and the first electric train ran in Bombay in 1925 on 1,500 V DC.",
+    "entities": [
+      "history",
+      "dalhousie",
+      "railway board",
+      "company railways",
+      "electric",
+      "1925"
+    ]
+  },
+  {
+    "id": "gk-history-independence",
+    "category": "Railway History",
+    "text": "At Independence and Partition in 1947 a large part of the railway network went to Pakistan and the Indian side was reorganised. Company and princely-state lines were merged and nationalised in the early 1950s, and the first regional zones were formed: Southern, Central and Western in 1951, Northern, Eastern and North Eastern in 1952, South Eastern in 1955 and Northeast Frontier in 1958.",
+    "entities": [
+      "history",
+      "partition",
+      "nationalisation",
+      "zones",
+      "1951"
+    ]
+  },
+  {
+    "id": "gk-history-modern",
+    "category": "Railway History",
+    "text": "Milestones since 1960: 25 kV AC electrification from 1957, diesel replacing steam, Rajdhani Express (1969), Palace on Wheels (1982), Kolkata Metro (1984, India's first metro), computerised reservation (1986), Shatabdi Express (1988), Project Unigauge (from 1992), Konkan Railway (1998), IRCTC (1999), six new zones (2003), Garib Rath (2006), Duronto (2009), Gatimaan (2016), Railway Budget merged into the Union Budget (2017) and Vande Bharat Express (2019).",
+    "entities": [
+      "history",
+      "milestones",
+      "rajdhani",
+      "shatabdi",
+      "vande bharat",
+      "irctc",
+      "konkan"
+    ]
+  },
+  {
+    "id": "gk-zones",
+    "category": "Zones & Divisions",
+    "text": "Indian Railways has 17 operational zones plus an announced 18th. Zones and headquarters: Central (Mumbai CSMT), Eastern (Kolkata), East Central (Hajipur), East Coast (Bhubaneswar), Northern (New Delhi), North Central (Prayagraj), North Eastern (Gorakhpur), Northeast Frontier (Guwahati), North Western (Jaipur), Southern (Chennai), South Central (Secunderabad), South Eastern (Kolkata), South East Central (Bilaspur), South Western (Hubballi), Western (Mumbai Churchgate), West Central (Jabalpur), Metro Railway Kolkata, and the announced South Coast (Visakhapatnam). Each zone is split into divisions.",
+    "entities": [
+      "zones",
+      "headquarters",
+      "division",
+      "central railway",
+      "western railway",
+      "southern railway"
+    ]
+  },
+  {
+    "id": "gk-gauges",
+    "category": "Railway Basics",
+    "text": "Gauge is the distance between the rails. Broad gauge is 1,676 mm (5 ft 6 in) and carries the main network. Metre gauge is 1,000 mm and was mostly converted under Project Unigauge. Narrow gauge is 762 mm (2 ft 6 in) or 610 mm (2 ft), kept on heritage hill lines such as Darjeeling, Matheran and Kalka to Shimla. Standard gauge (1,435 mm) is used by some metros.",
+    "entities": [
+      "gauge",
+      "broad gauge",
+      "metre gauge",
+      "narrow gauge",
+      "unigauge"
+    ]
+  },
+  {
+    "id": "gk-premium-trains",
+    "category": "Train Types",
+    "text": "Premium train categories: Vande Bharat (2019, self-propelled chair car, up to 160 km/h), Rajdhani (1969, AC-only links to New Delhi), Shatabdi (1988, daytime AC chair car between nearby cities), Duronto (2009, few or no stops), Gatimaan (2016, Delhi-Agra at 160 km/h), Tejas (2017), Humsafar (all 3-tier AC), Uday (double-decker AC) and Garib Rath (low-fare AC).",
+    "entities": [
+      "vande bharat",
+      "rajdhani",
+      "shatabdi",
+      "duronto",
+      "gatimaan",
+      "tejas",
+      "humsafar",
+      "uday",
+      "garib rath"
+    ]
+  },
+  {
+    "id": "gk-regular-trains",
+    "category": "Train Types",
+    "text": "Regular categories after the premium ones: Superfast (average speed about 55 km/h or more, with a supplementary charge), Mail/Express (long-distance, limited stops), Intercity (day trains between cities), Jan Shatabdi (non-AC or economy Shatabdi), Antyodaya and Amrit Bharat (non-AC, low-cost long-distance), Fast Passenger and Passenger (stop at most stations, lowest fares), MEMU and DEMU (multiple-unit regional trains) and EMU suburban locals in Mumbai, Kolkata, Chennai and Delhi.",
+    "entities": [
+      "superfast",
+      "mail",
+      "express",
+      "intercity",
+      "passenger",
+      "memu",
+      "demu",
+      "emu",
+      "local",
+      "amrit bharat",
+      "antyodaya"
+    ]
+  },
+  {
+    "id": "gk-luxury-trains",
+    "category": "Train Types",
+    "text": "Luxury and tourist trains include Palace on Wheels (1982), Royal Rajasthan on Wheels (2009), Deccan Odyssey (2004), Golden Chariot (2008), Maharajas' Express (2010) and Bharat Gaurav theme trains (2021). Lifeline Express (1991) is a hospital train. Fairy Queen (built 1855) is the oldest working steam locomotive. Cross-border services have included Samjhauta, Thar, Maitree and Bandhan Express.",
+    "entities": [
+      "luxury",
+      "palace on wheels",
+      "maharajas express",
+      "deccan odyssey",
+      "golden chariot",
+      "lifeline express",
+      "fairy queen"
+    ]
+  },
+  {
+    "id": "gk-train-numbering-digits",
+    "category": "Train Types",
+    "text": "Five-digit train numbers: first digit 0 special trains, 1 and 2 long-distance Mail/Express and Superfast including most premium trains, 3 Kolkata suburban, 4 other metro suburban (Delhi, Chennai, Secunderabad, Bengaluru), 5 passenger trains, 6 MEMU, 7 DEMU, 8 limited-run specials, 9 Mumbai suburban. Example: 12951 and 12952 are the Mumbai-New Delhi Rajdhani pair. The rule is a guide, as sub-ranges vary.",
+    "entities": [
+      "train number",
+      "numbering",
+      "first digit",
+      "12951",
+      "20833"
+    ]
+  },
+  {
+    "id": "gk-coach-classes",
+    "category": "Classes & Coaches",
+    "text": "Class codes: 1A AC First Class (cabins for 2 or 4), 2A AC 2-tier, 3A AC 3-tier, 3E AC 3-tier economy, SL Sleeper (non-AC), CC AC Chair Car, EC Executive Chair Car, VC Vistadome, EA Anubhuti, 2S Second Sitting, FC First Class non-AC and GEN unreserved. Berths: lower, middle, upper, side lower and side upper.",
+    "entities": [
+      "1a",
+      "2a",
+      "3a",
+      "3e",
+      "sl",
+      "cc",
+      "ec",
+      "2s",
+      "class",
+      "coach",
+      "berth"
+    ]
+  },
+  {
+    "id": "gk-quota-codes",
+    "category": "Quotas",
+    "text": "Reservation quota codes: GN general, TQ Tatkal, PT Premium Tatkal, LD ladies, SS senior citizen or lower berth, HP divyangjan, DF defence, FT foreign tourist, PH Parliament House, HO head quarters or high official, PQ pooled quota, RS roadside and RL remote location. Booking status: CNF confirmed, RAC reservation against cancellation, WL waitlist and CAN cancelled.",
+    "entities": [
+      "quota",
+      "gn",
+      "tq",
+      "pt",
+      "ld",
+      "ss",
+      "hp",
+      "df",
+      "ft",
+      "waitlist"
+    ]
+  },
+  {
+    "id": "gk-heritage-railways",
+    "category": "Heritage & Metros",
+    "text": "India has four UNESCO World Heritage railway sites: Darjeeling Himalayan Railway (1881, 2 ft gauge, listed 1999), Nilgiri Mountain Railway (1908, rack railway, 2005), Kalka-Shimla Railway (1903, 2008) and Chhatrapati Shivaji Maharaj Terminus in Mumbai (1888, 2004). Others include Matheran Hill Railway (1907) and Kangra Valley Railway (1929). Kolkata Metro (1984) was India's first metro.",
+    "entities": [
+      "heritage",
+      "unesco",
+      "darjeeling",
+      "nilgiri",
+      "matheran",
+      "kalka shimla",
+      "cstm",
+      "toy train"
+    ]
+  },
+  {
+    "id": "gk-records",
+    "category": "Records",
+    "text": "Railway records: longest run by distance is the Vivek Express (Dibrugarh to Kanyakumari, about 4,200 km); Gorakhpur has the longest platform (about 1,366 m); Bogibeel in Assam is the longest rail-road bridge (about 4.9 km, 2018); the Chenab Bridge in Jammu and Kashmir is the highest rail arch bridge (about 359 m, 2025); Royapuram (1856) is the oldest surviving station; Sri Venkatanarasimharajuvaripeta has the longest station name and Ib in Odisha the shortest.",
+    "entities": [
+      "record",
+      "longest",
+      "highest",
+      "fastest",
+      "platform",
+      "bridge",
+      "vivek express",
+      "chenab",
+      "gorakhpur"
+    ]
+  },
+  {
+    "id": "gk-electrification-traction",
+    "category": "Railway Basics",
+    "text": "Traction: steam was retired from regular service in the 1990s. Diesel locomotives include WDM, WDP and WDG classes; electric ones include WAP (passenger) and WAG (goods). The first electric train ran in Bombay in 1925 on 1,500 V DC; 25 kV AC electrification began in 1957 and now covers most of the broad-gauge network. Vande Bharat and MEMU trains are self-propelled multiple units with no separate engine.",
+    "entities": [
+      "electrification",
+      "locomotive",
+      "diesel",
+      "electric",
+      "steam",
+      "wap",
+      "wdm",
+      "25 kv"
+    ]
+  },
+  {
+    "id": "gk-safety-kavach",
+    "category": "Safety & Security",
+    "text": "Kavach is India's indigenous automatic train-protection system, deployed on selected routes. It alerts the loco pilot and can apply brakes to prevent collisions and signal overruns. Other safety measures include interlocking, track renewal, removal of level crossings on busy routes and Commissioner of Railway Safety inquiries after accidents.",
+    "entities": [
+      "kavach",
+      "safety",
+      "collision",
+      "signal",
+      "interlocking",
+      "crs"
+    ]
+  },
+  {
+    "id": "gk-irctc",
+    "category": "Booking Process",
+    "text": "IRCTC (Indian Railway Catering and Tourism Corporation) was founded in 1999 and handles online ticketing (from 2002), catering, tourism trains and packages such as Bharat Gaurav. Tickets can be booked on the IRCTC website and app, through the UTS app for unreserved tickets and at counters.",
+    "entities": [
+      "irctc",
+      "online booking",
+      "uts",
+      "tourism",
+      "catering"
+    ]
+  },
+  {
+    "id": "gk-glossary-a-f",
+    "category": "Glossary",
+    "text": "Railway glossary A to F: berth (a bed in a coach), bogie (frame holding wheels), broad gauge (1,676 mm), chart (list of confirmed passengers prepared before departure), coach (one carriage), concession (fare discount), division (unit within a zone), DMU/EMU/MEMU (multiple-unit trains), dynamic or flexi fare (fare that rises with demand), e-ticket (online ticket), gauge (distance between rails).",
+    "entities": [
+      "glossary",
+      "berth",
+      "bogie",
+      "chart",
+      "coach",
+      "division",
+      "emu",
+      "gauge",
+      "flexi fare"
+    ]
+  },
+  {
+    "id": "gk-glossary-g-m",
+    "category": "Glossary",
+    "text": "Railway glossary G to M: halt (scheduled stop), IRCTC (catering and ticketing corporation), junction (station where routes meet), Kavach (train-protection system), loco (engine: steam, diesel or electric), Mail/Express (limited-stop long-distance trains), NTES (National Train Enquiry System for running status).",
+    "entities": [
+      "glossary",
+      "halt",
+      "junction",
+      "loco",
+      "mail express",
+      "ntes"
+    ]
+  },
+  {
+    "id": "gk-glossary-n-s",
+    "category": "Glossary",
+    "text": "Railway glossary N to S: PNR (10-digit Passenger Name Record), pantry car (coach that prepares meals), platform (raised area where trains stop), quota (reserved share of seats), RAC (reservation against cancellation), rake (set of coaches running together), signal and interlocking (systems that prevent collisions), superfast (faster category with a supplementary charge).",
+    "entities": [
+      "glossary",
+      "pnr",
+      "pantry car",
+      "platform",
+      "rake",
+      "signal",
+      "superfast"
+    ]
+  },
+  {
+    "id": "gk-glossary-t-z",
+    "category": "Glossary",
+    "text": "Railway glossary T to Z: Tatkal (last-minute booking that opens one day before travel), terminus (station where a line ends), Up and Down (directions of running, Up usually towards the hub), Vande Bharat (fast self-propelled train family from 2019), waitlist (queue for a seat on a full train), yard (tracks for sorting and storing wagons), zone (top-level regional unit of Indian Railways).",
+    "entities": [
+      "glossary",
+      "tatkal",
+      "terminus",
+      "up down",
+      "waitlist",
+      "yard",
+      "zone"
+    ]
+  },
+  {
+    "id": "gk-notable-trains-a-m",
+    "category": "Notable Trains",
+    "text": "Notable trains A to M: Amrit Bharat (2023), Antyodaya (2017), Coromandel Express (Howrah to Chennai), Charminar Express (Hyderabad to Chennai), Deccan Queen (1930, Mumbai to Pune), Flying Ranee (Mumbai to Surat), Frontier Mail (1928, now Golden Temple Mail), Godavari Express (Visakhapatnam to Hyderabad), Himsagar Express (Kanyakumari to Jammu Tawi), Island Express, Konkan Kanya, Lifeline Express (1991), Maharajas' Express (2010), Mahanagari Express.",
+    "entities": [
+      "deccan queen",
+      "frontier mail",
+      "godavari express",
+      "coromandel",
+      "flying ranee",
+      "himsagar"
+    ]
+  },
+  {
+    "id": "gk-notable-trains-n-z",
+    "category": "Notable Trains",
+    "text": "Notable trains N to Z: Navjeevan Express, Nilgiri Express, Palace on Wheels (1982), Punjab Mail (1912), Pushpak Express, Rajdhani Express (1969), Samjhauta Express (1976), Shatabdi Express (1988), Taj Express (Delhi to Jhansi via Agra), Telangana Express, Tejas Express (2017), Thar Express (2006), Uday Express, Utkal Express, Udyan Express, Vande Bharat Express (2019), Vivek Express (2011), Yuva Express, Yeshvantpur Duronto.",
+    "entities": [
+      "punjab mail",
+      "rajdhani",
+      "taj express",
+      "telangana express",
+      "vivek express",
+      "vande bharat"
+    ]
   }
 ]
