@@ -119,7 +119,23 @@ def tool_train_schedule(train_number: str) -> dict:
             ],
         })
     except Exception as exc:
-        return _err(exc)
+        primary_error = _err(exc)
+    # RailKit failed (e.g. monthly quota used up): RailRadar carries the same timetable.
+    try:
+        import railradar_fallback
+        stops = railradar_fallback.fetch_railradar_timeline(train_number, None)
+        if stops:
+            return _clip({
+                "train_number": train_number, "source": "railradar", "total_stops": len(stops),
+                "stops": [
+                    {"code": st.code, "name": st.name, "arrives": st.arrival.scheduled,
+                     "departs": st.departure.scheduled, "distance_km": st.distance_km}
+                    for st in stops
+                ],
+            })
+    except Exception:
+        pass
+    return primary_error
 
 
 def tool_live_train_status(train_number: str, date: str = "") -> dict:

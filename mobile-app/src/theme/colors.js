@@ -15,6 +15,8 @@ export const colors = {
   bubbleUser: "#0B3D91",
   bubbleAssistant: "#FFFFFF",
   chip: "#EEF2FA",
+  userBubble: "#EDF1F7", // chat: user message pill
+  chatSurface: "#FFFFFF", // chat: page + composer background
 
   // IRCTC-style orange — used by the Trains Between Stations redesign
   // (results header, Class/Quota picker checkmarks, Tatkal accents,

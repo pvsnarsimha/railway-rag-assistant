@@ -6,18 +6,17 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  ActivityIndicator,
   ScrollView,
   Image,
+  Animated,
 } from "react-native";
 import { Text, TextInput } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { colors, spacing, radius } from "../theme/colors";
-import ChatBubble from "../components/ChatBubble";
+import ChatBubble, { AssistantAvatar } from "../components/ChatBubble";
 import MicButton from "../components/MicButton";
-import QueryToolbar from "../components/QueryToolbar";
 import { useSettings } from "../context/SettingsContext";
 import { sendChatMessage, getOfflineKnowledgeBase } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
@@ -146,6 +145,67 @@ function nextId() {
   return `m${Date.now()}_${messageIdCounter}`;
 }
 
+const SUGGESTIONS = [
+  { icon: "location-outline", title: "Where is train 12728 now?" },
+  { icon: "flash-outline", title: "When does Tatkal booking open?" },
+  { icon: "swap-horizontal-outline", title: "Trains from Hyderabad to Vijayawada tomorrow" },
+  { icon: "cash-outline", title: "What is the refund rule if my train is cancelled?" },
+];
+
+const GREETING = {
+  id: "greeting",
+  role: "assistant",
+  text:
+    "Hi! Ask me about a PNR, a train's live running status, seat/crowd predictions, or any railway policy question. You can also attach a photo of your ticket.",
+};
+
+/** Three pulsing dots inside an assistant row, shown while a reply is loading. */
+function TypingDots() {
+  const dots = useRef([0, 1, 2].map(() => new Animated.Value(0.3))).current;
+  useEffect(() => {
+    const loops = dots.map((v, i) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(i * 160),
+          Animated.timing(v, { toValue: 1, duration: 320, useNativeDriver: true }),
+          Animated.timing(v, { toValue: 0.3, duration: 320, useNativeDriver: true }),
+        ])
+      )
+    );
+    loops.forEach((l) => l.start());
+    return () => loops.forEach((l) => l.stop());
+  }, [dots]);
+  return (
+    <View style={styles.typingRow}>
+      <AssistantAvatar />
+      <View style={styles.typingDots}>
+        {dots.map((v, i) => <Animated.View key={i} style={[styles.dot, { opacity: v }]} />)}
+      </View>
+    </View>
+  );
+}
+
+/** Empty state: shown until the first message, like a new ChatGPT conversation. */
+function Hero({ onPick }) {
+  return (
+    <ScrollView contentContainerStyle={styles.hero} keyboardShouldPersistTaps="handled">
+      <View style={styles.orb}>
+        <Ionicons name="sparkles" size={34} color={colors.textInverse} />
+      </View>
+      <Text style={styles.heroTitle}>How can I help you travel today?</Text>
+      <Text style={styles.heroSub}>Live tracking · PNR · Schedules · Seats & fares · Rules</Text>
+      <View style={styles.cards}>
+        {SUGGESTIONS.map((sg) => (
+          <TouchableOpacity key={sg.title} style={styles.card} onPress={() => onPick(sg.title)} activeOpacity={0.7}>
+            <Ionicons name={sg.icon} size={18} color={colors.accent} />
+            <Text style={styles.cardText}>{sg.title}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </ScrollView>
+  );
+}
+
 export default function ChatScreen({ navigation }) {
   const { apiBaseUrl, language, setLanguage } = useSettings();
   // FEATURE: app language (🌐 chip at the top). English = the old
@@ -153,14 +213,7 @@ export default function ChatScreen({ navigation }) {
   // assistant answers in it.
   const { t, lang: appLang } = useT();
   const chatLanguage = appLang && appLang !== "en" ? languageInfo(appLang).name : language;
-  const [messages, setMessages] = useState([
-    {
-      id: "greeting",
-      role: "assistant",
-      text:
-        "Hi! Ask me about a PNR, a train's live running status, seat/crowd predictions, or any railway policy question. You can also attach a photo of your ticket.",
-    },
-  ]);
+  const [messages, setMessages] = useState([GREETING]);
   const [input, setInput] = useState("");
   const [pendingImage, setPendingImage] = useState(null); // { uri, base64, mediaType }
   const [sending, setSending] = useState(false);
@@ -188,9 +241,10 @@ export default function ChatScreen({ navigation }) {
     setPendingImage({ uri: asset.uri, base64: asset.base64, mediaType });
   }
 
-  async function handleSend() {
-    const trimmed = input.trim();
+  async function handleSend(overrideText) {
+    const trimmed = (typeof overrideText === "string" ? overrideText : input).trim();
     if (!trimmed && !pendingImage) return;
+    if (sending) return;
 
     const userMessage = {
       id: nextId(),
@@ -256,6 +310,15 @@ export default function ChatScreen({ navigation }) {
     }
   }
 
+  const isEmpty = messages.length <= 1 && !sending;
+  const canSend = !sending && (input.trim().length > 0 || !!pendingImage);
+
+  function newChat() {
+    setMessages([GREETING]);
+    setInput("");
+    setPendingImage(null);
+  }
+
   return (
     <KeyboardAvoidingView
       style={styles.flex}
@@ -287,125 +350,212 @@ export default function ChatScreen({ navigation }) {
         </View>
       ) : null}
 
-      <FlatList
-        ref={listRef}
-        data={messages}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => <ChatBubble message={item.id === "greeting" ? { ...item, text: t(item.text) } : item} />}
-        contentContainerStyle={styles.listContent}
-        onContentSizeChange={scrollToEnd}
-      />
-
-      {sending && (
-        <View style={styles.typingRow}>
-          <ActivityIndicator size="small" color={colors.primary} />
-          <Text style={styles.typingText}>{t("Thinking…")}</Text>
-        </View>
-      )}
-
-      {pendingImage && (
-        <View style={styles.previewRow}>
-          <Image source={{ uri: pendingImage.uri }} style={styles.previewImage} />
-          <Text style={styles.previewText}>{t("Ticket photo attached")}</Text>
-          <TouchableOpacity onPress={() => setPendingImage(null)}>
-            <Ionicons name="close-circle" size={20} color={colors.textMuted} />
+      <View style={styles.topBar}>
+        <Text style={styles.topTitle}>Railway AI</Text>
+        {!isEmpty && (
+          <TouchableOpacity onPress={newChat} style={styles.newChatBtn} accessibilityLabel="New chat" hitSlop={8}>
+            <Ionicons name="create-outline" size={20} color={colors.text} />
           </TouchableOpacity>
-        </View>
+        )}
+      </View>
+
+      {isEmpty ? (
+        <Hero onPick={(q) => handleSend(q)} />
+      ) : (
+        <FlatList
+          ref={listRef}
+          data={messages.filter((m) => m.id !== "greeting")}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => <ChatBubble message={item.id === "greeting" ? { ...item, text: t(item.text) } : item} />}
+          contentContainerStyle={styles.listContent}
+          onContentSizeChange={scrollToEnd}
+          keyboardShouldPersistTaps="handled"
+          ListFooterComponent={sending ? <TypingDots /> : null}
+        />
       )}
 
-      <QueryToolbar
-        webSearch={webSearchOn}
-        onToggleWebSearch={setWebSearchOn}
-        deepThink={deepThinkOn}
-        onToggleDeepThink={setDeepThinkOn}
-      />
-
-      <View style={styles.inputRow}>
-        <TouchableOpacity style={styles.attachBtn} onPress={pickImage}>
-          <Ionicons name="camera-outline" size={22} color={colors.primary} />
-        </TouchableOpacity>
-        <TextInput
-          style={styles.textInput}
-          placeholder={t("Ask about a PNR, train status, fares…")}
-          placeholderTextColor={colors.textMuted}
-          value={input}
-          onChangeText={setInput}
-          multiline
-        />
-        <MicButton onResult={(text) => setInput((prev) => (prev ? `${prev} ${text}` : text))} />
-        <TouchableOpacity
-          style={[styles.sendBtn, (!input.trim() && !pendingImage) && styles.sendBtnDisabled]}
-          onPress={handleSend}
-          disabled={sending || (!input.trim() && !pendingImage)}
-        >
-          <Ionicons name="send" size={18} color={colors.textInverse} />
-        </TouchableOpacity>
+      {/* Floating composer: text on top, tools underneath, send on the right. */}
+      <View style={styles.composerWrap}>
+        <View style={styles.composer}>
+          {pendingImage && (
+            <View style={styles.previewRow}>
+              <Image source={{ uri: pendingImage.uri }} style={styles.previewImage} />
+              <Text style={styles.previewText}>{t("Ticket photo attached")}</Text>
+              <TouchableOpacity onPress={() => setPendingImage(null)} hitSlop={8}>
+                <Ionicons name="close-circle" size={20} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+          )}
+          <TextInput
+            style={styles.textInput}
+            placeholder={t("Ask about a PNR, train status, fares…")}
+            placeholderTextColor={colors.textMuted}
+            value={input}
+            onChangeText={setInput}
+            multiline
+          />
+          <View style={styles.toolRow}>
+            <TouchableOpacity style={styles.roundBtn} onPress={pickImage} accessibilityLabel="Attach ticket photo">
+              <Ionicons name="add" size={22} color={colors.text} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.toolChip, webSearchOn && styles.toolChipOn]}
+              onPress={() => setWebSearchOn(!webSearchOn)}
+              accessibilityLabel="Toggle web search"
+            >
+              <Ionicons name="globe-outline" size={15} color={webSearchOn ? colors.primary : colors.textMuted} />
+              <Text style={[styles.toolChipText, webSearchOn && styles.toolChipTextOn]}>Search</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.toolChip, deepThinkOn && styles.toolChipOn]}
+              onPress={() => setDeepThinkOn(!deepThinkOn)}
+              accessibilityLabel="Toggle deep think"
+            >
+              <Ionicons name="bulb-outline" size={15} color={deepThinkOn ? colors.primary : colors.textMuted} />
+              <Text style={[styles.toolChipText, deepThinkOn && styles.toolChipTextOn]}>Think</Text>
+            </TouchableOpacity>
+            <View style={styles.flexSpacer} />
+            <MicButton onResult={(text) => setInput((prev) => (prev ? `${prev} ${text}` : text))} />
+            <TouchableOpacity
+              style={[styles.sendBtn, !canSend && styles.sendBtnDisabled]}
+              onPress={() => handleSend()}
+              disabled={!canSend}
+              accessibilityLabel="Send"
+            >
+              <Ionicons name="arrow-up" size={20} color={colors.textInverse} />
+            </TouchableOpacity>
+          </View>
+        </View>
+        <Text style={styles.disclaimer}>{t("AI can make mistakes. Check live details before you travel.")}</Text>
       </View>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  flex: { flex: 1, backgroundColor: colors.bg },
-  langRow: { borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.card },
+  flex: { flex: 1, backgroundColor: colors.chatSurface },
+  langRow: { backgroundColor: colors.chatSurface },
   langScroll: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: spacing.xs },
   langChip: {
     paddingHorizontal: spacing.md,
     paddingVertical: 6,
     borderRadius: radius.pill,
-    backgroundColor: colors.chip,
-    marginRight: spacing.xs,
-  },
-  langChipActive: { backgroundColor: colors.primary },
-  langChipText: { fontSize: 12, color: colors.primary, fontWeight: "600" },
-  langChipTextActive: { color: colors.textInverse },
-  listContent: { paddingVertical: spacing.md, flexGrow: 1 },
-  typingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.xs,
-    gap: spacing.xs,
-  },
-  typingText: { fontSize: 12, color: colors.textMuted },
-  previewRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.xs,
-    gap: spacing.sm,
-  },
-  previewImage: { width: 36, height: 36, borderRadius: radius.sm },
-  previewText: { flex: 1, fontSize: 12, color: colors.textMuted },
-  inputRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    padding: spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    backgroundColor: colors.card,
-    gap: spacing.sm,
-  },
-  attachBtn: { padding: spacing.sm },
-  textInput: {
-    flex: 1,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    maxHeight: 100,
-    fontSize: 15,
-    color: colors.text,
-    backgroundColor: colors.bg,
+    marginRight: spacing.xs,
   },
-  sendBtn: {
+  langChipActive: { backgroundColor: colors.text, borderColor: colors.text },
+  langChipText: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
+  langChipTextActive: { color: colors.textInverse },
+
+  topBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.xs,
+    minHeight: 36,
+  },
+  topTitle: { fontSize: 17, fontWeight: "700", color: colors.text },
+  newChatBtn: { padding: 4 },
+
+  listContent: { paddingTop: spacing.sm, paddingBottom: spacing.md, flexGrow: 1 },
+
+  // ----- empty state -----
+  hero: { flexGrow: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: spacing.lg, paddingBottom: spacing.xl },
+  orb: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
     backgroundColor: colors.primary,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: spacing.lg,
+    borderWidth: 4,
+    borderColor: colors.chip,
+  },
+  heroTitle: { fontSize: 22, fontWeight: "700", color: colors.text, textAlign: "center" },
+  heroSub: { fontSize: 13, color: colors.textMuted, textAlign: "center", marginTop: 6, marginBottom: spacing.xl },
+  cards: { width: "100%", flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  card: {
+    width: "48%",
+    flexGrow: 1,
+    minHeight: 84,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    padding: 12,
+    gap: 8,
+    backgroundColor: colors.chatSurface,
+  },
+  cardText: { fontSize: 13.5, lineHeight: 18, color: colors.text },
+
+  // ----- typing -----
+  typingRow: { flexDirection: "row", alignItems: "center", paddingHorizontal: spacing.lg, marginVertical: spacing.sm, gap: 10 },
+  typingDots: { flexDirection: "row", gap: 5, alignItems: "center", height: 28 },
+  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.textMuted },
+
+  // ----- composer -----
+  composerWrap: { paddingHorizontal: spacing.md, paddingTop: spacing.xs, paddingBottom: spacing.sm, backgroundColor: colors.chatSurface },
+  composer: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 26,
+    backgroundColor: colors.chatSurface,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.sm,
+    shadowColor: "#000",
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+  },
+  previewRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingBottom: spacing.xs },
+  previewImage: { width: 40, height: 40, borderRadius: 8 },
+  previewText: { flex: 1, fontSize: 12, color: colors.textMuted },
+  textInput: {
+    maxHeight: 120,
+    minHeight: 40,
+    fontSize: 16,
+    lineHeight: 22,
+    color: colors.text,
+    paddingHorizontal: 4,
+    paddingTop: 6,
+    paddingBottom: 6,
+  },
+  toolRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  flexSpacer: { flex: 1 },
+  roundBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: colors.border,
     alignItems: "center",
     justifyContent: "center",
   },
-  sendBtnDisabled: { opacity: 0.4 },
+  toolChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  toolChipOn: { backgroundColor: colors.chip, borderColor: colors.chip },
+  toolChipText: { fontSize: 12.5, fontWeight: "600", color: colors.textMuted },
+  toolChipTextOn: { color: colors.primary },
+  sendBtn: {
+    backgroundColor: colors.text,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  sendBtnDisabled: { backgroundColor: "#C9CFDA" },
+  disclaimer: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 6 },
 });

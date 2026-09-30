@@ -16,7 +16,7 @@ import { useSettings } from "../context/SettingsContext";
  * Once a rating is sent for this response_id, the bar shows a confirmation
  * instead of the buttons so the same reply can't be rated twice.
  */
-export default function FeedbackBar({ responseId }) {
+export default function FeedbackBar({ responseId, leading }) {
   const { apiBaseUrl } = useSettings();
   const [status, setStatus] = useState("idle"); // idle | submitting | done | error
   const [ratingGiven, setRatingGiven] = useState(null); // "up" | "down"
@@ -43,6 +43,7 @@ export default function FeedbackBar({ responseId }) {
   if (status === "done") {
     return (
       <View style={styles.row}>
+        {leading}
         <Ionicons
           name={ratingGiven === "up" ? "checkmark-circle" : "checkmark-circle-outline"}
           size={14}
@@ -58,20 +59,20 @@ export default function FeedbackBar({ responseId }) {
   return (
     <View>
       <View style={styles.row}>
-        <Text style={styles.helpfulText}>Was this helpful?</Text>
+        {leading}
         <TouchableOpacity
           style={styles.iconBtn}
           disabled={status === "submitting"}
           onPress={() => submit("up")}
         >
-          <Ionicons name="thumbs-up-outline" size={16} color={colors.primary} />
+          <Ionicons name="thumbs-up-outline" size={16} color={colors.textMuted} />
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.iconBtn}
           disabled={status === "submitting"}
           onPress={() => setShowCorrectionBox((v) => !v)}
         >
-          <Ionicons name="thumbs-down-outline" size={16} color={colors.danger} />
+          <Ionicons name="thumbs-down-outline" size={16} color={colors.textMuted} />
         </TouchableOpacity>
       </View>
 
