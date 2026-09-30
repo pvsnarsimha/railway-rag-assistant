@@ -43,3 +43,14 @@ def test_new_rule_entries_carry_a_source():
     kb = json.load(open(rag_engine.KB_PATH, encoding="utf-8"))
     rules = [x for x in kb if x["id"].startswith("rule-")]
     assert len(rules) >= 15 and all(r.get("source") and r.get("verified") for r in rules)
+
+
+def test_current_rule_values():
+    import json
+    import rag_engine
+    kb = {x["id"]: x for x in json.load(open(rag_engine.KB_PATH, encoding="utf-8"))}
+    assert "Rs 500" in kb["rule-no-ticket-penalty"]["text"] and "1 July 2026" in kb["rule-no-ticket-penalty"]["text"]
+    assert "20:00" in kb["rule-chart-timing-2025"]["text"] and "10 hours" in kb["rule-chart-timing-2025"]["text"]
+    assert "100 cm x 60 cm x 25 cm" in kb["rule-luggage-excess"]["text"]
+    assert "Nationalised Bank passbook" in kb["rule-id-proof"]["text"]
+    assert "48 hours" in kb["rule-ticket-transfer"]["text"]

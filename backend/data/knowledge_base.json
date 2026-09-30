@@ -13,7 +13,7 @@
   {
     "id": "chart-preparation",
     "category": "PNR & Booking Status",
-    "text": "The reservation chart is prepared about 4 hours before the train's departure from its originating station and a second chart about 30 minutes before departure. Since 2025 the Railway Board has been moving to earlier charts: about 8 hours before departure, and for trains leaving before 14:00 the previous day at 21:00. Once the chart is prepared the PNR status freezes and waitlisted tickets that did not clear are cancelled automatically.",
+    "text": "The reservation chart is prepared in two stages. From journeys on 30 December 2025 the first chart is ready by 20:00 the previous day for trains leaving 05:01 to 14:00, and at least 10 hours before departure for other trains; the second chart is prepared about 30 minutes before departure. Once the chart is prepared the PNR status freezes and waitlisted tickets that did not clear are cancelled automatically.",
     "entities": [
       "chart_preparation",
       "wl",
@@ -21,7 +21,9 @@
       "rac"
     ],
     "source": [
-      "https://cr.indianrailways.gov.in/view_detail.jsp?lang=0&id=0%2C4%2C268&dcd=9856&did=1751953668715F08FEB7D1A698517544F5A29DD31BC5D",
+      "https://www.thehitavada.com/Encyc/2025/12/27/now-railway-reservation-charts-to-be-ready-one-day-in-advance.html",
+      "https://www.ixigo.com/travel-stories?p=1186016",
+      "https://www.gconnect.in/orders-in-brief/railways-orders-in-brief/railway-reservation-charts.html",
       "https://www.pib.gov.in/PressReleasePage.aspx?PRID=1662084"
     ],
     "verified": "verified"
@@ -156,11 +158,18 @@
   {
     "id": "luggage-rules",
     "category": "Luggage",
-    "text": "Each class has a free luggage allowance: about 70 kg in AC First Class, 50 kg in AC 2-Tier and First Class, 40 kg in AC 3-Tier, Chair Car and Sleeper, and 35 kg in Second Class (verify in the Commercial Manual). Luggage above the free allowance must be booked at the parcel office before boarding and is charged at 1.5 times the luggage rate; carrying unbooked excess luggage can attract a penalty.",
+    "text": "Free luggage allowance and maximum limit per passenger by class: AC First Class 70 kg free, 150 kg maximum; AC 2-Tier and First Class 50 kg free, 100 kg maximum; AC 3-Tier and AC Chair Car 40 kg free and 40 kg maximum; Sleeper 40 kg free, 80 kg maximum; Second Class 35 kg free, 70 kg maximum. Luggage above the free limit, up to the maximum, is carried in the compartment on payment of 1.5 times the luggage rate. These are existing rules, restated by the Railway Minister in December 2025.",
     "entities": [
       "luggage",
       "classes"
-    ]
+    ],
+    "source": [
+      "https://www.pib.gov.in/Pressreleaseshare.aspx?PRID=1541065&reg=48&lang=2",
+      "https://www.onmanorama.com/travel/travel-news/2025/12/18/indian-railways-trains-to-charge-overweight-luggage.amp.html",
+      "https://www.thehitavada.com/Encyc/2025/12/19/passengers-to-pay-charges-for-carrying-extra-luggage-in-trains-says-vaishnaw.html",
+      "https://indianrailways.gov.in/railwayboard/uploads/codesmanual/CommManual-I/ComercialManualCh8_data.htm"
+    ],
+    "verified": "verified"
   },
   {
     "id": "e-ticket-vs-i-ticket",
@@ -235,13 +244,21 @@
   {
     "id": "penalty-without-ticket",
     "category": "Penalties & Violations",
-    "text": "Travelling without a valid ticket, or in a higher class than booked, is an offence under Section 138 of the Railways Act, 1989: the passenger pays the fare from the originating station (or the fare difference) plus an excess charge of Rs 250 as prescribed, and can be prosecuted for refusing to pay. Check the current amount on the Railway Board or IRCTC site.",
+    "text": "From 1 July 2026 the minimum penalty for travelling without a valid ticket doubled from Rs 250 to Rs 500. Under Sections 137, 138 and 142 of the Railways Act, as amended by the Jan Vishwas (Amendment of Provisions) Act, 2026, the passenger pays the fare for the distance travelled plus an excess charge equal to that amount, subject to a minimum of Rs 500. The offence is now largely handled as a civil penalty instead of a criminal case. Civil penalty amounts rise by 10% every three years.",
     "entities": [
       "penalty",
       "without_ticket",
       "railways_act",
       "tte"
-    ]
+    ],
+    "source": [
+      "https://static.pib.gov.in/WriteReadData/specificdocs/documents/2026/apr/doc202644839301.pdf",
+      "https://prsindia.org/billtrack/the-jan-vishwas-amendment-of-provisions-bill-2026",
+      "https://www.scconline.com/blog/post/2026/04/21/jan-vishwas-amendment-of-provisions-act-2026/",
+      "https://www.business-standard.com/finance/personal-finance/travelling-without-ticket-damaging-property-railway-increases-fine-126070100832_1.html",
+      "https://www.indiacode.nic.in/bitstream/123456789/15416/1/the_railways_act,_1989.pdf"
+    ],
+    "verified": "verified"
   },
   {
     "id": "delay-causes",
@@ -1050,25 +1067,29 @@
   {
     "id": "rule-chart-timing-2025",
     "category": "PNR & Booking Status",
-    "text": "Reservation charts: the first chart has been prepared about 4 hours before departure, and the second chart 30 minutes before departure, when remaining berths can still be booked. In 2025 the Railway Board moved to earlier first charts: for trains leaving before 14:00 the chart is prepared the previous day at 21:00, and for other trains about 8 hours before departure, being phased in. Check the current notice for your train.",
+    "text": "Reservation chart timing (in force for journeys from 30 December 2025): for trains departing between 05:01 and 14:00 the first chart is prepared by 20:00 (8 PM) the previous day; for trains departing between 14:01 and 23:59, and between 00:00 and 05:00, the first chart is prepared at least 10 hours before departure. A second chart is prepared about 30 minutes before departure and remaining berths can be booked until then. Earlier in 2025 a 8-hour rule was announced and phased in, so older articles may quote different timings.",
     "entities": [
       "chart",
       "first chart",
       "second chart",
-      "8 hours",
-      "21:00",
-      "waitlist"
+      "10 hours",
+      "8 pm",
+      "waitlist",
+      "chart preparation"
     ],
     "source": [
+      "https://www.thehitavada.com/Encyc/2025/12/27/now-railway-reservation-charts-to-be-ready-one-day-in-advance.html",
+      "https://www.ixigo.com/travel-stories?p=1186016",
+      "https://www.gconnect.in/orders-in-brief/railways-orders-in-brief/railway-reservation-charts.html",
       "https://cr.indianrailways.gov.in/view_detail.jsp?lang=0&id=0%2C4%2C268&dcd=9856&did=1751953668715F08FEB7D1A698517544F5A29DD31BC5D",
       "https://www.pib.gov.in/PressReleasePage.aspx?PRID=1662084"
     ],
-    "verified": "verified"
+    "verified": "verified (Railway Board instruction reported by multiple sources)"
   },
   {
     "id": "rule-luggage-free-allowance",
     "category": "Luggage",
-    "text": "Free luggage allowance depends on class: about 70 kg in AC First Class, 50 kg in AC 2-Tier and First Class, 40 kg in AC 3-Tier, Chair Car and Sleeper, and 35 kg in Second Class. A higher marginal limit is allowed on payment of luggage charges. Verify the current figures in the Indian Railways Commercial Manual before relying on them.",
+    "text": "Free luggage allowance and maximum limit per passenger by class: AC First Class 70 kg free, 150 kg maximum; AC 2-Tier and First Class 50 kg free, 100 kg maximum; AC 3-Tier and AC Chair Car 40 kg free and 40 kg maximum; Sleeper 40 kg free, 80 kg maximum; Second Class 35 kg free, 70 kg maximum. Luggage above the free limit, up to the maximum, is carried in the compartment on payment of 1.5 times the luggage rate. These are existing rules, restated by the Railway Minister in December 2025.",
     "entities": [
       "luggage",
       "free allowance",
@@ -1079,15 +1100,17 @@
       "baggage"
     ],
     "source": [
-      "https://indianrailways.gov.in/railwayboard/uploads/codesmanual/CommManual-I/ComercialManualCh8_data.htm",
-      "https://wr.indianrailways.gov.in/view_section.jsp?lang=0&id=0,6,629,634"
+      "https://www.pib.gov.in/Pressreleaseshare.aspx?PRID=1541065&reg=48&lang=2",
+      "https://www.onmanorama.com/travel/travel-news/2025/12/18/indian-railways-trains-to-charge-overweight-luggage.amp.html",
+      "https://www.thehitavada.com/Encyc/2025/12/19/passengers-to-pay-charges-for-carrying-extra-luggage-in-trains-says-vaishnaw.html",
+      "https://indianrailways.gov.in/railwayboard/uploads/codesmanual/CommManual-I/ComercialManualCh8_data.htm"
     ],
-    "verified": "partly verified"
+    "verified": "verified (PIB + minister statement + Commercial Manual)"
   },
   {
     "id": "rule-luggage-excess",
     "category": "Luggage",
-    "text": "Luggage above the free allowance must be booked at the parcel or luggage office before boarding. Excess luggage carried in the compartment is charged at 1.5 times the luggage rate, and passengers can be penalised for carrying unbooked excess luggage. Items such as an umbrella or tiffin box are carried free.",
+    "text": "Excess luggage rules: luggage above the free allowance must be booked at the luggage or parcel office before boarding; up to the class maximum it travels in the compartment at 1.5 times the luggage rate. Trunks, suitcases and boxes up to 100 cm x 60 cm x 25 cm are allowed in passenger compartments; larger items and anything above the maximum limit must be booked and carried in the luggage or parcel van. Merchandise is not allowed as personal luggage. Unbooked excess found during checking can be charged at a higher rate and may attract a penalty. Weighing facilities are being installed at stations.",
     "entities": [
       "excess luggage",
       "1.5 times",
@@ -1095,32 +1118,40 @@
       "luggage rate"
     ],
     "source": [
-      "https://indianrailways.gov.in/railwayboard/uploads/codesmanual/CommManual-I/ComercialManualCh8_data.htm",
-      "https://wr.indianrailways.gov.in/view_section.jsp?lang=0&id=0,6,629,634"
+      "https://www.pib.gov.in/Pressreleaseshare.aspx?PRID=1541065&reg=48&lang=2",
+      "https://www.onmanorama.com/travel/travel-news/2025/12/18/indian-railways-trains-to-charge-overweight-luggage.amp.html",
+      "https://www.thehitavada.com/Encyc/2025/12/19/passengers-to-pay-charges-for-carrying-extra-luggage-in-trains-says-vaishnaw.html",
+      "https://indianrailways.gov.in/railwayboard/uploads/codesmanual/CommManual-I/ComercialManualCh8_data.htm"
     ],
-    "verified": "verified"
+    "verified": "verified (rate and size); penalty rate varies"
   },
   {
     "id": "rule-no-ticket-penalty",
     "category": "Penalties & Violations",
-    "text": "Travelling without a valid ticket is an offence under Section 138 of the Railways Act, 1989. The passenger is charged the fare from the originating station of the train plus an excess charge (Rs 250 as prescribed), and can be fined or prosecuted for a refusal to pay. Travelling in a higher class than the ticket allows means paying the fare difference and the excess charge.",
+    "text": "From 1 July 2026 the minimum penalty for travelling without a valid ticket doubled from Rs 250 to Rs 500. Under Sections 137, 138 and 142 of the Railways Act, as amended by the Jan Vishwas (Amendment of Provisions) Act, 2026, the passenger pays the fare for the distance travelled plus an excess charge equal to that amount, subject to a minimum of Rs 500. The offence is now largely handled as a civil penalty instead of a criminal case. Civil penalty amounts rise by 10% every three years.",
     "entities": [
       "without ticket",
       "penalty",
       "section 138",
       "railways act",
       "excess charge",
-      "fine"
+      "fine",
+      "500",
+      "jan vishwas"
     ],
     "source": [
+      "https://static.pib.gov.in/WriteReadData/specificdocs/documents/2026/apr/doc202644839301.pdf",
+      "https://prsindia.org/billtrack/the-jan-vishwas-amendment-of-provisions-bill-2026",
+      "https://www.scconline.com/blog/post/2026/04/21/jan-vishwas-amendment-of-provisions-act-2026/",
+      "https://www.business-standard.com/finance/personal-finance/travelling-without-ticket-damaging-property-railway-increases-fine-126070100832_1.html",
       "https://www.indiacode.nic.in/bitstream/123456789/15416/1/the_railways_act,_1989.pdf"
     ],
-    "verified": "statute; check current amount"
+    "verified": "verified (Act amendment and multiple reports)"
   },
   {
     "id": "rule-alarm-chain",
     "category": "Penalties & Violations",
-    "text": "Pulling the alarm chain without genuine reason (medical emergency, danger, robbery) is punishable under Section 141 of the Railways Act with imprisonment up to one year or a fine up to Rs 1,000, or both. Genuine emergencies do not attract penalty.",
+    "text": "Pulling the alarm chain or misusing the communication device without reasonable and sufficient cause is an offence under Section 141 of the Railways Act, 1989, punishable with imprisonment up to one year or a fine up to Rs 1,000, or both. Genuine emergencies such as illness, danger or robbery are not penalised. Penalty provisions were revised in 2026, so check the current text on India Code.",
     "entities": [
       "alarm chain",
       "section 141",
@@ -1130,38 +1161,49 @@
     "source": [
       "https://www.indiacode.nic.in/bitstream/123456789/15416/1/the_railways_act,_1989.pdf"
     ],
-    "verified": "statute; check current amount"
+    "verified": "statute text confirmed; check 2026 revisions"
   },
   {
     "id": "rule-id-proof",
     "category": "Booking Process",
-    "text": "At least one passenger on an e-ticket must show an original photo ID during the journey, otherwise the passenger may be treated as travelling without a ticket. Commonly accepted IDs include Aadhaar (including DigiLocker or mAadhaar), passport, voter ID, driving licence, PAN card and photo ID issued by a government body or school. Check IRCTC's current list.",
+    "text": "At least one passenger on an e-ticket must show one original prescribed photo ID during the journey, otherwise all passengers on that ticket are treated as travelling without a ticket. Prescribed IDs on IRCTC: Aadhaar, Passport, Voter photo ID card, Driving Licence, PAN card, photo ID with serial number issued by Central or State Government, photo ID issued by a Public Sector Undertaking, district administration, municipal body or panchayat, Student ID with photograph from a recognised school or college, Nationalised Bank passbook with photograph, and credit card with laminated photograph.",
     "entities": [
       "id proof",
       "photo id",
       "aadhaar",
       "e-ticket",
-      "identity"
+      "identity",
+      "passport",
+      "pan card",
+      "voter id",
+      "driving licence"
     ],
     "source": [
-      "https://contents.irctc.co.in/en/TatkalFaq.html"
+      "https://contents.irctc.co.in/en/etktfaq.html",
+      "https://contents.irctc.co.in/en/listOfGovtAuthorizedIDCards.pdf",
+      "https://contents.irctc.co.in/en/AMENDMENT_IN_Etkt.pdf"
     ],
-    "verified": "partly verified"
+    "verified": "verified (IRCTC FAQ and ID list)"
   },
   {
     "id": "rule-ticket-transfer",
     "category": "Booking Process",
-    "text": "A confirmed ticket can be transferred to another person only within the family (father, mother, brother, sister, son, daughter, husband or wife) by applying at a reservation office at least 24 hours before departure. Tickets cannot be transferred to unrelated people, and Tatkal tickets are generally not transferable.",
+    "text": "A reserved berth or seat can be used only by the passenger named on it. A confirmed ticket can be transferred only through a change-of-name request: to a family member (father, mother, brother, sister, son, daughter, husband or wife) on a written request made at least 24 hours before departure; for government servants travelling on duty, by written request from the competent authority 24 hours before; for students of a recognised institution or a marriage party, by the head of the institution or group at least 48 hours before; NCC cadets 24 hours before. Chief Reservation Supervisors at important stations approve it. Carry the reservation slip, original photo ID and proof of relationship.",
     "entities": [
       "transfer ticket",
-      "name change",
+      "change of name",
       "family",
-      "24 hours"
+      "24 hours",
+      "48 hours",
+      "students",
+      "marriage party"
     ],
     "source": [
-      "https://indianrailways.gov.in/railwayboard/uploads/directorate/coaching/pdf/RefundRules.pdf"
+      "https://ser.indianrailways.gov.in/view_section.jsp?lang=0&id=0,2,406,453,564,1155,1183",
+      "https://contents.irctc.co.in/en/AMENDMENT_IN_Etkt.pdf",
+      "https://contents.irctc.co.in/en/etktfaq.html"
     ],
-    "verified": "partly verified"
+    "verified": "verified (Indian Railways and IRCTC pages)"
   },
   {
     "id": "rule-official-sources",
@@ -1182,5 +1224,27 @@
       "https://www.irctc.co.in/"
     ],
     "verified": "verified"
+  },
+  {
+    "id": "rule-2026-other-penalties",
+    "category": "Penalties & Violations",
+    "text": "Other railway penalties reported as effective from 1 July 2026 under the Jan Vishwas (Amendment of Provisions) Act, 2026: a man entering or staying in a coach or berths reserved for women, Rs 2,500 and removal; smoking, unauthorised hawking or begging on trains and premises, Rs 2,000; creating a disturbance while intoxicated or using obscene language, Rs 1,000; obstructing railway staff on duty, Rs 2,500; carrying prohibited or objectionable items, Rs 10,000. The Act also moves several minor railway offences from criminal to civil penalties. Amounts come from press reports of the Act, so confirm the exact text on the Railway Board or India Code site.",
+    "entities": [
+      "penalty",
+      "fine",
+      "women's coach",
+      "smoking",
+      "hawking",
+      "begging",
+      "jan vishwas",
+      "2026"
+    ],
+    "source": [
+      "https://www.deccanchronicle.com/nation/indian-railways-new-penalty-rules-2026-fines-enhanced-for-hawking-begging-nusiance-on-trains-1965351",
+      "https://www.business-standard.com/finance/personal-finance/travelling-without-ticket-damaging-property-railway-increases-fine-126070100832_1.html",
+      "https://prsindia.org/billtrack/the-jan-vishwas-amendment-of-provisions-bill-2026",
+      "https://www.scconline.com/blog/post/2026/04/21/jan-vishwas-amendment-of-provisions-act-2026/"
+    ],
+    "verified": "partly verified (press reports of the Act)"
   }
 ]
