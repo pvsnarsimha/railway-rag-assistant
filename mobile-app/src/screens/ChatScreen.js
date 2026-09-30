@@ -224,6 +224,7 @@ export default function ChatScreen({ navigation }) {
         intent: data.intent,
         webSources: data.web_sources,
         deepThinkUsed: data.deep_think_used,
+        agent: data.agent,
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (e) {

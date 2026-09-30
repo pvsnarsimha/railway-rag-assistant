@@ -183,6 +183,7 @@ def health():
         "rapidapi_key_loaded": bool(os.environ.get("RAPIDAPI_KEY", "").strip()),
         "gemini_key_loaded": bool(os.environ.get("GEMINI_API_KEY", "").strip()),
         "anthropic_key_loaded": bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()),
+        "agent_enabled": railway_agent.is_available(),  # absent = old code deployed; true = agent can run
         "web_search_provider": "bing" if web_search.BING_SEARCH_API_KEY else "duckduckgo (no BING_SEARCH_API_KEY set)",
         "semantic_engine": engine.hybrid.semantic_engine_name,
         "kb_entries": len(engine.docs),
@@ -3356,6 +3357,7 @@ def chat(req: ChatRequest):
         # (timetable, live status, KB, web...) and retries alternatives instead
         # of surfacing "not available"/an error. req.agent forces it on/off. ---
         agent_result = None
+        agent_error = None
         rules_came_up_short = bool(live_error) or trains_between_empty or (
             intent == query_router.Intent.GENERAL_FAQ and not few_shot_match and not retrieval.chunks
         )
@@ -3371,6 +3373,7 @@ def chat(req: ChatRequest):
                 agent_result = None
             if agent_result is not None and not agent_result.answer:
                 print(f"[agent] no answer, using rule-based path: {agent_result.error}")
+                agent_error = agent_result.error
                 agent_result = None
 
         web_results = None
@@ -3411,6 +3414,18 @@ def chat(req: ChatRequest):
             )
             if full_list_text:
                 answer = f"{answer}\n\n{full_list_text}"
+            # The rules ran without an error but the reply is a "nothing found"
+            # (e.g. live status "not available in the provided information"):
+            # give the agent a go before showing that to the user.
+            if (req.agent is not False and not agent_result and not full_list_text
+                    and railway_agent.looks_like_non_answer(answer) and railway_agent.is_available()):
+                try:
+                    retry = railway_agent.run_agent(
+                        question, _agent_extra_instructions(language_choice, sentiment_result))
+                    if retry.answer and not railway_agent.looks_like_non_answer(retry.answer):
+                        agent_result, answer = retry, retry.answer
+                except Exception:
+                    traceback.print_exc()
         if image_note and req.image_base64:
             answer = f"📷 From your photo: {image_note}\n\n{answer}"
 
@@ -3436,6 +3451,7 @@ def chat(req: ChatRequest):
                             else [{"title": r.title, "url": r.url} for r in (web_results or [])]),
             "agent": {
                 "used": bool(agent_result),
+                "error": None if agent_result else agent_error,  # why the agent didn't answer (diagnostics)
                 "provider": agent_result.provider if agent_result else None,
                 "steps": [{"tool": st.tool, "args": st.args, "ok": st.ok} for st in agent_result.steps]
                          if agent_result else [],

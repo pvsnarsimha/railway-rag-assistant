@@ -150,3 +150,21 @@ mobile-app/
 - `few-shot intent teaching` (`/api/intents/teach`) has a working API
   helper in `src/api/railwayApi.js` but no dedicated screen yet; wire it
   into a new "Teach" screen if you want that in-app.
+
+## AI agent in the Android app
+
+The Chat and Track tabs call `POST /api/chat`, so the backend's tool-using agent (`backend/railway_agent.py`)
+works with no app-side setup. It answers questions the fixed rules can't, and a bubble shows an
+"AI agent: tools used" badge when it ran. The agent needs `GEMINI_API_KEY` and/or `ANTHROPIC_API_KEY`
+set on the **backend**, never in the app.
+
+Build an Android APK to install on a phone:
+
+```bash
+cd mobile-app
+npm install
+npx expo start                                   # quick test in Expo Go
+npx eas-cli build -p android --profile preview   # installable .apk
+```
+
+Then set the backend URL in the app's Settings tab.
