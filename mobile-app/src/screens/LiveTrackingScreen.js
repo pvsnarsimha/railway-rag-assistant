@@ -1702,6 +1702,19 @@ export default function LiveTrackingScreen({ navigation }) {
     disconnect();
     clearActiveTrack();
     setBgTracking(null);
+    // Back to the clean "Track a train" page: no leftover status, tiles,
+    // "Next:" bar or trip recap from the train that was just stopped.
+    activeParamsRef.current = null;
+    lastConnectedTrainRef.current = null;
+    setActiveTrack(null);
+    setPayload(null);
+    setDelaySparkline([]);
+    setShowMap(false);
+    setApproachNotice(null);
+    setBellNotice(null);
+    tripSummaryShownKeyRef.current = null;
+    setTripSummary(null);
+    setTripSummaryShareStatus(null);
     if (params && params.trainNumber) {
       disableBackgroundTracking(apiBaseUrl, { trainNumber: params.trainNumber, date: effectiveTrackDate(params.date) });
     }

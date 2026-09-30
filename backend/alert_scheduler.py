@@ -739,6 +739,42 @@ def run_tracking_check_once(status_fn: Callable[[str, Optional[str]], dict]) -> 
     return summary
 
 
+def run_platform_check_once(locate_fn: Callable[[str, str, Optional[str]], dict]) -> dict:
+    """FEATURE: Platform Locator "Alert on change", app open or closed. One
+    pass over every platform watch: look the platform up once per
+    (train, station), and push when it differs from the last one seen."""
+    watches = push_store.list_all_platform_watches()
+    cache: dict = {}
+    pushed = 0
+    for w in watches:
+        key = (w["train_number"], w["station"])
+        try:
+            if key not in cache:
+                cache[key] = locate_fn(w["train_number"], w["station"], w.get("date"))
+            res = cache[key] or {}
+        except Exception as e:  # noqa: BLE001 - one bad watch shouldn't kill the pass
+            logger.warning("Platform lookup failed for watch id=%s: %s", w["id"], e)
+            continue
+        platform = str(res.get("platform") or "").strip()
+        if not platform or res.get("cancelled"):
+            continue
+        prev = (w.get("last_platform") or "").strip()
+        if not prev:
+            push_store.set_platform_seen(w["id"], platform)
+        elif prev != platform:
+            result = push_notifications.send_platform_change_alert(
+                w["token"], w["train_number"], res.get("station_name") or w["station"], prev, platform)
+            if result.get("sent"):
+                push_store.set_platform_seen(w["id"], platform)
+                pushed += 1
+            else:
+                logger.warning("Platform push failed for watch id=%s: %s", w["id"], result.get("error"))
+                error_text = (result.get("error") or "").lower().replace(" ", "").replace("-", "")
+                if "notregistered" in error_text or "notfound" in error_text or "invalidregistration" in error_text:
+                    push_store.unregister_token(w["token"])
+    return {"checked": len(watches), "pushed": pushed}
+
+
 def keep_alive_ping() -> None:
     """Render's free plan puts a web service to sleep after ~15 min with no
     INBOUND request — and a sleeping process runs no scheduler, so a closed
@@ -750,7 +786,8 @@ def keep_alive_ping() -> None:
 
     url = (os.environ.get("KEEP_ALIVE_URL") or os.environ.get("PUBLIC_APP_URL") or "").strip().rstrip("/")
     try:
-        active = push_store.count_tracking_watches() + len(push_store.list_all_alarm_watches_with_tokens())
+        active = (push_store.count_tracking_watches() + len(push_store.list_all_alarm_watches_with_tokens())
+                  + push_store.count_platform_watches())
     except Exception:  # noqa: BLE001
         active = 0
     if not active:
@@ -779,6 +816,8 @@ def start(
     alarm_check_interval_minutes: int = DEFAULT_ALARM_CHECK_INTERVAL_MINUTES,
     tracking_status_fn: Optional[Callable[[str, Optional[str]], dict]] = None,
     tracking_interval_minutes: int = DEFAULT_TRACKING_CHECK_INTERVAL_MINUTES,
+    platform_check_fn: Optional[Callable[[str, str, Optional[str]], dict]] = None,
+    platform_check_interval_minutes: int = 2,
 ):
     """
     Starts the background job(s). Safe to call even if firebase-admin/
@@ -854,6 +893,22 @@ def start(
             keep_alive_ping, trigger="interval", minutes=10, id="keep_alive_ping",
             max_instances=1, coalesce=True, misfire_grace_time=300,
         )
+    if platform_check_fn is not None:
+        _scheduler.add_job(
+            run_platform_check_once,
+            args=[platform_check_fn],
+            trigger="interval",
+            minutes=platform_check_interval_minutes,
+            id="platform_change_push_check",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300,
+        )
+        if tracking_status_fn is None:
+            _scheduler.add_job(
+                keep_alive_ping, trigger="interval", minutes=10, id="keep_alive_ping",
+                max_instances=1, coalesce=True, misfire_grace_time=300,
+            )
     _scheduler.start()
     logger.info(
         "Alert scheduler started — delay checks every %s minute(s)%s%s.",

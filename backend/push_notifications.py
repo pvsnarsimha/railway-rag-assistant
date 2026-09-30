@@ -749,6 +749,37 @@ def send_approach_alert(
         return {"sent": False, "error": str(e)}
 
 
+def send_platform_change_alert(token: str, train_number: str, station_name: str,
+                               old_platform: str, new_platform: str) -> dict:
+    """FEATURE: Platform Locator "Alert on change" — the platform moved.
+    Sent by alert_scheduler.run_platform_check_once, app open or closed.
+    Always alerts. Never raises."""
+    title = f"⚠️ Platform changed: {train_number}"
+    body = f"Now arriving at {station_name} on PF {new_platform} (was PF {old_platform})."
+    data = {
+        "type": "platform_change", "train_number": str(train_number), "station": station_name,
+        "platform": str(new_platform), "old_platform": str(old_platform),
+        "sent_at": str(int(time.time())),
+    }
+    if _is_expo_token(token):
+        return _send_via_expo(token, title, body, data, sound="default")
+    if not _ensure_initialized():
+        return {"sent": False, "error": _init_error}
+    from firebase_admin import messaging
+    data = {**data, "push_token": token}
+    fcm_message = messaging.Message(
+        token=token,
+        notification=messaging.Notification(title=title, body=body),
+        data=data,
+        webpush=_webpush_config(title, body, tag=f"platform-{train_number}-{station_name}"),
+    )
+    try:
+        messaging.send(fcm_message)
+        return {"sent": True, "error": None}
+    except Exception as e:  # noqa: BLE001
+        return {"sent": False, "error": str(e)}
+
+
 def send_station_status_alert(
     token: str, train_number: str, label: Optional[str], station: Optional[str],
     message: str, actual_time: Optional[str] = None, running: Optional[dict] = None,
