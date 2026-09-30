@@ -133,7 +133,22 @@ def tool_live_train_status(train_number: str, date: str = "") -> dict:
             "delay_minutes": pos.delay_minutes,
         }
     except Exception as exc:
-        return _err(exc)
+        primary_error = _err(exc)
+    # RailKit failed: try RailRadar, the app's second live source.
+    try:
+        import railradar_fallback
+        stops = railradar_fallback.fetch_railradar_timeline(train_number, date or None)
+        current = next((st for st in stops if st.status == "current"), None)
+        nxt = next((st for st in stops if st.status == "upcoming"), None)
+        if current or nxt:
+            return {
+                "train_number": train_number, "source": "railradar",
+                "current_station": (current.name or current.code) if current else None,
+                "next_station": (nxt.name or nxt.code) if nxt else None,
+            }
+    except Exception:
+        pass
+    return primary_error
 
 
 def tool_trains_between(source: str, destination: str, date: str = "") -> dict:
@@ -410,6 +425,22 @@ def _run_gemini(question: str, system: str, result: AgentResult) -> Optional[str
             parts.append(types.Part.from_function_response(name=call.name, response={"result": out}))
         contents.append(types.Content(role="user", parts=parts))
     return None
+
+
+_NON_ANSWER_RE = re.compile(
+    r"not available|isn'?t available|unavailable|no information|provided information|"
+    r"couldn'?t find|could not find|unable to|cannot find|can'?t find|don'?t have|do not have|"
+    r"no (?:relevant )?data|try again later|check back",
+    re.IGNORECASE,
+)
+
+
+def looks_like_non_answer(answer: Optional[str]) -> bool:
+    """True when a synthesized reply is really 'I have nothing' (e.g. 'live status
+    ... is not available in the provided information'), even though no error was
+    raised. Long answers are assumed to carry real content."""
+    text = (answer or "").strip()
+    return not text or (len(text) < 400 and bool(_NON_ANSWER_RE.search(text)))
 
 
 def _is_transient(exc: Exception) -> bool:

@@ -55,3 +55,21 @@ def test_unexpected_exception_is_rescued(monkeypatch):
     monkeypatch.setattr(railway_agent, "is_available", lambda: False)
     r = TestClient(app_module.app).post("/api/chat", json={"message": "anything"}).json()
     assert "RuntimeError" not in r["answer"] and "bug" not in r["answer"]
+
+
+def test_soft_non_answer_is_retried_with_agent(monkeypatch):
+    """No error raised, but the LLM says 'not available in the provided information'."""
+    monkeypatch.setattr(app_module, "_synthesize",
+                        lambda *a, **k: "The live running status for train 20833 is not available in the provided information.")
+    def ok(*a, **k): raise app_module.railway_api.RailwayAPIError("x")
+    monkeypatch.setattr(app_module.railway_api, "get_live_train_status", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(railway_agent, "is_available", lambda: True)
+    monkeypatch.setattr(railway_agent, "run_agent", lambda q, extra="": _agent("Train 20833 is near Vijayawada, 10 min late."))
+    r = TestClient(app_module.app).post("/api/chat", json={"message": "What the status of 20833"}).json()
+    assert r["answer"].startswith("Train 20833 is near") and r["agent"]["used"]
+
+
+def test_non_answer_detector():
+    f = railway_agent.looks_like_non_answer
+    assert f("The live running status for train 20833 is not available in the provided information. Please check back")
+    assert not f("Train 12951 is running 10 minutes late near Surat.")

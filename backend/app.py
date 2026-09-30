@@ -3411,6 +3411,18 @@ def chat(req: ChatRequest):
             )
             if full_list_text:
                 answer = f"{answer}\n\n{full_list_text}"
+            # The rules ran without an error but the reply is a "nothing found"
+            # (e.g. live status "not available in the provided information"):
+            # give the agent a go before showing that to the user.
+            if (req.agent is not False and not agent_result and not full_list_text
+                    and railway_agent.looks_like_non_answer(answer) and railway_agent.is_available()):
+                try:
+                    retry = railway_agent.run_agent(
+                        question, _agent_extra_instructions(language_choice, sentiment_result))
+                    if retry.answer and not railway_agent.looks_like_non_answer(retry.answer):
+                        agent_result, answer = retry, retry.answer
+                except Exception:
+                    traceback.print_exc()
         if image_note and req.image_base64:
             answer = f"📷 From your photo: {image_note}\n\n{answer}"
 
