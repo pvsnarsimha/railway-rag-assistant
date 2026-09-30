@@ -497,3 +497,13 @@ host (a VM or an always-on container), not a scale-to-zero/serverless one.
 - **Auth / rate limiting**: not included — add before exposing this publicly, since the railway data provider and Anthropic calls both cost quota per request.
 #   r a i l w a y - r a g - a s s i s t a n t  
  
+## Agent layer (tool-using assistant)
+
+`backend/railway_agent.py` sits on top of the fixed regex/keyword router. When the rules can't answer
+(a provider error, an empty result, or a question that matches no intent), `/api/chat` hands the
+question to an LLM agent (Gemini first, Claude second, same keys as synthesis). The agent picks and
+chains tools: station lookup, timetable, live status, trains between stations, seat availability, fare,
+PNR, nearby stations, alternative routes, crowd estimate, knowledge base and web search. If one tool fails
+it tries another instead of replying "not available". The response includes an `agent` field
+(`used`, `provider`, `steps`). Send `"agent": true` to force it or `false` to disable it; `AGENT_MAX_STEPS`
+(default 6) caps tool calls per question. Tests: `cd backend && python -m pytest tests`.

@@ -44,6 +44,7 @@ _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 _env_loaded = load_dotenv(dotenv_path=_ENV_PATH)
 
 import query_router
+import railway_agent
 import railway_api
 import gps_tracking
 import railradar_fallback
@@ -252,6 +253,9 @@ class ChatRequest(BaseModel):
     web_search: Optional[bool] = None   # True: force a web lookup even outside the usual auto-trigger cases.
                                          # False: skip web search even if it would have auto-triggered.
                                          # None/omitted: today's automatic intent-based behavior.
+    agent: Optional[bool] = None        # True: always answer via the tool-using agent (railway_agent.py).
+                                         # False: never use it. None/omitted: automatic - the agent steps in
+                                         # when the fixed rules found nothing/failed (see chat()).
     deep_think: bool = False            # True: broaden retrieval (more chunks) and ask the model to
                                          # reason step-by-step through multiple angles before answering.
 
@@ -521,7 +525,8 @@ def _synthesize(question: str, live_data: dict, retrieval, live_error: str = Non
         fallback = f"{lang_note}\n\n{fallback}"
 
     if llm_error:
-        return f"⚠️ {llm_error}\n\n(Falling back to raw retrieved info below until this is fixed.)\n\n{fallback}"
+        # Provider detail (quota, bad key, ...) is for the operator, not the passenger.
+        print(f"[synthesis] LLM unavailable, using templated answer: {llm_error}")
 
     return fallback
 
@@ -545,7 +550,11 @@ def _fallback_answer(question: str, live_data: dict, retrieval, live_error: str 
             lines.append(f"\n• {r.title}: {r.snippet} ({r.url})")
     if not live_data and not live_error and not retrieval.chunks and not web_results:
         if retrieval.retrieval_performed:
-            lines.append("I couldn't find anything relevant. Could you rephrase your question?")
+            lines.append(
+                "I don't have a specific answer for that yet. Try including a train number, PNR or station "
+                "names (e.g. 'trains from Hyderabad to Vijayawada tomorrow'), or ask about a railway rule "
+                "such as Tatkal, refunds or coach classes."
+            )
         else:
             lines.append("Happy to help — ask me about a PNR, a train's running status, seat availability, or any railway policy question.")
     lines.append(
@@ -2808,6 +2817,19 @@ def _format_full_stop_list(route, train_number: str) -> str:
     return "\n".join(lines)
 
 
+def _agent_extra_instructions(language_choice, sentiment_result) -> str:
+    """Same language/tone steering _synthesize() applies, for the agent's prompt."""
+    extra = ""
+    try:
+        if language_choice:
+            extra += language_support.synthesis_instruction(language_choice)
+        if sentiment_result:
+            extra += sentiment_analysis.synthesis_tone_instruction(sentiment_result)
+    except Exception:
+        pass
+    return extra.strip()
+
+
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     question = req.message.strip()
@@ -3327,12 +3349,37 @@ def chat(req: ChatRequest):
         # provider data only, never the open web. The app's web-search
         # toggle can force this on (True) or off (False) explicitly;
         # leaving it unset keeps this automatic gate as-is.
+        # --- Agent layer: the fixed rules above are fast but rigid. When they
+        # found nothing usable (no live data, a provider error, an empty
+        # result, or a generic question the router couldn't place), hand the
+        # question to the tool-using agent, which plans its own lookups
+        # (timetable, live status, KB, web...) and retries alternatives instead
+        # of surfacing "not available"/an error. req.agent forces it on/off. ---
+        agent_result = None
+        rules_came_up_short = bool(live_error) or trains_between_empty or (
+            intent == query_router.Intent.GENERAL_FAQ and not few_shot_match and not retrieval.chunks
+        )
+        use_agent = (req.agent is True or (req.agent is None and rules_came_up_short)) \
+            and not segment_answer_text and railway_agent.is_available()
+        if use_agent:
+            try:
+                agent_result = railway_agent.run_agent(
+                    question, _agent_extra_instructions(language_choice, sentiment_result)
+                )
+            except Exception:
+                traceback.print_exc()
+                agent_result = None
+            if agent_result is not None and not agent_result.answer:
+                print(f"[agent] no answer, using rule-based path: {agent_result.error}")
+                agent_result = None
+
         web_results = None
-        auto_web_search = not segment_answer_text and (
+        auto_web_search = not segment_answer_text and not agent_result and (
             (intent in (query_router.Intent.GENERAL_FAQ, query_router.Intent.LIVE_STATUS) and not few_shot_match)
             or (intent == query_router.Intent.TRAINS_BETWEEN and trains_between_empty)
         )
-        should_web_search = auto_web_search if req.web_search is None else (req.web_search and not segment_answer_text)
+        should_web_search = auto_web_search if req.web_search is None else (
+            req.web_search and not segment_answer_text and not agent_result)
         if should_web_search:
             # For a route/availability question, a query built from the
             # resolved station codes/date/time ("BZA to NDL trains time
@@ -3351,6 +3398,8 @@ def chat(req: ChatRequest):
 
         if segment_answer_text:
             answer = segment_answer_text
+        elif agent_result:
+            answer = agent_result.answer
         else:
             answer = _synthesize(
                 question, live_data, retrieval, live_error, language_choice,
@@ -3383,7 +3432,14 @@ def chat(req: ChatRequest):
             "intent": intent,
             "response_id": response_id,
             "sources": [c.id for c in retrieval.chunks],
-            "web_sources": [{"title": r.title, "url": r.url} for r in (web_results or [])],
+            "web_sources": (agent_result.web_sources if agent_result
+                            else [{"title": r.title, "url": r.url} for r in (web_results or [])]),
+            "agent": {
+                "used": bool(agent_result),
+                "provider": agent_result.provider if agent_result else None,
+                "steps": [{"tool": st.tool, "args": st.args, "ok": st.ok} for st in agent_result.steps]
+                         if agent_result else [],
+            },
             "deep_think_used": req.deep_think,
             "diagrams": retrieval.diagrams,
             "map": map_payload,
@@ -3412,7 +3468,25 @@ def chat(req: ChatRequest):
 
     except Exception as e:
         traceback.print_exc()
-        return {"answer": f"Something went wrong processing that: {e}", "intent": "error", "sources": [], "diagrams": [], "map": None}
+        # Last resort: an unexpected failure in the rule-based pipeline should
+        # not surface as a raw exception - let the agent take a fresh run at it.
+        if req.agent is not False and question and railway_agent.is_available():
+            try:
+                rescued = railway_agent.run_agent(question)
+                if rescued.answer:
+                    return {
+                        "answer": rescued.answer, "intent": "agent", "sources": [], "diagrams": [], "map": None,
+                        "web_sources": rescued.web_sources,
+                        "agent": {"used": True, "provider": rescued.provider,
+                                  "steps": [{"tool": st.tool, "args": st.args, "ok": st.ok} for st in rescued.steps]},
+                    }
+            except Exception:
+                traceback.print_exc()
+        return {
+            "answer": "Sorry, I couldn't complete that just now. Please try again in a moment, or rephrase "
+                      "with a train number, PNR or station names and I'll look it up.",
+            "intent": "error", "sources": [], "diagrams": [], "map": None,
+        }
 
 
 # =============================================================================
