@@ -946,6 +946,15 @@ export async function locatePlatform(baseUrl, { trainNumber, station, date, coac
   return data;
 }
 
+/** Passenger report: "the train is really on platform N". */
+export async function reportPlatform(baseUrl, { trainNumber, station, platform, reporter }) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.post("/api/station/platform-report", {
+    train_number: trainNumber, station, platform, reporter,
+  });
+  return data;
+}
+
 /** Platform Locator "Alert on change": the server re-checks and pushes, app open or closed. */
 export async function startPlatformWatch(baseUrl, token, { trainNumber, station, platform, date, lang }) {
   const client = makeClient(baseUrl);

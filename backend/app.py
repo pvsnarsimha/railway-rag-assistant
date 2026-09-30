@@ -4641,7 +4641,69 @@ def api_station_platform_locate(
     code = _resolve_station_code(station)
     if not code:
         raise HTTPException(status_code=400, detail=f"Unknown station '{station}'.")
-    return station_tools.locate_platform(train_number, code, date, coach, berth)
+    import platform_intel
+    platform_intel.touch(train_number, code)        # keep it in the poller while someone looks
+    return platform_intel.process(station_tools.locate_platform(train_number, code, date, coach, berth))
+
+
+class PlatformReportRequest(BaseModel):
+    train_number: str
+    station: str
+    platform: str
+    reporter: str   # anonymous device id
+
+
+@app.post("/api/station/platform-report")
+def api_station_platform_report(req: PlatformReportRequest):
+    """A passenger says which platform the train is really on. Two agreeing
+    reporters are enough to override a pattern estimate (and to raise a live
+    RailRadar platform to "High confidence")."""
+    import platform_intel
+    train = req.train_number.strip()
+    code = _resolve_station_code(req.station)
+    platform = re.sub(r"\s+", "", req.platform or "").upper()
+    if not re.fullmatch(r"\d{5}", train) or not code or not re.fullmatch(r"\d{1,2}[A-Z]?", platform) or not req.reporter.strip():
+        raise HTTPException(status_code=400, detail="Enter a 5-digit train, a station and a platform number.")
+    platform_intel.add_report(train, code, platform, req.reporter.strip()[:64])
+    platform_intel.touch(train, code)
+    return {"ok": True, "reports": platform_intel.recent_reports(train, code)}
+
+
+@app.websocket("/ws/platform/{train_number}/{station}")
+async def ws_platform(websocket: WebSocket, train_number: str, station: str):
+    """Pushes the platform (+ confidence) the moment it changes. The backend
+    poller refreshes it (every minute near arrival); this socket only reads
+    the cache, and asks for a fresh lookup when nothing recent is cached."""
+    import asyncio
+    import platform_intel
+    await websocket.accept()
+    code = _resolve_station_code(station)
+    if not re.fullmatch(r"\d{5}", train_number) or not code:
+        await websocket.send_json({"error": "Unknown train or station."})
+        await websocket.close()
+        return
+    last_sig = None
+    try:
+        while True:
+            platform_intel.touch(train_number, code)
+            snap = platform_intel.cached(train_number, code)
+            if snap is None or time.time() - snap.get("updated_at", 0) > 90:
+                try:
+                    res = await asyncio.to_thread(station_tools.locate_platform, train_number, code)
+                    platform_intel.process(res)
+                except Exception as e:  # noqa: BLE001
+                    await websocket.send_json({"error": str(e)[:200]})
+                snap = platform_intel.cached(train_number, code)
+            if snap:
+                sig = (snap["platform"], snap["confidence"]["level"], snap.get("arrives_in_minutes"), snap.get("delay_minutes"))
+                if sig != last_sig:
+                    last_sig = sig
+                    await websocket.send_json(snap)
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        return
+    except Exception:  # noqa: BLE001 - client went away mid-send
+        return
 
 
 class PlatformWatchRequest(BaseModel):

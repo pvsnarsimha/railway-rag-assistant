@@ -741,29 +741,30 @@ def run_tracking_check_once(status_fn: Callable[[str, Optional[str]], dict]) -> 
 
 def run_platform_check_once(locate_fn: Callable[[str, str, Optional[str]], dict]) -> dict:
     """FEATURE: Platform Locator "Alert on change", app open or closed. One
-    pass over every platform watch: look the platform up once per
-    (train, station), and push when it differs from the last one seen."""
-    watches = push_store.list_all_platform_watches()
-    cache: dict = {}
+    poller tick (platform_intel.poll_due: each pair on its own cadence, more
+    often near arrival), then a push for every watch whose platform changed.
+    A pattern estimate never triggers (or resets) an alert — only a platform
+    from a live source, passenger reports or history does."""
+    import platform_intel
+    refreshed = platform_intel.poll_due(locate_fn)
     pushed = 0
-    for w in watches:
-        key = (w["train_number"], w["station"])
-        try:
-            if key not in cache:
-                cache[key] = locate_fn(w["train_number"], w["station"], w.get("date"))
-            res = cache[key] or {}
-        except Exception as e:  # noqa: BLE001 - one bad watch shouldn't kill the pass
-            logger.warning("Platform lookup failed for watch id=%s: %s", w["id"], e)
+    if not refreshed:
+        return {"refreshed": 0, "pushed": 0}
+    for w in push_store.list_all_platform_watches():
+        res = refreshed.get((w["train_number"], w["station"]))
+        if not res or res.get("cancelled"):
             continue
         platform = str(res.get("platform") or "").strip()
-        if not platform or res.get("cancelled"):
+        level = (res.get("confidence") or {}).get("level")
+        if not platform or level in (None, "estimate"):
             continue
         prev = (w.get("last_platform") or "").strip()
         if not prev:
             push_store.set_platform_seen(w["id"], platform)
         elif prev != platform:
             result = push_notifications.send_platform_change_alert(
-                w["token"], w["train_number"], res.get("station_name") or w["station"], prev, platform)
+                w["token"], w["train_number"], res.get("station_name") or w["station"], prev, platform,
+                label=(res.get("confidence") or {}).get("label"))
             if result.get("sent"):
                 push_store.set_platform_seen(w["id"], platform)
                 pushed += 1
@@ -772,7 +773,7 @@ def run_platform_check_once(locate_fn: Callable[[str, str, Optional[str]], dict]
                 error_text = (result.get("error") or "").lower().replace(" ", "").replace("-", "")
                 if "notregistered" in error_text or "notfound" in error_text or "invalidregistration" in error_text:
                     push_store.unregister_token(w["token"])
-    return {"checked": len(watches), "pushed": pushed}
+    return {"refreshed": len(refreshed), "pushed": pushed}
 
 
 def keep_alive_ping() -> None:
@@ -817,7 +818,7 @@ def start(
     tracking_status_fn: Optional[Callable[[str, Optional[str]], dict]] = None,
     tracking_interval_minutes: int = DEFAULT_TRACKING_CHECK_INTERVAL_MINUTES,
     platform_check_fn: Optional[Callable[[str, str, Optional[str]], dict]] = None,
-    platform_check_interval_minutes: int = 2,
+    platform_check_interval_minutes: int = 1,
 ):
     """
     Starts the background job(s). Safe to call even if firebase-admin/

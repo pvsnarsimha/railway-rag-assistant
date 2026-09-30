@@ -750,12 +750,14 @@ def send_approach_alert(
 
 
 def send_platform_change_alert(token: str, train_number: str, station_name: str,
-                               old_platform: str, new_platform: str) -> dict:
+                               old_platform: str, new_platform: str, label: Optional[str] = None) -> dict:
     """FEATURE: Platform Locator "Alert on change" — the platform moved.
     Sent by alert_scheduler.run_platform_check_once, app open or closed.
     Always alerts. Never raises."""
     title = f"⚠️ Platform changed: {train_number}"
     body = f"Now arriving at {station_name} on PF {new_platform} (was PF {old_platform})."
+    if label:
+        body += f"\n{label}."
     data = {
         "type": "platform_change", "train_number": str(train_number), "station": station_name,
         "platform": str(new_platform), "old_platform": str(old_platform),
