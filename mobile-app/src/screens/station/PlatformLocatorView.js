@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { AppState, View, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator } from "react-native";
+import { AppState, View, StyleSheet, TextInput, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import { Text } from "../../i18n/Localized";
-import { locatePlatform } from "../../api/railwayApi";
+import { locatePlatform, reportPlatform } from "../../api/railwayApi";
+import { getReporterId } from "../../utils/reporterId";
 import { describeApiError } from "../../api/client";
 import { scheduleLocalAlarm, ensureLocalNotificationPermission } from "../../services/pushNotifications";
 import { enablePlatformAlert, disablePlatformAlert } from "../../services/backgroundTracking";
@@ -25,6 +26,16 @@ function nowHHMM() {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
+
+// Confidence label from the server (backend/platform_intel.py).
+const LEVEL_BADGE = {
+  confirmed: { bg: st.green, color: "#fff" },
+  high: { bg: "#16A34A", color: "#fff" },
+  likely: { bg: "#3B82F6", color: "#fff" },
+  reported: { bg: "#7C3AED", color: "#fff" },
+  history: { bg: "#0891B2", color: "#fff" },
+  estimate: { bg: "#475569", color: "#fff" },
+};
 
 const SOURCE_BADGE = {
   station_board_railkit: { text: "✓ Confirmed by station", bg: st.green, color: "#fff" },
@@ -54,6 +65,10 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
   const [alertOn, setAlertOn] = useState(false);
   const autoRan = useRef(false);
   const [alertNote, setAlertNote] = useState(null);
+  const [reportText, setReportText] = useState("");
+  const [reportNote, setReportNote] = useState(null);
+  const tripRef = useRef(trip);
+  tripRef.current = trip;
   const alertRef = useRef(false);
   // True once the server is watching: its push then covers the change, so
   // the app doesn't also fire its own local notification (a duplicate).
@@ -95,7 +110,6 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
         );
       }
       setChange({ from: prev.platform, to: res.platform, at: nowHHMM(), notified });
-      if (notified) enablePlatformAlert(apiBaseUrl, { trainNumber: t.trainNumber, station: res.station, platform: res.platform }).catch(() => {});
     }
     // Keep only today's entries so the store stays tiny.
     const next = Object.fromEntries(Object.entries(seen).filter(([k]) => k.endsWith(todayKey())));
@@ -124,6 +138,40 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
     return () => sub.remove();
   }, [data, trip, run]);
 
+  // Live push from the server: the moment the platform or its confidence
+  // changes the socket tells us and we re-fetch. The 1-minute poll above
+  // stays as the fallback when the socket can't connect.
+  const wsKey = data ? `${data.train_number}/${data.station}` : null;
+  useEffect(() => {
+    if (!wsKey || typeof WebSocket === "undefined") return undefined;
+    let ws = null, closed = false, retry = null, sig = null;
+    const open = () => {
+      try { ws = new WebSocket(`${apiBaseUrl.replace(/^http/, "ws")}/ws/platform/${wsKey}`); } catch (e) { return; }
+      ws.onmessage = (ev) => {
+        let m = null;
+        try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (!m || m.error) return;
+        const next = `${m.platform}|${m.confidence?.level}`;
+        if (sig !== null && next !== sig) run(tripRef.current, { quiet: true });
+        sig = next;
+      };
+      ws.onclose = () => { if (!closed) retry = setTimeout(open, 15000); };
+      ws.onerror = () => { try { ws.close(); } catch (e) { /* ignore */ } };
+    };
+    open();
+    return () => { closed = true; clearTimeout(retry); try { ws && ws.close(); } catch (e) { /* ignore */ } };
+  }, [wsKey, apiBaseUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function sendReport() {
+    const platform = reportText.trim();
+    if (!data || !/^\d{1,2}[A-Za-z]?$/.test(platform)) { setReportNote("Enter a platform number, e.g. 3."); return; }
+    try {
+      await reportPlatform(apiBaseUrl, { trainNumber: data.train_number, station: data.station, platform, reporter: await getReporterId() });
+      setReportText(""); setReportNote("Thanks — reported. Two matching reports update everyone's platform.");
+      run(trip, { quiet: true });
+    } catch (e) { setReportNote("Couldn't send the report right now."); }
+  }
+
   // Restore "Alert is on" for this train + station (and refresh the server watch).
   const alertKey = data ? `${data.train_number}:${data.station}` : null;
   useEffect(() => {
@@ -134,7 +182,7 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
       try { map = JSON.parse(raw || "{}") || {}; } catch (e) { map = {}; }
       if (cancelled || !map[alertKey]) return;
       setAlertOn(true);
-      enablePlatformAlert(apiBaseUrl, { trainNumber: data.train_number, station: data.station, platform: data.platform })
+      enablePlatformAlert(apiBaseUrl, { trainNumber: data.train_number, station: data.station, platform: data.platform_source === "estimate" ? null : data.platform })
         .then((r) => { serverWatchRef.current = !!r.ok; }).catch(() => {});
     }).catch(() => {});
     return () => { cancelled = true; };
@@ -150,7 +198,7 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
     if (turnOn) {
       ensureLocalNotificationPermission();
       map[alertKey] = Date.now();
-      const r = await enablePlatformAlert(apiBaseUrl, { trainNumber: data.train_number, station: data.station, platform: data.platform });
+      const r = await enablePlatformAlert(apiBaseUrl, { trainNumber: data.train_number, station: data.station, platform: data.platform_source === "estimate" ? null : data.platform });
       serverWatchRef.current = !!r.ok;
       if (!r.ok) setAlertNote(r.reason);
     } else {
@@ -168,7 +216,10 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
     : isCoach ? "Where to stand for your coach" : "Live platform number";
   const showForm = editing || !data;
 
-  const badge = data ? (SOURCE_BADGE[data.platform_source] || SOURCE_BADGE.estimate) : null;
+  const conf = data?.confidence;
+  const badge = !data ? null
+    : conf ? { ...(LEVEL_BADGE[conf.level] || LEVEL_BADGE.estimate), text: conf.label }
+    : (SOURCE_BADGE[data.platform_source] || SOURCE_BADGE.estimate);
   const arrTime = data?.scheduled_arrival || data?.scheduled_departure;
   const expTime = data?.expected_arrival || data?.expected_departure;
   const coachLabel = data?.coach || trip.coach;
@@ -231,6 +282,8 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
           {data.delay_minutes > 0 ? ` · running ${data.delay_minutes} min late` : data.delay_minutes === 0 ? " · on time" : ""}
         </Text>
       ) : null}
+      {conf?.reasons?.map((r) => <Text key={r} style={styles.heroIn}>{r}</Text>)}
+      {conf?.warnings?.map((w) => <Text key={w} style={[styles.heroIn, { color: "#FCD34D" }]}>⚠️ {w}</Text>)}
       {data.platform_source === "estimate" && data.alternate_platform ? (
         <Text style={styles.heroIn}>No live platform yet — could also be PF {data.alternate_platform}</Text>
       ) : null}
@@ -332,6 +385,19 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
               </>
             )}
             {berthCard}
+            <View style={styles.reportBox}>
+              <Text style={styles.reportTitle}>Seeing a different platform?</Text>
+              <View style={styles.reportRow}>
+                <TextInput
+                  style={styles.reportInput} value={reportText} onChangeText={setReportText}
+                  placeholder="Platform no." maxLength={3}
+                />
+                <TouchableOpacity style={styles.reportBtn} onPress={sendReport}>
+                  <Text style={styles.reportBtnText}>Report</Text>
+                </TouchableOpacity>
+              </View>
+              {reportNote ? <Text style={styles.hint}>{reportNote}</Text> : null}
+            </View>
             <View style={styles.actions}>
               <TouchableOpacity
                 style={styles.navBtn}
@@ -391,6 +457,12 @@ const styles = StyleSheet.create({
   },
   berthTitle: { fontSize: 16, fontWeight: "800", color: st.ink },
   berthText: { fontSize: 12.5, color: st.muted, marginTop: 4, lineHeight: 17 },
+  reportBox: { marginHorizontal: 16, marginTop: 16, backgroundColor: st.card, borderRadius: 18, padding: 14 },
+  reportTitle: { fontSize: 13, fontWeight: "800", color: st.ink, marginBottom: 8 },
+  reportRow: { flexDirection: "row", gap: 10 },
+  reportInput: { flex: 1, borderWidth: 1, borderColor: st.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, color: st.ink },
+  reportBtn: { backgroundColor: st.blue, borderRadius: 12, paddingHorizontal: 18, justifyContent: "center" },
+  reportBtnText: { color: "#fff", fontWeight: "800" },
   actions: { flexDirection: "row", gap: 10, marginHorizontal: 16, marginTop: 16 },
   navBtn: { flex: 1, backgroundColor: st.blue, borderRadius: 999, paddingVertical: 14, alignItems: "center" },
   navBtnText: { color: "#fff", fontWeight: "800", fontSize: 14 },
