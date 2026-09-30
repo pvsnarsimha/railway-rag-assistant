@@ -13,13 +13,18 @@
   {
     "id": "chart-preparation",
     "category": "PNR & Booking Status",
-    "text": "The reservation chart is usually prepared 4 hours before the train's scheduled departure from its originating station, though for some trains it may be prepared earlier (up to 24-30 hours) if departure is very early morning. Once the chart is prepared, PNR status freezes and any remaining waitlisted tickets are typically cancelled automatically if they did not clear.",
+    "text": "The reservation chart is prepared about 4 hours before the train's departure from its originating station and a second chart about 30 minutes before departure. Since 2025 the Railway Board has been moving to earlier charts: about 8 hours before departure, and for trains leaving before 14:00 the previous day at 21:00. Once the chart is prepared the PNR status freezes and waitlisted tickets that did not clear are cancelled automatically.",
     "entities": [
       "chart_preparation",
       "wl",
       "cnf",
       "rac"
-    ]
+    ],
+    "source": [
+      "https://cr.indianrailways.gov.in/view_detail.jsp?lang=0&id=0%2C4%2C268&dcd=9856&did=1751953668715F08FEB7D1A698517544F5A29DD31BC5D",
+      "https://www.pib.gov.in/PressReleasePage.aspx?PRID=1662084"
+    ],
+    "verified": "verified"
   },
   {
     "id": "waitlist-clearing",
@@ -36,7 +41,7 @@
   {
     "id": "tatkal-rules",
     "category": "Tatkal Booking",
-    "text": "Tatkal booking opens one day before the actual date of journey (excluding the day of journey), from 10:00 AM for AC classes (2A, 3A, CC, EC) and 11:00 AM for non-AC classes (SL, 2S, FC). Tatkal tickets carry an additional Tatkal charge on top of the base fare, vary by class, and are non-refundable on cancellation except in specific cases like train cancellation by Railways.",
+    "text": "Tatkal booking opens one day before the journey date (excluding the journey day) at 10:00 for AC classes (1A, 2A, 3A, CC, EC, 3E) and 11:00 for non-AC classes (SL, FC, 2S). The Tatkal charge is 10% of basic fare for Second Class and 30% for other classes, subject to minimum and maximum limits, and no concession applies. A confirmed Tatkal ticket is not refunded on the passenger's own cancellation.",
     "entities": [
       "tatkal",
       "booking_process",
@@ -56,7 +61,7 @@
   {
     "id": "cancellation-refund-confirmed",
     "category": "Cancellation & Refunds",
-    "text": "For a confirmed ticket, cancellation charges depend on how far in advance it is cancelled before scheduled departure: cancelling more than 48 hours before departure incurs a flat minimum cancellation charge per class; cancelling between 48 and 12 hours before departure forfeits 25% of the fare; cancelling between 12 hours and 4 hours before departure forfeits 50% of the fare; cancelling within 4 hours of departure generally results in no refund for confirmed tickets.",
+    "text": "For a confirmed ticket, cancellation charges depend on how far in advance it is cancelled before scheduled departure: cancelling more than 48 hours before departure incurs a flat minimum cancellation charge per class; cancelling between 48 and 12 hours before departure forfeits 25% of the fare; cancelling between 12 hours and 4 hours before departure forfeits 50% of the fare; cancelling within 4 hours of departure generally results in no refund for confirmed tickets. Flat charge per passenger when cancelled more than 48 hours before departure: AC First and Executive Rs 240, AC 2-Tier and First Class Rs 200, AC 3-Tier, 3 Economy and Chair Car Rs 180, Sleeper Rs 120, Second Class Rs 60 (GST extra on AC classes).",
     "entities": [
       "cancellation",
       "refund",
@@ -151,7 +156,7 @@
   {
     "id": "luggage-rules",
     "category": "Luggage",
-    "text": "Each class has a free luggage allowance (varies by class, e.g. higher for AC First than Sleeper) and a marginally higher limit if excess luggage fare is paid at the parcel office. Luggage beyond the paid limit must be booked separately as registered luggage; carrying excess unbooked luggage can attract a penalty.",
+    "text": "Each class has a free luggage allowance: about 70 kg in AC First Class, 50 kg in AC 2-Tier and First Class, 40 kg in AC 3-Tier, Chair Car and Sleeper, and 35 kg in Second Class (verify in the Commercial Manual). Luggage above the free allowance must be booked at the parcel office before boarding and is charged at 1.5 times the luggage rate; carrying unbooked excess luggage can attract a penalty.",
     "entities": [
       "luggage",
       "classes"
@@ -230,7 +235,7 @@
   {
     "id": "penalty-without-ticket",
     "category": "Penalties & Violations",
-    "text": "Travelling without a valid ticket, or with a lower class/quota ticket than the class actually travelled in, attracts the fare for the distance travelled (or up to the next stoppage, whichever is more) plus a penalty under the Railways Act. The exact penalty amount is revised periodically, so passengers should check the current RailMadad/IRCTC published penalty schedule rather than assume a fixed figure; repeated or serious offences can lead to prosecution rather than just a fine.",
+    "text": "Travelling without a valid ticket, or in a higher class than booked, is an offence under Section 138 of the Railways Act, 1989: the passenger pays the fare from the originating station (or the fare difference) plus an excess charge of Rs 250 as prescribed, and can be prosecuted for refusing to pay. Check the current amount on the Railway Board or IRCTC site.",
     "entities": [
       "penalty",
       "without_ticket",
@@ -902,5 +907,280 @@
       "vivek express",
       "vande bharat"
     ]
+  },
+  {
+    "id": "rule-arp-60-days",
+    "category": "Booking Process",
+    "text": "Advance reservation period (ARP): since 1 November 2024 tickets can be booked up to 60 days before the date of journey (the journey date itself is not counted). Bookings made earlier under the old 120-day limit remain valid. Foreign tourists keep a 365-day limit, and a few day trains such as Taj Express and Gomti Express have shorter limits.",
+    "entities": [
+      "arp",
+      "advance reservation",
+      "60 days",
+      "booking window",
+      "120 days"
+    ],
+    "source": [
+      "https://www.pib.gov.in/PressReleasePage.aspx?PRID=2065790&reg=48&lang=2"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-cancel-flat-charges",
+    "category": "Cancellation & Refunds",
+    "text": "Flat cancellation charge for a confirmed ticket cancelled more than 48 hours before departure, per passenger: AC First Class and Executive Class Rs 240, AC 2-Tier and First Class Rs 200, AC 3-Tier, AC 3 Economy and AC Chair Car Rs 180, Sleeper Rs 120, Second Class Rs 60. GST is added on AC classes. The rest of the fare is refunded.",
+    "entities": [
+      "cancellation charge",
+      "flat charge",
+      "240",
+      "200",
+      "180",
+      "120",
+      "60",
+      "refund"
+    ],
+    "source": [
+      "https://indianrailways.gov.in/railwayboard/uploads/directorate/coaching/pdf/RefundRules.pdf",
+      "https://contents.irctc.co.in/en/REFUND%20RULES%20wef%2012-Nov-15.pdf"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-cancel-time-slabs",
+    "category": "Cancellation & Refunds",
+    "text": "Cancellation of a confirmed ticket closer to departure costs more: more than 48 hours before departure is the flat charge only; from 48 hours down to 12 hours before departure 25% of the fare is deducted (never less than the flat charge); from 12 hours down to 4 hours before 50% is deducted; within 4 hours of departure, or after the chart is prepared, no refund is given on a confirmed ticket.",
+    "entities": [
+      "cancellation",
+      "25%",
+      "50%",
+      "48 hours",
+      "12 hours",
+      "4 hours",
+      "refund slab"
+    ],
+    "source": [
+      "https://indianrailways.gov.in/railwayboard/uploads/directorate/coaching/pdf/RefundRules.pdf",
+      "https://contents.irctc.co.in/en/REFUND%20RULES%20wef%2012-Nov-15.pdf"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-train-late-3-hours",
+    "category": "Cancellation & Refunds",
+    "text": "If a train is running more than three hours late at the boarding station and the passenger decides not to travel, no cancellation charge or clerkage is deducted and the full fare is refunded, provided the ticket is cancelled or a TDR is filed within the prescribed time.",
+    "entities": [
+      "late",
+      "delay",
+      "three hours",
+      "full refund",
+      "tdr"
+    ],
+    "source": [
+      "https://indianrailways.gov.in/railwayboard/uploads/directorate/coaching/pdf/RefundRules.pdf",
+      "https://contents.irctc.co.in/en/REFUND%20RULES%20wef%2012-Nov-15.pdf"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-train-cancelled-auto-refund",
+    "category": "Cancellation & Refunds",
+    "text": "When Railways cancels a train, the full fare of confirmed and RAC e-tickets is refunded automatically to the account used for booking, with no need to cancel online or file a TDR. Counter tickets need to be surrendered at a reservation counter for refund.",
+    "entities": [
+      "train cancelled",
+      "auto refund",
+      "e-ticket",
+      "tdr",
+      "full refund"
+    ],
+    "source": [
+      "https://indianrailways.gov.in/railwayboard/uploads/directorate/coaching/pdf/RefundRules.pdf",
+      "https://contents.irctc.co.in/en/REFUND%20RULES%20wef%2012-Nov-15.pdf"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-partial-waitlist-cancel",
+    "category": "Cancellation & Refunds",
+    "text": "On one e-ticket where some passengers are confirmed and others are on RAC or waitlist, the passengers who did not confirm can be cancelled online up to 30 minutes before scheduled departure for a full refund less clerkage. Cancelling only part of a booking follows the same time slabs as any other cancellation.",
+    "entities": [
+      "partially confirmed",
+      "waitlist",
+      "rac",
+      "30 minutes",
+      "clerkage"
+    ],
+    "source": [
+      "https://indianrailways.gov.in/railwayboard/uploads/directorate/coaching/pdf/RefundRules.pdf",
+      "https://contents.irctc.co.in/en/REFUND%20RULES%20wef%2012-Nov-15.pdf"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-tatkal-timing-charges",
+    "category": "Tatkal Booking",
+    "text": "Tatkal opens one day before the journey date (excluding the journey day): 10:00 for AC classes (1A, 2A, 3A, CC, EC, 3E) and 11:00 for non-AC classes (SL, FC, 2S). A Tatkal charge is added to the fare per passenger: 10% of basic fare for Second Class and 30% for other classes, subject to minimum and maximum limits. Concessions do not apply to Tatkal tickets.",
+    "entities": [
+      "tatkal",
+      "10:00",
+      "11:00",
+      "tatkal charge",
+      "concession",
+      "booking time"
+    ],
+    "source": [
+      "https://contents.irctc.co.in/en/TatkalFaq.html"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-tatkal-no-refund",
+    "category": "Tatkal Booking",
+    "text": "A confirmed Tatkal ticket cancelled by the passenger gets no refund. Refunds apply only when Railways cancels the train, diverts it so that it no longer serves the passenger's route, or the train is very late as per the refund rules. Waitlisted Tatkal tickets are cancelled with the usual clerkage deduction.",
+    "entities": [
+      "tatkal",
+      "no refund",
+      "cancellation",
+      "waitlisted tatkal"
+    ],
+    "source": [
+      "https://contents.irctc.co.in/en/TatkalFaq.html",
+      "https://indianrailways.gov.in/railwayboard/uploads/directorate/coaching/pdf/RefundRules.pdf"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-chart-timing-2025",
+    "category": "PNR & Booking Status",
+    "text": "Reservation charts: the first chart has been prepared about 4 hours before departure, and the second chart 30 minutes before departure, when remaining berths can still be booked. In 2025 the Railway Board moved to earlier first charts: for trains leaving before 14:00 the chart is prepared the previous day at 21:00, and for other trains about 8 hours before departure, being phased in. Check the current notice for your train.",
+    "entities": [
+      "chart",
+      "first chart",
+      "second chart",
+      "8 hours",
+      "21:00",
+      "waitlist"
+    ],
+    "source": [
+      "https://cr.indianrailways.gov.in/view_detail.jsp?lang=0&id=0%2C4%2C268&dcd=9856&did=1751953668715F08FEB7D1A698517544F5A29DD31BC5D",
+      "https://www.pib.gov.in/PressReleasePage.aspx?PRID=1662084"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-luggage-free-allowance",
+    "category": "Luggage",
+    "text": "Free luggage allowance depends on class: about 70 kg in AC First Class, 50 kg in AC 2-Tier and First Class, 40 kg in AC 3-Tier, Chair Car and Sleeper, and 35 kg in Second Class. A higher marginal limit is allowed on payment of luggage charges. Verify the current figures in the Indian Railways Commercial Manual before relying on them.",
+    "entities": [
+      "luggage",
+      "free allowance",
+      "70 kg",
+      "50 kg",
+      "40 kg",
+      "35 kg",
+      "baggage"
+    ],
+    "source": [
+      "https://indianrailways.gov.in/railwayboard/uploads/codesmanual/CommManual-I/ComercialManualCh8_data.htm",
+      "https://wr.indianrailways.gov.in/view_section.jsp?lang=0&id=0,6,629,634"
+    ],
+    "verified": "partly verified"
+  },
+  {
+    "id": "rule-luggage-excess",
+    "category": "Luggage",
+    "text": "Luggage above the free allowance must be booked at the parcel or luggage office before boarding. Excess luggage carried in the compartment is charged at 1.5 times the luggage rate, and passengers can be penalised for carrying unbooked excess luggage. Items such as an umbrella or tiffin box are carried free.",
+    "entities": [
+      "excess luggage",
+      "1.5 times",
+      "parcel office",
+      "luggage rate"
+    ],
+    "source": [
+      "https://indianrailways.gov.in/railwayboard/uploads/codesmanual/CommManual-I/ComercialManualCh8_data.htm",
+      "https://wr.indianrailways.gov.in/view_section.jsp?lang=0&id=0,6,629,634"
+    ],
+    "verified": "verified"
+  },
+  {
+    "id": "rule-no-ticket-penalty",
+    "category": "Penalties & Violations",
+    "text": "Travelling without a valid ticket is an offence under Section 138 of the Railways Act, 1989. The passenger is charged the fare from the originating station of the train plus an excess charge (Rs 250 as prescribed), and can be fined or prosecuted for a refusal to pay. Travelling in a higher class than the ticket allows means paying the fare difference and the excess charge.",
+    "entities": [
+      "without ticket",
+      "penalty",
+      "section 138",
+      "railways act",
+      "excess charge",
+      "fine"
+    ],
+    "source": [
+      "https://www.indiacode.nic.in/bitstream/123456789/15416/1/the_railways_act,_1989.pdf"
+    ],
+    "verified": "statute; check current amount"
+  },
+  {
+    "id": "rule-alarm-chain",
+    "category": "Penalties & Violations",
+    "text": "Pulling the alarm chain without genuine reason (medical emergency, danger, robbery) is punishable under Section 141 of the Railways Act with imprisonment up to one year or a fine up to Rs 1,000, or both. Genuine emergencies do not attract penalty.",
+    "entities": [
+      "alarm chain",
+      "section 141",
+      "penalty",
+      "emergency"
+    ],
+    "source": [
+      "https://www.indiacode.nic.in/bitstream/123456789/15416/1/the_railways_act,_1989.pdf"
+    ],
+    "verified": "statute; check current amount"
+  },
+  {
+    "id": "rule-id-proof",
+    "category": "Booking Process",
+    "text": "At least one passenger on an e-ticket must show an original photo ID during the journey, otherwise the passenger may be treated as travelling without a ticket. Commonly accepted IDs include Aadhaar (including DigiLocker or mAadhaar), passport, voter ID, driving licence, PAN card and photo ID issued by a government body or school. Check IRCTC's current list.",
+    "entities": [
+      "id proof",
+      "photo id",
+      "aadhaar",
+      "e-ticket",
+      "identity"
+    ],
+    "source": [
+      "https://contents.irctc.co.in/en/TatkalFaq.html"
+    ],
+    "verified": "partly verified"
+  },
+  {
+    "id": "rule-ticket-transfer",
+    "category": "Booking Process",
+    "text": "A confirmed ticket can be transferred to another person only within the family (father, mother, brother, sister, son, daughter, husband or wife) by applying at a reservation office at least 24 hours before departure. Tickets cannot be transferred to unrelated people, and Tatkal tickets are generally not transferable.",
+    "entities": [
+      "transfer ticket",
+      "name change",
+      "family",
+      "24 hours"
+    ],
+    "source": [
+      "https://indianrailways.gov.in/railwayboard/uploads/directorate/coaching/pdf/RefundRules.pdf"
+    ],
+    "verified": "partly verified"
+  },
+  {
+    "id": "rule-official-sources",
+    "category": "Support & Helpline",
+    "text": "Official sources for railway rules: the Railways Act, 1989 on indiacode.nic.in; Railway Board circulars and manuals on indianrailways.gov.in (Commercial Manual, refund rules, coaching tariff); IRCTC (irctc.co.in and contents.irctc.co.in) for ticketing rules and FAQs; NTES (enquiry.indianrail.gov.in) for running status; Rail Madad (railmadad.indianrailways.gov.in) and helpline 139 for complaints. Rules change, so confirm on these sites.",
+    "entities": [
+      "official source",
+      "railway board",
+      "irctc",
+      "indiacode",
+      "rail madad",
+      "139",
+      "circular"
+    ],
+    "source": [
+      "https://www.indiacode.nic.in/",
+      "https://indianrailways.gov.in/",
+      "https://www.irctc.co.in/"
+    ],
+    "verified": "verified"
   }
 ]
