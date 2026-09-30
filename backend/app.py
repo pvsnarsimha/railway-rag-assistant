@@ -3357,6 +3357,7 @@ def chat(req: ChatRequest):
         # (timetable, live status, KB, web...) and retries alternatives instead
         # of surfacing "not available"/an error. req.agent forces it on/off. ---
         agent_result = None
+        agent_error = None
         rules_came_up_short = bool(live_error) or trains_between_empty or (
             intent == query_router.Intent.GENERAL_FAQ and not few_shot_match and not retrieval.chunks
         )
@@ -3372,6 +3373,7 @@ def chat(req: ChatRequest):
                 agent_result = None
             if agent_result is not None and not agent_result.answer:
                 print(f"[agent] no answer, using rule-based path: {agent_result.error}")
+                agent_error = agent_result.error
                 agent_result = None
 
         web_results = None
@@ -3449,6 +3451,7 @@ def chat(req: ChatRequest):
                             else [{"title": r.title, "url": r.url} for r in (web_results or [])]),
             "agent": {
                 "used": bool(agent_result),
+                "error": None if agent_result else agent_error,  # why the agent didn't answer (diagnostics)
                 "provider": agent_result.provider if agent_result else None,
                 "steps": [{"tool": st.tool, "args": st.args, "ok": st.ok} for st in agent_result.steps]
                          if agent_result else [],
