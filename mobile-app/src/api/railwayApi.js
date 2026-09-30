@@ -27,8 +27,9 @@ export async function checkHealth(baseUrl) {
   return data;
 }
 
-export async function sendChatMessage(baseUrl, { message, imageBase64, imageMediaType, language, trainNumber, webSearch, deepThink }) {
-  const client = makeClient(baseUrl, { timeoutMs: 45000 }); // LLM synthesis can be slow
+export async function sendChatMessage(baseUrl, { message, imageBase64, imageMediaType, language, trainNumber, webSearch, deepThink, agent }) {
+  // Agent runs several tool calls in a row, so allow more time than plain synthesis.
+  const client = makeClient(baseUrl, { timeoutMs: 75000 });
   const { data } = await client.post("/api/chat", {
     message,
     image_base64: imageBase64 || null,
@@ -37,6 +38,7 @@ export async function sendChatMessage(baseUrl, { message, imageBase64, imageMedi
     train_number: trainNumber || null,
     web_search: webSearch === undefined ? null : webSearch, // null = today's automatic behavior
     deep_think: !!deepThink,
+    agent: agent === undefined ? null : agent, // null = backend decides (agent steps in when the fixed rules fall short)
   });
   return data;
 }

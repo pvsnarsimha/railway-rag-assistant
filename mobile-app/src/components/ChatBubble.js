@@ -29,12 +29,20 @@ export default function ChatBubble({ message }) {
 
         {!isUser && message.map && <RouteMapPreview map={message.map} />}
 
-        {!isUser && (message.webSources?.length > 0 || message.deepThinkUsed) && (
+        {!isUser && (message.webSources?.length > 0 || message.deepThinkUsed || message.agent?.used) && (
           <View style={styles.usedRow}>
             {message.deepThinkUsed && (
               <View style={styles.usedBadge}>
                 <Ionicons name="bulb" size={11} color={colors.primary} />
                 <Text style={styles.usedBadgeText}>Deep Think</Text>
+              </View>
+            )}
+            {message.agent?.used && (
+              <View style={styles.usedBadge}>
+                <Ionicons name="hardware-chip" size={11} color={colors.primary} />
+                <Text style={styles.usedBadgeText}>
+                  AI agent{message.agent.steps?.length ? `: ${[...new Set(message.agent.steps.map((s) => s.tool))].join(", ")}` : ""}
+                </Text>
               </View>
             )}
             {message.webSources?.length > 0 && (
