@@ -42,3 +42,7 @@ yake==0.4.8                # keyphrase extraction — pure Python, no torch/GPU 
 # bertopic==0.16.3          # richer automatic intent/topic clustering
 # gliner==0.2.13            # zero-shot entity extraction beyond the gazetteer's known stations
 # spacy==3.7.5              # rules-based alternative entity matcher (EntityRuler/PhraseMatcher)
+
+# Optional shared cache for the platform pipeline (platform_intel.py). Set REDIS_URL to use it;
+# without it an in-process cache is used.
+redis>=5.0.0
