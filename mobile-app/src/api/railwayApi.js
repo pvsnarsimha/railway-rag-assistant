@@ -946,6 +946,23 @@ export async function locatePlatform(baseUrl, { trainNumber, station, date, coac
   return data;
 }
 
+/** Platform Locator "Alert on change": the server re-checks and pushes, app open or closed. */
+export async function startPlatformWatch(baseUrl, token, { trainNumber, station, platform, date, lang }) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.post("/api/push/platform-watch", {
+    token, train_number: trainNumber, station, platform: platform || null, date: date || null, lang: lang || null,
+  });
+  return data;
+}
+
+export async function stopPlatformWatch(baseUrl, token, { trainNumber, station, tokens }) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.post("/api/push/platform-watch/remove", {
+    token, train_number: trainNumber, station, tokens: tokens || [],
+  });
+  return data;
+}
+
 /** Station Navigator: schematic station + walking route to a platform/coach. */
 export async function getStationMap(baseUrl, stationCode, { platform, trainNumber, coach, date, stepFree } = {}) {
   const client = makeClient(baseUrl, { timeoutMs: 25000 });

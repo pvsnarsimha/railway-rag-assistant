@@ -1,17 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { View, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator } from "react-native";
+import { AppState, View, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import { Text } from "../../i18n/Localized";
 import { locatePlatform } from "../../api/railwayApi";
 import { describeApiError } from "../../api/client";
 import { scheduleLocalAlarm, ensureLocalNotificationPermission } from "../../services/pushNotifications";
+import { enablePlatformAlert, disablePlatformAlert } from "../../services/backgroundTracking";
 import {
   st, useTrip, ToolHeader, TripForm, Pill, CoachStrip, SectionLabel, Note, formatIn,
 } from "./stationShared";
 import { PlatformScene, CoachSeatMap, CoachPositionScene } from "./stationScenes";
 
 const SEEN_KEY = "stationTools.platformSeen";
+const ALERT_KEY = "stationTools.platformAlerts";
 const POLL_MS = 60 * 1000;
 
 function todayKey() {
@@ -36,8 +38,10 @@ const SOURCE_BADGE = {
  * Platform Locator (mode="platform") and Coach Position (mode="coach").
  * Same data — which platform the train comes in on, the real rake and
  * where the rider's coach stops — with the coach strip leading in coach
- * mode. "Alert on change" re-checks every minute while the screen is open
- * and notifies the moment the platform changes.
+ * mode. The platform is re-checked every minute while the screen is open.
+ * "Alert on change" also registers the trip with the server, which keeps
+ * checking and sends a push the moment the platform changes — with the
+ * app open or closed.
  */
 export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mode = "platform" }) {
   const [trip, setTrip] = useTrip();
@@ -49,7 +53,11 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
   const [change, setChange] = useState(null);
   const [alertOn, setAlertOn] = useState(false);
   const autoRan = useRef(false);
+  const [alertNote, setAlertNote] = useState(null);
   const alertRef = useRef(false);
+  // True once the server is watching: its push then covers the change, so
+  // the app doesn't also fire its own local notification (a duplicate).
+  const serverWatchRef = useRef(false);
   alertRef.current = alertOn;
 
   const run = useCallback(async (t, { quiet } = {}) => {
@@ -79,7 +87,7 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
     const prev = seen[key];
     if (prev && prev.platform && res.platform && prev.platform !== res.platform) {
       const notified = alertRef.current;
-      if (notified) {
+      if (notified && !serverWatchRef.current) {
         scheduleLocalAlarm(
           `Platform changed: ${t.trainNumber}`,
           `Now arriving at ${res.station_name || res.station} on PF ${res.platform} (was PF ${prev.platform}).`,
@@ -87,6 +95,7 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
         );
       }
       setChange({ from: prev.platform, to: res.platform, at: nowHHMM(), notified });
+      if (notified) enablePlatformAlert(apiBaseUrl, { trainNumber: t.trainNumber, station: res.station, platform: res.platform }).catch(() => {});
     }
     // Keep only today's entries so the store stays tiny.
     const next = Object.fromEntries(Object.entries(seen).filter(([k]) => k.endsWith(todayKey())));
@@ -100,12 +109,57 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
     if (trip.trainNumber && trip.station) { autoRan.current = true; run(trip); }
   }, [trip.trainNumber, trip.station]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // "Alert on change": poll while enabled and the screen is open.
+  // Keep the platform number fresh while the screen is open (it used to
+  // refresh only with the alert on, so the shown platform went stale).
   useEffect(() => {
-    if (!alertOn || !data) return undefined;
+    if (!data || editing) return undefined;
     const id = setInterval(() => run(trip, { quiet: true }), POLL_MS);
     return () => clearInterval(id);
-  }, [alertOn, data, trip, run]);
+  }, [data, editing, trip, run]);
+
+  // Re-check when the app comes back to the foreground.
+  useEffect(() => {
+    if (!data) return undefined;
+    const sub = AppState.addEventListener("change", (st2) => { if (st2 === "active") run(trip, { quiet: true }); });
+    return () => sub.remove();
+  }, [data, trip, run]);
+
+  // Restore "Alert is on" for this train + station (and refresh the server watch).
+  const alertKey = data ? `${data.train_number}:${data.station}` : null;
+  useEffect(() => {
+    if (!alertKey) return;
+    let cancelled = false;
+    AsyncStorage.getItem(ALERT_KEY).then((raw) => {
+      let map = {};
+      try { map = JSON.parse(raw || "{}") || {}; } catch (e) { map = {}; }
+      if (cancelled || !map[alertKey]) return;
+      setAlertOn(true);
+      enablePlatformAlert(apiBaseUrl, { trainNumber: data.train_number, station: data.station, platform: data.platform })
+        .then((r) => { serverWatchRef.current = !!r.ok; }).catch(() => {});
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [alertKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function toggleAlert() {
+    if (!data) return;
+    const turnOn = !alertOn;
+    setAlertOn(turnOn);
+    setAlertNote(null);
+    let map = {};
+    try { map = JSON.parse((await AsyncStorage.getItem(ALERT_KEY)) || "{}") || {}; } catch (e) { map = {}; }
+    if (turnOn) {
+      ensureLocalNotificationPermission();
+      map[alertKey] = Date.now();
+      const r = await enablePlatformAlert(apiBaseUrl, { trainNumber: data.train_number, station: data.station, platform: data.platform });
+      serverWatchRef.current = !!r.ok;
+      if (!r.ok) setAlertNote(r.reason);
+    } else {
+      delete map[alertKey];
+      serverWatchRef.current = false;
+      disablePlatformAlert(apiBaseUrl, { trainNumber: data.train_number, station: data.station }).catch(() => {});
+    }
+    AsyncStorage.setItem(ALERT_KEY, JSON.stringify(map)).catch(() => {});
+  }
 
   const isCoach = mode === "coach";
   const title = isCoach ? "Coach Position" : "Platform Locator";
@@ -287,7 +341,7 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.alertBtn, alertOn && styles.alertBtnOn]}
-                onPress={() => { if (!alertOn) ensureLocalNotificationPermission(); setAlertOn((v) => !v); }}
+                onPress={toggleAlert}
                 accessibilityState={{ selected: alertOn }}
               >
                 <Text style={[styles.alertBtnText, alertOn && { color: st.blue }]}>
@@ -295,7 +349,11 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
                 </Text>
               </TouchableOpacity>
             </View>
-            {alertOn ? <Note text="Re-checking every minute while this screen is open. You'll get a notification if the platform changes." /> : null}
+            {alertOn ? (
+              <Note text={alertNote
+                ? `${alertNote} Re-checking every minute while this screen is open.`
+                : "You'll get a notification if the platform changes — even when the app is closed."} />
+            ) : null}
             <Note text={`Checked at ${data.checked_at} IST. ${data.disclaimer}`} />
           </>
         )}

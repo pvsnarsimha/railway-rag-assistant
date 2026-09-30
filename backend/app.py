@@ -165,6 +165,8 @@ def _startup_diagnostics():
         # FEATURE: background Live Tracking — same live pipeline, no label.
         tracking_status_fn=lambda train_number, date: _predict_for_watch_station(train_number, date, None),
         tracking_interval_minutes=_interval,
+        # FEATURE: Platform Locator "Alert on change" (app open or closed).
+        platform_check_fn=lambda train_number, station, date: station_tools.locate_platform(train_number, station, date),
     )
 
 
@@ -4640,6 +4642,38 @@ def api_station_platform_locate(
     if not code:
         raise HTTPException(status_code=400, detail=f"Unknown station '{station}'.")
     return station_tools.locate_platform(train_number, code, date, coach, berth)
+
+
+class PlatformWatchRequest(BaseModel):
+    token: str
+    train_number: str
+    station: str
+    date: Optional[str] = None
+    platform: Optional[str] = None   # the platform the app is showing now
+    tokens: Optional[List[str]] = None  # with remove: also the device's earlier tokens
+    lang: Optional[str] = None
+
+
+@app.post("/api/push/platform-watch")
+def api_push_platform_watch(req: PlatformWatchRequest):
+    """Platform Locator "Alert on change" ON: the server re-checks the
+    platform every couple of minutes and pushes when it changes."""
+    token = req.token.strip()
+    code = _resolve_station_code(req.station)
+    if not token or not code or not re.fullmatch(r"\d{5}", req.train_number.strip()):
+        raise HTTPException(status_code=400, detail="token, a 5-digit train_number and a station are required")
+    push_store.register_token(token, None, _clean_lang(req.lang))
+    push_store.upsert_platform_watch(token, req.train_number.strip(), code, (req.date or "").strip() or None,
+                                     (req.platform or "").strip() or None)
+    return {"ok": True}
+
+
+@app.post("/api/push/platform-watch/remove")
+def api_push_platform_watch_remove(req: PlatformWatchRequest):
+    tokens = [t.strip() for t in [req.token, *(req.tokens or [])] if t and t.strip()]
+    code = _resolve_station_code(req.station) if req.station else None
+    n = push_store.delete_platform_watch(tokens, req.train_number.strip() or None, code)
+    return {"ok": True, "removed": n}
 
 
 @app.get("/api/station/map/{station_code}")

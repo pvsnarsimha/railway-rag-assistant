@@ -14,7 +14,7 @@
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
-import { registerPushToken, setPushLanguage, setTrackingInterval, startBackgroundTracking, stopBackgroundTracking, resumeTrackingInterval } from "../api/railwayApi";
+import { startPlatformWatch, stopPlatformWatch, registerPushToken, setPushLanguage, setTrackingInterval, startBackgroundTracking, stopBackgroundTracking, resumeTrackingInterval } from "../api/railwayApi";
 import { getLanguage, hasChosenLanguage, saveLanguage } from "../utils/notifyLanguage";
 import { registerForPushNotifications, refreshWebPushToken } from "./pushNotifications";
 
@@ -148,6 +148,31 @@ export async function disableBackgroundTracking(apiBaseUrl, { trainNumber, date 
   // Stop removes the train from EVERY token this device has had, and for
   // any run date (a leftover row for another date kept notifying).
   await Promise.all(tokens.map((t) => stopBackgroundTracking(apiBaseUrl, t, { trainNumber }).catch(() => {})));
+}
+
+/**
+ * Platform Locator "Alert on change": the server keeps checking this
+ * train's platform for this device and pushes when it changes — with the
+ * app open or closed. Never throws; { ok, reason? }.
+ */
+export async function enablePlatformAlert(apiBaseUrl, { trainNumber, station, platform, date }) {
+  const { token, reason } = await getToken(apiBaseUrl, true);
+  if (!token) return { ok: false, reason: reason || "Allow notifications to get platform alerts when the app is closed." };
+  try {
+    await startPlatformWatch(apiBaseUrl, token, {
+      trainNumber, station, platform, date, lang: hasChosenLanguage() ? getLanguage() : null,
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: "Couldn't reach the server — the alert only works while this screen is open." };
+  }
+}
+
+export async function disablePlatformAlert(apiBaseUrl, { trainNumber, station }) {
+  let token = null;
+  try { token = await AsyncStorage.getItem(PUSH_TOKEN_KEY); } catch (e) { /* ignore */ }
+  if (!token) return;
+  try { await stopPlatformWatch(apiBaseUrl, token, { trainNumber, station, tokens: await loadPastTokens() }); } catch (e) { /* ignore */ }
 }
 
 /**

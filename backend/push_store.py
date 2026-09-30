@@ -196,6 +196,22 @@ def _init_db():
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tracking_watches_token ON tracking_watches(token)")
+        # FEATURE: "Alert on change" for the Platform Locator, kept on the
+        # server so it works with the app open or closed.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS platform_watches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL,
+                train_number TEXT NOT NULL,
+                station TEXT NOT NULL,
+                date TEXT,
+                last_platform TEXT,
+                created_at REAL NOT NULL,
+                UNIQUE(token, train_number, station)
+            )
+            """
+        )
         # FEATURE: "notify me every 10/20/30/custom min" for the tracked
         # train (0 = off) + when that periodic alert last went out.
         for stmt in (
@@ -779,3 +795,72 @@ def mark_tracking_pushed(watch_id: int, signature: str, alerted: bool = False) -
                 "UPDATE tracking_watches SET last_signature = ?, last_pushed_at = ? WHERE id = ?",
                 (signature, time.time(), watch_id),
             )
+
+
+# ---------------------------------------------------------------------------
+# Platform-change watches (Platform Locator "Alert on change")
+# ---------------------------------------------------------------------------
+PLATFORM_WATCH_MAX_AGE_SECONDS = 24 * 3600
+MAX_PLATFORM_WATCHES_PER_DEVICE = 10
+
+
+def upsert_platform_watch(token: str, train_number: str, station: str, date: Optional[str] = None,
+                          last_platform: Optional[str] = None) -> None:
+    train_number = str(train_number or "").strip()
+    station = str(station or "").strip().upper()
+    if not token or not train_number or not station:
+        return
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO platform_watches (token, train_number, station, date, last_platform, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(token, train_number, station) DO UPDATE SET
+                date = excluded.date, last_platform = excluded.last_platform, created_at = excluded.created_at
+            """,
+            (token, train_number, station, date or None, last_platform or None, time.time()),
+        )
+        rows = conn.execute(
+            "SELECT id FROM platform_watches WHERE token = ? ORDER BY created_at DESC", (token,)
+        ).fetchall()
+        for r in rows[MAX_PLATFORM_WATCHES_PER_DEVICE:]:
+            conn.execute("DELETE FROM platform_watches WHERE id = ?", (r["id"],))
+
+
+def delete_platform_watch(tokens: List[str], train_number: Optional[str] = None,
+                          station: Optional[str] = None) -> int:
+    n = 0
+    with _connect() as conn:
+        for token in tokens:
+            sql, args = "DELETE FROM platform_watches WHERE token = ?", [token]
+            if train_number:
+                sql += " AND train_number = ?"; args.append(str(train_number).strip())
+            if station:
+                sql += " AND station = ?"; args.append(str(station).strip().upper())
+            n += conn.execute(sql, args).rowcount
+    return n
+
+
+def list_platform_watches_for_token(token: str) -> List[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM platform_watches WHERE token = ?", (token,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_all_platform_watches() -> List[dict]:
+    """Every live platform watch; ones older than a day are dropped."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM platform_watches WHERE created_at < ?",
+                     (time.time() - PLATFORM_WATCH_MAX_AGE_SECONDS,))
+        rows = conn.execute("SELECT * FROM platform_watches").fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_platform_seen(watch_id: int, platform: str) -> None:
+    with _connect() as conn:
+        conn.execute("UPDATE platform_watches SET last_platform = ? WHERE id = ?", (platform, watch_id))
+
+
+def count_platform_watches() -> int:
+    with _connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM platform_watches").fetchone()[0]
