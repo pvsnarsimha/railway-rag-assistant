@@ -183,6 +183,7 @@ def health():
         "rapidapi_key_loaded": bool(os.environ.get("RAPIDAPI_KEY", "").strip()),
         "gemini_key_loaded": bool(os.environ.get("GEMINI_API_KEY", "").strip()),
         "anthropic_key_loaded": bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()),
+        "agent_enabled": railway_agent.is_available(),  # absent = old code deployed; true = agent can run
         "web_search_provider": "bing" if web_search.BING_SEARCH_API_KEY else "duckduckgo (no BING_SEARCH_API_KEY set)",
         "semantic_engine": engine.hybrid.semantic_engine_name,
         "kb_entries": len(engine.docs),
