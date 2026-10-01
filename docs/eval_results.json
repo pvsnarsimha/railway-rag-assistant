@@ -1,173 +1,291 @@
 {
- "version": "1.0.0",
- "commit": "b1b71df581e41f0df48ac59a959ae53bca7c6cf0",
- "generated_utc": "2026-10-01 05:35:02",
+ "version": "1.1.0",
+ "commit": "60f4d4c42bd8efa3dafdf3b2237d8aa3b7610523",
+ "generated_utc": "2026-10-01 09:35:09",
  "python": "3.11.15",
  "machine": "Linux x86_64",
  "intent_routing": {
-  "n": 67,
-  "accuracy": 0.806,
-  "macro_f1": 0.8279,
-  "entity_accuracy": 0.8387,
-  "entity_checks": 31,
+  "n": 197,
+  "accuracy": 1.0,
+  "macro_f1": 1.0,
+  "entity_accuracy": 0.9394,
+  "entity_checks": 99,
   "per_intent": {
    "alternative_route": {
-    "support": 4,
+    "support": 11,
     "precision": 1.0,
-    "recall": 0.5,
-    "f1": 0.667
+    "recall": 1.0,
+    "f1": 1.0
    },
    "crowd_prediction": {
-    "support": 4,
+    "support": 11,
     "precision": 1.0,
-    "recall": 0.75,
-    "f1": 0.857
+    "recall": 1.0,
+    "f1": 1.0
    },
    "general_faq": {
-    "support": 16,
-    "precision": 0.583,
-    "recall": 0.875,
-    "f1": 0.7
+    "support": 56,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0
    },
    "help": {
-    "support": 4,
-    "precision": 0.8,
+    "support": 14,
+    "precision": 1.0,
     "recall": 1.0,
-    "f1": 0.889
+    "f1": 1.0
    },
    "live_status": {
-    "support": 8,
-    "precision": 0.875,
-    "recall": 0.875,
-    "f1": 0.875
+    "support": 24,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0
    },
    "nearby_stations": {
-    "support": 5,
+    "support": 12,
     "precision": 1.0,
-    "recall": 0.8,
-    "f1": 0.889
+    "recall": 1.0,
+    "f1": 1.0
    },
    "pnr_status": {
-    "support": 6,
+    "support": 12,
     "precision": 1.0,
     "recall": 1.0,
     "f1": 1.0
    },
    "seat_availability": {
-    "support": 6,
+    "support": 17,
     "precision": 1.0,
-    "recall": 0.667,
-    "f1": 0.8
+    "recall": 1.0,
+    "f1": 1.0
    },
    "train_schedule": {
-    "support": 6,
-    "precision": 0.833,
-    "recall": 0.833,
-    "f1": 0.833
+    "support": 16,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0
    },
    "trains_between": {
-    "support": 8,
+    "support": 24,
     "precision": 1.0,
-    "recall": 0.625,
-    "f1": 0.769
+    "recall": 1.0,
+    "f1": 1.0
    }
   },
+  "per_set": {
+   "dev": {
+    "kind": "tuned",
+    "n": 67,
+    "accuracy": 1.0,
+    "misses": [],
+    "entity_checks": 31,
+    "entity_ok": 31,
+    "entity_failures": []
+   },
+   "heldout": {
+    "kind": "tuned",
+    "n": 66,
+    "accuracy": 1.0,
+    "misses": [],
+    "entity_checks": 30,
+    "entity_ok": 30,
+    "entity_failures": []
+   },
+   "validation": {
+    "kind": "tuned",
+    "n": 59,
+    "accuracy": 1.0,
+    "misses": [],
+    "entity_checks": 23,
+    "entity_ok": 23,
+    "entity_failures": []
+   },
+   "regression": {
+    "kind": "tuned",
+    "n": 5,
+    "accuracy": 1.0,
+    "misses": [],
+    "entity_checks": 0,
+    "entity_ok": 0,
+    "entity_failures": []
+   },
+   "blind": {
+    "kind": "blind",
+    "n": 39,
+    "accuracy": 0.7692,
+    "misses": [
+     {
+      "text": "has 12301 crossed Kanpur yet",
+      "expected": "live_status",
+      "got": "general_faq"
+     },
+     {
+      "text": "12627 status",
+      "expected": "live_status",
+      "got": "general_faq"
+     },
+     {
+      "text": "is the Rajdhani 12951 on schedule right now",
+      "expected": "live_status",
+      "got": "train_schedule"
+     },
+     {
+      "text": "I want to book 12627, is there space",
+      "expected": "seat_availability",
+      "got": "general_faq"
+     },
+     {
+      "text": "at what time does 22691 reach Bangalore",
+      "expected": "train_schedule",
+      "got": "live_status"
+     },
+     {
+      "text": "will 12423 be overcrowded on Saturday",
+      "expected": "crowd_prediction",
+      "got": "general_faq"
+     },
+     {
+      "text": "nearby railhead for Dehradun",
+      "expected": "nearby_stations",
+      "got": "general_faq"
+     },
+     {
+      "text": "I can't get a train Delhi to Chennai, what else can I do",
+      "expected": "alternative_route",
+      "got": "trains_between"
+     },
+     {
+      "text": "suggest a detour route from Mumbai to Patna",
+      "expected": "alternative_route",
+      "got": "train_schedule"
+     }
+    ],
+    "entity_checks": 15,
+    "entity_ok": 9,
+    "entity_failures": [
+     {
+      "text": "has 12301 crossed Kanpur yet",
+      "field": "train_number",
+      "expected": "12301",
+      "got": null
+     },
+     {
+      "text": "12627 status",
+      "field": "train_number",
+      "expected": "12627",
+      "got": null
+     },
+     {
+      "text": "is the Rajdhani 12951 on schedule right now",
+      "field": "train_number",
+      "expected": "12951",
+      "got": "12951"
+     },
+     {
+      "text": "I want to book 12627, is there space",
+      "field": "train_number",
+      "expected": "12627",
+      "got": null
+     },
+     {
+      "text": "at what time does 22691 reach Bangalore",
+      "field": "train_number",
+      "expected": "22691",
+      "got": "22691"
+     },
+     {
+      "text": "will 12423 be overcrowded on Saturday",
+      "field": "train_number",
+      "expected": "12423",
+      "got": null
+     }
+    ]
+   }
+  },
+  "blind_accuracy": 0.7692,
+  "blind_n": 39,
   "misses": [
    {
-    "text": "track train 12009 live",
+    "text": "has 12301 crossed Kanpur yet",
     "expected": "live_status",
     "got": "general_faq"
    },
    {
-    "text": "check berth availability 12627 SBC to NDLS",
-    "expected": "seat_availability",
+    "text": "12627 status",
+    "expected": "live_status",
     "got": "general_faq"
    },
    {
-    "text": "is there availability for 12423 on 15-12-2026",
-    "expected": "seat_availability",
-    "got": "general_faq"
-   },
-   {
-    "text": "stops of train 12627",
-    "expected": "train_schedule",
-    "got": "general_faq"
-   },
-   {
-    "text": "which trains go from Chennai to Bangalore",
-    "expected": "trains_between",
-    "got": "general_faq"
-   },
-   {
-    "text": "find trains Pune to Hyderabad tomorrow",
-    "expected": "trains_between",
-    "got": "general_faq"
-   },
-   {
-    "text": "show me trains Lucknow to Varanasi",
-    "expected": "trains_between",
-    "got": "general_faq"
-   },
-   {
-    "text": "nearby railway stations",
-    "expected": "nearby_stations",
-    "got": "general_faq"
-   },
-   {
-    "text": "other ways to reach Mumbai from Kolkata",
-    "expected": "alternative_route",
-    "got": "general_faq"
-   },
-   {
-    "text": "suggest backup route Bangalore to Pune",
-    "expected": "alternative_route",
+    "text": "is the Rajdhani 12951 on schedule right now",
+    "expected": "live_status",
     "got": "train_schedule"
    },
    {
-    "text": "is sleeper class busy on 12009",
+    "text": "I want to book 12627, is there space",
+    "expected": "seat_availability",
+    "got": "general_faq"
+   },
+   {
+    "text": "at what time does 22691 reach Bangalore",
+    "expected": "train_schedule",
+    "got": "live_status"
+   },
+   {
+    "text": "will 12423 be overcrowded on Saturday",
     "expected": "crowd_prediction",
     "got": "general_faq"
    },
    {
-    "text": "how do I book a ticket on IRCTC",
-    "expected": "general_faq",
-    "got": "help"
+    "text": "nearby railhead for Dehradun",
+    "expected": "nearby_stations",
+    "got": "general_faq"
    },
    {
-    "text": "how can I get a refund if train is late",
-    "expected": "general_faq",
-    "got": "live_status"
+    "text": "I can't get a train Delhi to Chennai, what else can I do",
+    "expected": "alternative_route",
+    "got": "trains_between"
+   },
+   {
+    "text": "suggest a detour route from Mumbai to Patna",
+    "expected": "alternative_route",
+    "got": "train_schedule"
    }
   ],
   "entity_failures": [
    {
-    "text": "track train 12009 live",
+    "text": "has 12301 crossed Kanpur yet",
     "field": "train_number",
-    "expected": "12009",
+    "expected": "12301",
     "got": null
    },
    {
-    "text": "check berth availability 12627 SBC to NDLS",
+    "text": "12627 status",
     "field": "train_number",
     "expected": "12627",
     "got": null
    },
    {
-    "text": "is there availability for 12423 on 15-12-2026",
+    "text": "is the Rajdhani 12951 on schedule right now",
+    "field": "train_number",
+    "expected": "12951",
+    "got": "12951"
+   },
+   {
+    "text": "I want to book 12627, is there space",
+    "field": "train_number",
+    "expected": "12627",
+    "got": null
+   },
+   {
+    "text": "at what time does 22691 reach Bangalore",
+    "field": "train_number",
+    "expected": "22691",
+    "got": "22691"
+   },
+   {
+    "text": "will 12423 be overcrowded on Saturday",
     "field": "train_number",
     "expected": "12423",
-    "got": null
-   },
-   {
-    "text": "stops of train 12627",
-    "field": "train_number",
-    "expected": "12627",
-    "got": null
-   },
-   {
-    "text": "is sleeper class busy on 12009",
-    "field": "train_number",
-    "expected": "12009",
     "got": null
    }
   ]
@@ -182,10 +300,10 @@
   "mrr": 0.7461,
   "latency": {
    "n": 51,
-   "p50_ms": 23.47,
-   "p95_ms": 55.47,
-   "p99_ms": 76.73,
-   "mean_ms": 27.53
+   "p50_ms": 21.34,
+   "p95_ms": 46.37,
+   "p99_ms": 70.13,
+   "mean_ms": 25.92
   },
   "misses": [
    {
@@ -245,31 +363,31 @@
  "latency": {
   "classify": {
    "n": 1340,
-   "p50_ms": 0.96,
-   "p95_ms": 1.124,
-   "p99_ms": 1.232,
-   "mean_ms": 0.97
+   "p50_ms": 1.136,
+   "p95_ms": 1.243,
+   "p99_ms": 1.38,
+   "mean_ms": 1.137
   },
   "rag_retrieve_top5": {
    "n": 100,
-   "p50_ms": 19.54,
-   "p95_ms": 41.85,
-   "p99_ms": 58.71,
-   "mean_ms": 23.4
+   "p50_ms": 20.24,
+   "p95_ms": 46.46,
+   "p99_ms": 66.06,
+   "mean_ms": 25.33
   },
   "http_healthz": {
    "n": 200,
-   "p50_ms": 5.09,
-   "p95_ms": 7.47,
-   "p99_ms": 9.81,
-   "mean_ms": 5.32
+   "p50_ms": 4.45,
+   "p95_ms": 6.49,
+   "p99_ms": 9.24,
+   "mean_ms": 4.69
   },
   "http_chat_faq_offline": {
    "n": 60,
-   "p50_ms": 46.34,
-   "p95_ms": 88.43,
-   "p99_ms": 102.82,
-   "mean_ms": 52.08
+   "p50_ms": 43.85,
+   "p95_ms": 84.12,
+   "p99_ms": 90.15,
+   "mean_ms": 51.71
   }
  }
 }

@@ -192,7 +192,7 @@ BETWEEN_KEYWORDS = ["trains between", "trains from", "which trains run", "which 
                      "availability of trains", "availability from", "trains available from",
                      "availability between", "trains availability", "train list", "trains list",
                      "list available", "train list available"]
-HELP_KEYWORDS = ["help", "how do i", "how to use", "how does this work", "tutorial", "guide me",
+HELP_KEYWORDS = ["help", "how do i use", "how do i start", "how do i begin", "how to use", "how does this work", "tutorial", "guide me",
                   "what can you do", "what can i ask", "getting started", "instructions",
                   "what is this", "what can this bot do", "what can this assistant do",
                   "who are you", "i'm lost", "im lost", "confused how"]
@@ -210,6 +210,54 @@ CROWD_KEYWORDS = ["how crowded", "crowd prediction", "will it be crowded", "trai
                    "how full is", "occupancy", "predict crowd", "crowded train", "expected crowd",
                    "how full will", "will it be packed", "how packed", "will be packed",
                    "how busy is", "will be crowded", "be packed", "be crowded"]
+
+
+# --- Generalising patterns (added after held-out evaluation, see
+# docs/EVALUATION.md). Each captures a *shape* of question rather than one
+# phrasing, so unseen wordings still route correctly.
+
+# Policy / rules questions. These mention words ("delay", "route", "schedule",
+# "how do i") that also appear in live-status / schedule / help keywords, but
+# are answered from the knowledge base. Only applied when the message has no
+# PNR or train number, because "is 12301 cancelled" is a live question.
+POLICY_RE = re.compile(
+    r"\b(refund|refunds|cancel|cancels|cancellation|penalty|penalties|fine|rules?|policy|policies|"
+    r"duplicate|documents?|id proof|concession|quota|tatkal|luggage|baggage|waiting list|"
+    r"book(?:ing)? (?:a )?ticket|booking process|meaning of|what does .{1,20} mean|"
+    r"difference between|compensation|charges|after booking|change my (?:route|ticket|boarding|seat|berth)|"
+    r"how do i (?:get|reach) to platform|platform (?:number|no\.?) \d+)\b",
+    re.IGNORECASE,
+)
+_HELP_WORD_RE = re.compile(r"\bhelp\b")
+# Explicit "about this app" requests always win over the policy gate.
+APP_HELP_RE = re.compile(
+    r"\b(how to use|how does this work|tutorial|guide me|what can you do|what can i ask|"
+    r"getting started|who are you|help me|what features|features do you|how does this (?:chat\s*bot|bot|assistant|app)|chat\s*bot work)\b|^\s*help\s*$",
+    re.IGNORECASE,
+)
+
+LIVE_CUE_RE = re.compile(
+    r"\b(where is|where's|right now|live|track|tracking|left the station|left yet|has (?:it )?(?:left|departed|arrived)|"
+    r"how late|how far|on time|late|delay(?:ed)?|running|position|location|eta|reach(?:ed)?|arrive|arriving|now)\b", re.IGNORECASE)
+SEAT_CUE_RE = re.compile(
+    r"\b(availability|available|vacan\w*|berths?|seats?|tickets? left|left|remain\w*|booked|full|confirm\w*|wl|rac)\b", re.IGNORECASE)
+SCHEDULE_CUE_RE = re.compile(
+    r"\b(schedule|timetable|time table|stops?|stoppages?|halts?|route|timing|timings|pass(?:es)? through|"
+    r"depart\w*|arrival|arrives?|leave|leaves)\b", re.IGNORECASE)
+CROWD_CUE_RE = re.compile(
+    r"\b(crowd\w*|busy|packed|rush|rushed|occupancy|how full)\b", re.IGNORECASE)
+
+# "stations near X", "what stations are near X", "nearby railway stations"
+NEARBY_RE2 = re.compile(
+    r"\bstations?\b.{0,25}\b(near|nearby|around|close to|within)\b|\bnearby\b.{0,20}\bstations?\b",
+    re.IGNORECASE)
+# "other ways", "backup options", "different route", "another way to go"
+ALT_ROUTE_RE = re.compile(
+    r"\b(another|other|alternate|alternative|different|backup|back-up|fallback)\b.{0,20}"
+    r"\b(ways?|routes?|options?|path|itinerary|itineraries)\b", re.IGNORECASE)
+# "<verb> trains A to B", "train options A to B", "trains going from A to B"
+TRAINS_ROUTE_RE = re.compile(
+    r"\btrains?\b(?:\s+\w+){0,3}?\s+(?:from|between|to)\b|\btrains?\s+options?\b", re.IGNORECASE)
 
 
 def _extract_date(text: str) -> str:
@@ -298,10 +346,20 @@ def classify(message: str) -> dict:
     text = message.strip()
     lower = text.lower()
 
+    has_id = bool(PNR_RE.search(text) or TRAIN_NO_RE.search(text))
+
+    # 0a. Policy / rules questions with no PNR or train number go to the
+    # knowledge base even if they contain "how do i", "delay", "route"...
+    if not has_id and POLICY_RE.search(text) and not APP_HELP_RE.search(text):
+        return {"intent": Intent.GENERAL_FAQ, "entities": {}}
+
     # 0. Help / tutorial - checked first since these are meta-questions
     # about the assistant itself, not railway data, and should never be
     # mistaken for a PNR/train lookup.
-    if any(kw in lower for kw in HELP_KEYWORDS):
+    # "help" must be a whole word: it also appears inside "helpline", which
+    # is a railway-information question, not a request for the app tutorial.
+    if _HELP_WORD_RE.search(lower) or any(kw in lower for kw in HELP_KEYWORDS if kw != "help") \
+            or APP_HELP_RE.search(text):
         return {"intent": Intent.HELP, "entities": {}}
 
     # 1. PNR status — a bare 10-digit number is an unambiguous PNR signal.
@@ -312,7 +370,7 @@ def classify(message: str) -> dict:
     # 2. Nearby station recommendations (geo-spatial) — checked before the
     # schedule/between keyword checks below since it's structurally
     # distinctive ("nearby"/"closest") and would otherwise never be reached.
-    if any(kw in lower for kw in NEARBY_KEYWORDS) or NEARBY_RE.search(lower):
+    if any(kw in lower for kw in NEARBY_KEYWORDS) or NEARBY_RE.search(lower) or NEARBY_RE2.search(lower):
         stations = _extract_stations(text)
         radius_match = RADIUS_RE.search(text)
         return {
@@ -326,7 +384,7 @@ def classify(message: str) -> dict:
     # 3. Alternative route planner (graph algorithms) — must be checked
     # before SCHEDULE_KEYWORDS below, since "route" alone would otherwise
     # match the schedule intent first.
-    if any(kw in lower for kw in ALT_ROUTE_KEYWORDS):
+    if any(kw in lower for kw in ALT_ROUTE_KEYWORDS) or ALT_ROUTE_RE.search(lower):
         stations = _extract_stations(text)
         return {
             "intent": Intent.ALTERNATIVE_ROUTE,
@@ -348,6 +406,14 @@ def classify(message: str) -> dict:
                 "dest": stations[1] if len(stations) > 1 else None,
                 "date": _extract_date(text),
             },
+        }
+
+    # 4b. Crowd cue + a train number ("is 12951 busy on Fridays", "crowd level on 12009")
+    _tn = TRAIN_NO_RE.search(text)
+    if _tn and CROWD_CUE_RE.search(lower) and not SEAT_CUE_RE.search(lower.replace("how full", "")):
+        return {
+            "intent": Intent.CROWD_PREDICTION,
+            "entities": {"train_number": _tn.group(1), "source": None, "dest": None, "date": _extract_date(text)},
         }
 
     # 5. Live running status — also triggers on "reach/arrive" phrased with
@@ -431,6 +497,34 @@ def classify(message: str) -> dict:
                 "time_range": _extract_time_range(text),
             },
         }
+
+    # 8b. Cue-based fallbacks for phrasings the keyword lists above missed.
+    train_m = TRAIN_NO_RE.search(text)
+    if train_m:
+        tn = train_m.group(1)
+        if LIVE_CUE_RE.search(lower):
+            return {"intent": Intent.LIVE_STATUS, "entities": {"train_number": tn, "date": _extract_date(text)}}
+        if SEAT_CUE_RE.search(lower):
+            stations = _extract_stations(text)
+            return {"intent": Intent.SEAT_AVAILABILITY, "entities": {
+                "train_number": tn, "source": stations[0] if len(stations) > 0 else None,
+                "dest": stations[1] if len(stations) > 1 else None, "date": _extract_date(text)}}
+        if SCHEDULE_CUE_RE.search(lower):
+            stations = _extract_stations(text)
+            return {"intent": Intent.TRAIN_SCHEDULE, "entities": {
+                "train_number": tn, "source": stations[0] if len(stations) > 0 else None,
+                "dest": stations[1] if len(stations) > 1 else None, "date": None,
+                "day_of_week": _extract_day_of_week(text), "time": _extract_time(text),
+                "time_range": _extract_time_range(text)}}
+    elif TRAINS_ROUTE_RE.search(lower) or (
+            re.search(r"\btrains?\b", lower) and re.search(r"\b(to|from|between)\b", lower)):
+        stations = _extract_stations(text)
+        if len(stations) >= 2:  # two stations + the word "train(s)" = a route question
+            day_of_week = _extract_day_of_week(text)
+            return {"intent": Intent.TRAINS_BETWEEN, "entities": {
+                "source": stations[0], "dest": stations[1], "date": _extract_date(text),
+                "day_of_week": day_of_week, "time": _extract_time(text),
+                "time_range": _extract_time_range(text)}}
 
     # 9. Everything else: policy/FAQ style question -> RAG
     return {"intent": Intent.GENERAL_FAQ, "entities": {}}

@@ -28,8 +28,10 @@ jobs:
         run: pip install -r backend/requirements-render.txt pytest
       - name: Unit + regression tests
         run: python -m pytest backend/tests -q
-      - name: Evaluation gate (accuracy + latency thresholds)
+      - name: Evaluation gate (routing, retrieval, latency thresholds)
         run: python backend/evaluation/run_eval.py --check
+      - name: Answer-quality gate (offline answer path)
+        run: python backend/evaluation/answer_eval.py --check
       - name: Upload evaluation report
         if: always()
         uses: actions/upload-artifact@v4
@@ -38,3 +40,5 @@ jobs:
           path: |
             docs/EVAL_REPORT.md
             docs/eval_results.json
+            docs/ANSWER_EVAL_REPORT.md
+            docs/answer_eval_results.json
