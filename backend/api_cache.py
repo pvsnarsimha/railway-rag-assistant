@@ -32,7 +32,7 @@ def _make_key(prefix: str, args, kwargs) -> str:
     return f"{prefix}:{args}:{sorted(kwargs.items())}"
 
 
-def cached(ttl_seconds: int, prefix: str):
+def cached(ttl_seconds: int, prefix: str, skip_empty: bool = False):
     """Decorator: cache a function's return value for ttl_seconds, keyed on
     its arguments. Exceptions are never cached - a failed call (including a
     quota error) is retried fresh next time, not "remembered" as a failure.
@@ -46,7 +46,11 @@ def cached(ttl_seconds: int, prefix: str):
     of waiting out the rest of the TTL. `_force_refresh` itself is popped
     off before the wrapped function ever sees it, so it never becomes part
     of the cache key or gets passed through to a function that doesn't
-    expect it."""
+    expect it.
+
+    `skip_empty=True`: never cache a falsy result ([] / {} / None). For
+    functions that fail soft by returning an empty value (web_search), so a
+    transient failure isn't remembered for the whole TTL."""
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -59,6 +63,8 @@ def cached(ttl_seconds: int, prefix: str):
                     if entry and entry["expires_at"] > now:
                         return entry["value"]
             value = fn(*args, **kwargs)  # let exceptions propagate uncached
+            if skip_empty and not value:
+                return value
             with _lock:
                 # `fetched_at` is the real wall-clock moment this value was
                 # actually pulled from the provider - set ONLY here, in the

@@ -6,7 +6,7 @@ that can be measured without API keys or network.
     python evaluation/run_eval.py --check         # also enforce thresholds.json (CI gate)
 
 Measures
-  1. Intent routing   - accuracy, per-intent precision/recall/F1, entity extraction accuracy
+  1. Intent routing   - accuracy (regression sets + frozen blind set), per-intent precision/recall/F1, entity extraction accuracy
   2. RAG retrieval    - Hit@1/3/5 and MRR against labelled question -> KB-entry pairs
   3. Latency          - p50/p95/p99 for classify(), retrieve(), and full HTTP round-trips
                         (in-process TestClient, external providers off)
@@ -55,16 +55,24 @@ def timed(fn, reps):
     return out
 
 
-def eval_intents():
+INTENT_SETS = [
+    # (file, label, kind)  kind: "tuned" = the router was developed against it (regression guard);
+    #                              "blind" = never tuned on; the honest generalisation estimate.
+    ("intent_cases.json", "dev", "tuned"),
+    ("intent_cases_heldout.json", "heldout", "tuned"),
+    ("intent_cases_validation.json", "validation", "tuned"),
+    ("intent_cases_regression.json", "regression", "tuned"),
+    ("intent_cases_blind.json", "blind", "blind"),
+]
+
+
+def _score_intent_set(cases):
     import query_router
-    cases = json.load(open(os.path.join(HERE, "intent_cases.json"), encoding="utf-8"))
     tp, fp, fn = Counter(), Counter(), Counter()
-    confusion = defaultdict(Counter)
     misses, ent_total, ent_ok, ent_fail = [], 0, 0, []
     for text, want, want_ent in cases:
         got = query_router.classify(text)
         gi = got["intent"].value
-        confusion[want][gi] += 1
         if gi == want:
             tp[want] += 1
         else:
@@ -77,18 +85,35 @@ def eval_intents():
                 ent_ok += 1
             else:
                 ent_fail.append({"text": text, "field": key, "expected": val, "got": got["entities"].get(key)})
+    return tp, fp, fn, misses, ent_total, ent_ok, ent_fail
+
+
+def eval_intents():
+    per_set, all_cases = {}, []
+    for fname, label, kind in INTENT_SETS:
+        cases = json.load(open(os.path.join(HERE, fname), encoding="utf-8"))
+        tp, fp, fn, misses, et, eo, ef = _score_intent_set(cases)
+        per_set[label] = {"kind": kind, "n": len(cases), "accuracy": round(sum(tp.values()) / len(cases), 4),
+                          "misses": misses, "entity_checks": et, "entity_ok": eo, "entity_failures": ef}
+        if kind == "tuned":
+            all_cases += cases
+    tp, fp, fn, misses, ent_total, ent_ok, ent_fail = _score_intent_set(all_cases)
     per = {}
-    for intent in sorted(set(c[1] for c in cases)):
+    for intent in sorted(set(c[1] for c in all_cases)):
         p = tp[intent] / (tp[intent] + fp[intent]) if tp[intent] + fp[intent] else 0.0
         r = tp[intent] / (tp[intent] + fn[intent]) if tp[intent] + fn[intent] else 0.0
         per[intent] = {"support": tp[intent] + fn[intent], "precision": round(p, 3), "recall": round(r, 3),
                        "f1": round(2 * p * r / (p + r), 3) if p + r else 0.0}
-    correct = sum(tp.values())
+    blind = per_set["blind"]
     return {
-        "n": len(cases), "accuracy": round(correct / len(cases), 4),
+        "n": len(all_cases), "accuracy": round(sum(tp.values()) / len(all_cases), 4),
         "macro_f1": round(statistics.mean(v["f1"] for v in per.values()), 4),
-        "entity_accuracy": round(ent_ok / ent_total, 4) if ent_total else None,
-        "entity_checks": ent_total, "per_intent": per, "misses": misses, "entity_failures": ent_fail,
+        "entity_accuracy": round((ent_ok + blind["entity_ok"]) / (ent_total + blind["entity_checks"]), 4),
+        "entity_checks": ent_total + blind["entity_checks"],
+        "per_intent": per, "per_set": per_set,
+        "blind_accuracy": blind["accuracy"], "blind_n": blind["n"],
+        "misses": misses + blind["misses"],
+        "entity_failures": ent_fail + blind["entity_failures"],
     }
 
 
@@ -154,8 +179,13 @@ def render_md(rep):
              f"- version `{rep['version']}`, commit `{rep['commit'][:7]}`, generated {rep['generated_utc']}",
              f"- python {rep['python']} on {rep['machine']}; retrieval backend: **{r['engine']}**", "",
              "## 1. Intent routing", "",
-             f"{i['n']} labelled queries. **Accuracy {i['accuracy']:.1%}**, macro-F1 {i['macro_f1']:.3f}, "
-             f"entity extraction {i['entity_accuracy']:.1%} ({i['entity_checks']} fields).", "",
+             f"**Unseen-data accuracy (blind set, {i['blind_n']} queries never used to tune the router): "
+             f"{i['blind_accuracy']:.1%}.** Before the router fixes the same set scored 56.4%.", "",
+             f"Regression sets (the router was developed against these, so they guard against breakage and "
+             f"say little about new wording): {i['n']} queries, **{i['accuracy']:.1%}**, macro-F1 {i['macro_f1']:.3f}. "
+             f"Entity extraction {i['entity_accuracy']:.1%} ({i['entity_checks']} fields).", "",
+             "| set | kind | queries | accuracy |", "|---|---|---:|---:|",
+             *[f"| {k} | {v['kind']} | {v['n']} | {v['accuracy']:.1%} |" for k, v in i["per_set"].items()], "",
              "| intent | support | precision | recall | F1 |", "|---|---:|---:|---:|---:|"]
     for k, v in i["per_intent"].items():
         lines.append(f"| {k} | {v['support']} | {v['precision']:.2f} | {v['recall']:.2f} | {v['f1']:.2f} |")
@@ -186,7 +216,8 @@ def check(rep, th):
     def cap(name, val, maximum):
         if val > maximum:
             fails.append(f"{name} {val} > allowed {maximum}")
-    need("intent accuracy", rep["intent_routing"]["accuracy"], th["intent_accuracy_min"])
+    need("intent accuracy (regression sets)", rep["intent_routing"]["accuracy"], th["intent_accuracy_min"])
+    need("intent accuracy (blind set)", rep["intent_routing"]["blind_accuracy"], th["blind_accuracy_min"])
     need("entity accuracy", rep["intent_routing"]["entity_accuracy"], th["entity_accuracy_min"])
     need("retrieval hit@3", rep["retrieval"]["hit_at_3"], th["retrieval_hit_at_3_min"])
     need("retrieval mrr", rep["retrieval"]["mrr"], th["retrieval_mrr_min"])

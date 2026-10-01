@@ -1,50 +1,57 @@
 # Evaluation report
 
-- version `1.0.0`, commit `b1b71df`, generated 2026-10-01 05:35:02
+- version `1.1.0`, commit `60f4d4c`, generated 2026-10-01 09:35:09
 - python 3.11.15 on Linux x86_64; retrieval backend: **tfidf-svd-lsa (fallback)**
 
 ## 1. Intent routing
 
-67 labelled queries. **Accuracy 80.6%**, macro-F1 0.828, entity extraction 83.9% (31 fields).
+**Unseen-data accuracy (blind set, 39 queries never used to tune the router): 76.9%.** Before the router fixes the same set scored 56.4%.
+
+Regression sets (the router was developed against these, so they guard against breakage and say little about new wording): 197 queries, **100.0%**, macro-F1 1.000. Entity extraction 93.9% (99 fields).
+
+| set | kind | queries | accuracy |
+|---|---|---:|---:|
+| dev | tuned | 67 | 100.0% |
+| heldout | tuned | 66 | 100.0% |
+| validation | tuned | 59 | 100.0% |
+| regression | tuned | 5 | 100.0% |
+| blind | blind | 39 | 76.9% |
 
 | intent | support | precision | recall | F1 |
 |---|---:|---:|---:|---:|
-| alternative_route | 4 | 1.00 | 0.50 | 0.67 |
-| crowd_prediction | 4 | 1.00 | 0.75 | 0.86 |
-| general_faq | 16 | 0.58 | 0.88 | 0.70 |
-| help | 4 | 0.80 | 1.00 | 0.89 |
-| live_status | 8 | 0.88 | 0.88 | 0.88 |
-| nearby_stations | 5 | 1.00 | 0.80 | 0.89 |
-| pnr_status | 6 | 1.00 | 1.00 | 1.00 |
-| seat_availability | 6 | 1.00 | 0.67 | 0.80 |
-| train_schedule | 6 | 0.83 | 0.83 | 0.83 |
-| trains_between | 8 | 1.00 | 0.62 | 0.77 |
+| alternative_route | 11 | 1.00 | 1.00 | 1.00 |
+| crowd_prediction | 11 | 1.00 | 1.00 | 1.00 |
+| general_faq | 56 | 1.00 | 1.00 | 1.00 |
+| help | 14 | 1.00 | 1.00 | 1.00 |
+| live_status | 24 | 1.00 | 1.00 | 1.00 |
+| nearby_stations | 12 | 1.00 | 1.00 | 1.00 |
+| pnr_status | 12 | 1.00 | 1.00 | 1.00 |
+| seat_availability | 17 | 1.00 | 1.00 | 1.00 |
+| train_schedule | 16 | 1.00 | 1.00 | 1.00 |
+| trains_between | 24 | 1.00 | 1.00 | 1.00 |
 
-### Routing misses (13)
+### Routing misses (9)
 
 | query | expected | got |
 |---|---|---|
-| track train 12009 live | live_status | general_faq |
-| check berth availability 12627 SBC to NDLS | seat_availability | general_faq |
-| is there availability for 12423 on 15-12-2026 | seat_availability | general_faq |
-| stops of train 12627 | train_schedule | general_faq |
-| which trains go from Chennai to Bangalore | trains_between | general_faq |
-| find trains Pune to Hyderabad tomorrow | trains_between | general_faq |
-| show me trains Lucknow to Varanasi | trains_between | general_faq |
-| nearby railway stations | nearby_stations | general_faq |
-| other ways to reach Mumbai from Kolkata | alternative_route | general_faq |
-| suggest backup route Bangalore to Pune | alternative_route | train_schedule |
-| is sleeper class busy on 12009 | crowd_prediction | general_faq |
-| how do I book a ticket on IRCTC | general_faq | help |
-| how can I get a refund if train is late | general_faq | live_status |
+| has 12301 crossed Kanpur yet | live_status | general_faq |
+| 12627 status | live_status | general_faq |
+| is the Rajdhani 12951 on schedule right now | live_status | train_schedule |
+| I want to book 12627, is there space | seat_availability | general_faq |
+| at what time does 22691 reach Bangalore | train_schedule | live_status |
+| will 12423 be overcrowded on Saturday | crowd_prediction | general_faq |
+| nearby railhead for Dehradun | nearby_stations | general_faq |
+| I can't get a train Delhi to Chennai, what else can I do | alternative_route | trains_between |
+| suggest a detour route from Mumbai to Patna | alternative_route | train_schedule |
 
-### Entity extraction misses (5)
+### Entity extraction misses (6)
 
-- `track train 12009 live` train_number: expected '12009', got None
-- `check berth availability 12627 SBC to NDLS` train_number: expected '12627', got None
-- `is there availability for 12423 on 15-12-2026` train_number: expected '12423', got None
-- `stops of train 12627` train_number: expected '12627', got None
-- `is sleeper class busy on 12009` train_number: expected '12009', got None
+- `has 12301 crossed Kanpur yet` train_number: expected '12301', got None
+- `12627 status` train_number: expected '12627', got None
+- `is the Rajdhani 12951 on schedule right now` train_number: expected '12951', got '12951'
+- `I want to book 12627, is there space` train_number: expected '12627', got None
+- `at what time does 22691 reach Bangalore` train_number: expected '22691', got '22691'
+- `will 12423 be overcrowded on Saturday` train_number: expected '12423', got None
 
 ## 2. RAG retrieval
 
@@ -61,9 +68,9 @@
 
 | operation | n | p50 ms | p95 ms | p99 ms | mean ms |
 |---|---:|---:|---:|---:|---:|
-| classify | 1340 | 0.96 | 1.124 | 1.232 | 0.97 |
-| rag_retrieve_top5 | 100 | 19.54 | 41.85 | 58.71 | 23.4 |
-| http_healthz | 200 | 5.09 | 7.47 | 9.81 | 5.32 |
-| http_chat_faq_offline | 60 | 46.34 | 88.43 | 102.82 | 52.08 |
+| classify | 1340 | 1.136 | 1.243 | 1.38 | 1.137 |
+| rag_retrieve_top5 | 100 | 20.24 | 46.46 | 66.06 | 25.33 |
+| http_healthz | 200 | 4.45 | 6.49 | 9.24 | 4.69 |
+| http_chat_faq_offline | 60 | 43.85 | 84.12 | 90.15 | 51.71 |
 
 Latency excludes network, cold start and any external provider (RailKit/RailRadar/LLM) time. See docs/EVALUATION.md.
