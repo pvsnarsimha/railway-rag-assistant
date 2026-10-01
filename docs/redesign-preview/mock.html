@@ -78,6 +78,14 @@ body{background:#dfe5f1;font-family:"Helvetica Neue",Arial,sans-serif;padding:40
 .ok{background:#e8f5e9;color:var(--grn);border-radius:12px;padding:10px;font-size:12.5px;font-weight:600;margin-top:12px}
 .badge{background:#fff3e0;color:#b45309;border-radius:10px;padding:3px 8px;font-size:10.5px;font-weight:700}
 .ann{position:absolute;right:8px;background:#fff3cd;border:1.5px dashed #e0a100;color:#7a5600;font-size:11px;font-weight:700;padding:3px 8px;border-radius:8px;z-index:9}
+.field{border:1px solid var(--line);background:#fff;border-radius:14px;padding:12px 14px;font-size:15px;color:var(--ink);display:flex;justify-content:space-between;align-items:center;margin-top:6px}
+.field .ph{color:#9aa6bd}.lbl{font-size:11.5px;font-weight:700;color:var(--mut);margin-top:14px;letter-spacing:.4px}
+.dchips{display:flex;gap:8px;margin-top:6px}.dchips div{flex:1;text-align:center;border:1px solid var(--line);background:#fff;border-radius:12px;padding:10px 4px;font-size:12.5px;font-weight:600;color:var(--ink)}.dchips .on{background:var(--blue);color:#fff;border-color:var(--blue)}
+.rec{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}.rec:last-child{border:0}
+.rec .ic{background:#eef3fc;color:var(--blue)}.rec b{font-size:13.5px;color:var(--ink);display:block}.rec span{font-size:11.5px;color:var(--mut)}
+.heroI{background:var(--blue);color:#fff;padding:16px 18px 54px;border-radius:0 0 26px 26px}.heroI small{letter-spacing:2px;font-size:11px;opacity:.75;font-weight:700}.heroI h1{font-size:23px;line-height:1.2;margin-top:6px}
+.train{margin-top:14px;height:30px;position:relative}.train i{position:absolute;bottom:6px;height:18px;border-radius:6px;background:#fff}.train em{position:absolute;bottom:0;left:0;right:0;height:3px;background:rgba(255,255,255,.35);border-radius:2px}
+.up{margin:-38px 14px 0;position:relative}
 </style></head><body>
 <svg width="0" height="0" style="position:absolute"><defs>
 <symbol id="map" viewBox="0 0 24 24"><path fill="#e4570f" d="M12 2a7 7 0 0 0-7 7c0 5 7 13 7 13s7-8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></symbol>
@@ -88,6 +96,28 @@ body{background:#dfe5f1;font-family:"Helvetica Neue",Arial,sans-serif;padding:40
 <symbol id="car" viewBox="0 0 24 24"><path fill="currentColor" d="M5 11l1.500-4.500A2 2 0 0 1 8.400 5h7.200a2 2 0 0 1 1.900 1.500L19 11a2 2 0 0 1 2 2v5h-2v2h-3v-2H8v2H5v-2H3v-5a2 2 0 0 1 2-2zm2.200 0h9.600l-1-3H8.200zM6.500 15a1.200 1.200 0 1 0 0 .01zm11 0a1.200 1.200 0 1 0 0 .01z"/></symbol>
 </defs></svg>
 
+
+<div class="wrap"><div class="cap">0 · Initial page (before tracking)<small>Simple: train → date → Start. Alarm is offered right here</small></div>
+<div class="phone"><div class="status"><span>8:40</span><span>14%</span></div>
+<div class="scroll">
+ <div class="heroI"><small>LIVE TRACKING</small><h1>Where is my train right now?</h1>
+  <div class="train"><i style="left:0;width:48px"></i><i style="left:52px;width:48px"></i><i style="left:104px;width:48px"></i><i style="left:156px;width:58px;border-radius:6px 16px 6px 6px;background:#ffb74d"></i><em></em></div></div>
+ <div class="card up" style="margin-top:-34px">
+  <div class="lbl" style="margin-top:0">TRAIN NUMBER OR NAME</div><div class="field"><span class="ph">e.g. 12706 or Simhapuri</span><span>🔍</span></div>
+  <div class="lbl">JOURNEY DATE</div>
+  <div class="dchips"><div>Yesterday</div><div class="on">Today</div><div>Tomorrow</div><div>Pick…</div></div>
+  <div class="lbl">GETTING OFF AT (OPTIONAL)</div><div class="field"><span class="ph">Destination station, e.g. VSKP</span><span style="color:var(--mut)">▾</span></div>
+  <div class="tg" style="margin-top:10px;background:#e8f5e9;border-radius:12px;padding:9px 10px"><div class="l"><div class="ic" style="background:#2e7d32;color:#fff;width:30px;height:30px"><svg width="16" height="16"><use href="#bell"/></svg></div><div><b style="font-size:12.5px">Wake me up before I arrive</b><span>Smart Alarm · 20 min before</span></div></div><div class="sw on"></div></div>
+  <div class="btn pri" style="font-size:15px;padding:14px">Start tracking</div>
+ </div>
+ <div class="tl"><span>RECENT TRAINS</span><a>Clear</a></div>
+ <div class="card" style="padding:4px 14px">
+  <div class="rec"><div class="ic"><svg width="18" height="18"><use href="#clock"/></svg></div><div style="flex:1"><b>12706 · Simhapuri Express</b><span>SC → VSKP · 30 Sep</span></div><span style="color:var(--blue);font-weight:700">Track ›</span></div>
+  <div class="rec"><div class="ic"><svg width="18" height="18"><use href="#clock"/></svg></div><div style="flex:1"><b>12760 · Charminar Express</b><span>HYB → MAS · 27 Sep</span></div><span style="color:var(--blue);font-weight:700">Track ›</span></div>
+ </div>
+</div>
+<div class="nav"><div><i></i>Home</div><div><i></i>Assistant</div><div class="on"><i></i>Live Tracking</div><div><i></i>More Tools</div><div><i></i>Settings</div></div>
+</div></div>
 <!-- ============ SCREEN 1 ============ -->
 <div class="wrap"><div class="cap">1 · Live Tracking (in transit)<small>Everything a passenger needs, in the order they need it</small></div>
 <div class="phone"><div class="status"><span>8:45</span><span>13%</span></div>
