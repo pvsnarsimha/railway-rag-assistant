@@ -808,28 +808,6 @@ export default function LiveTrackingScreen({ navigation }) {
   const delayModalKey = delayModalStation ? `${delayModalStation.trainNumber}|${delayModalStation.date}|${delayModalStation.code}` : null;
   const delayWatchBusy = !!delayModalKey && delayWatchBusyKey === delayModalKey;
   const delayWatchStatus = delayWatchStatusState && delayWatchStatusState.key === delayModalKey ? delayWatchStatusState : null;
-  // Arm the alarm chosen on the initial page as soon as the first live
-  // position is in, and pre-fill the alarm station with the destination.
-  useEffect(() => {
-    if (!alarmStation && payload && !alarmArmed) {
-      const d = dest.trim().toUpperCase();
-      const tl = payload.timeline || [];
-      const last = tl.length ? String(tl[tl.length - 1].code || "").toUpperCase() : "";
-      if (d || last) setAlarmStation(d || last);
-    }
-  }, [payload, alarmStation, alarmArmed, dest]);
-  useEffect(() => {
-    if (autoArmRef.current && payload && alarmStation && !alarmArmed && !alarmBusy) {
-      autoArmRef.current = false;
-      setSmartAlarm();
-    }
-  }, [payload, alarmStation, alarmArmed, alarmBusy, setSmartAlarm]);
-  useEffect(() => {
-    AsyncStorage.getItem(RECENT_TRAINS_KEY).then((raw) => {
-      try { const v = JSON.parse(raw || "[]"); if (Array.isArray(v)) setRecentTrains(v.slice(0, 5)); } catch (e) { /* ignore */ }
-    }).catch(() => {});
-  }, []);
-
   const reloadWatchesSeqRef = useRef(0);
   // FEATURE: bell auto-off + "arriving in ~10 min" notices shown in-app.
   const [bellNotice, setBellNotice] = useState(null);
@@ -1144,6 +1122,28 @@ export default function LiveTrackingScreen({ navigation }) {
       setAlarmBusy(false);
     }
   }, [apiBaseUrl, trainNumber, trackDate, alarmStation, alarmLeadMinutes, alarmCustomOpen, alarmCustomText, getOrCreatePushToken]);
+
+  // Arm the alarm chosen on the initial page as soon as the first live
+  // position is in, and pre-fill the alarm station with the destination.
+  useEffect(() => {
+    if (!alarmStation && payload && !alarmArmed) {
+      const d = dest.trim().toUpperCase();
+      const tl = payload.timeline || [];
+      const last = tl.length ? String(tl[tl.length - 1].code || "").toUpperCase() : "";
+      if (d || last) setAlarmStation(d || last);
+    }
+  }, [payload, alarmStation, alarmArmed, dest]);
+  useEffect(() => {
+    if (autoArmRef.current && payload && alarmStation && !alarmArmed && !alarmBusy) {
+      autoArmRef.current = false;
+      setSmartAlarm();
+    }
+  }, [payload, alarmStation, alarmArmed, alarmBusy, setSmartAlarm]);
+  useEffect(() => {
+    AsyncStorage.getItem(RECENT_TRAINS_KEY).then((raw) => {
+      try { const v = JSON.parse(raw || "[]"); if (Array.isArray(v)) setRecentTrains(v.slice(0, 5)); } catch (e) { /* ignore */ }
+    }).catch(() => {});
+  }, []);
 
   const cancelSmartAlarm = useCallback(async () => {
     await cancelLocalAlarm(alarmNotificationIdRef.current);
