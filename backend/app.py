@@ -91,8 +91,11 @@ import running_status
 import quick_live
 import cell_tower_store
 import smart_features
+import version
+import observability
 
-app = FastAPI(title="Indian Railways RAG Assistant")
+app = FastAPI(title="Indian Railways RAG Assistant", version=version.VERSION)
+app.add_middleware(observability.MetricsMiddleware)
 
 _TRACK_POLL_INTERVAL_SECONDS = 5
 
@@ -175,11 +178,39 @@ def _shutdown_scheduler():
     alert_scheduler.stop()
 
 
+@app.get("/healthz")
+def healthz():
+    """Cheap liveness probe for load balancers / uptime monitors: no engine
+    access, no I/O. Use /api/health for the (heavier) diagnostic view."""
+    return {"status": "ok", **version.info()}
+
+
+@app.get("/api/version")
+def api_version():
+    """Which build is live? Compare `commit` with the commit you meant to
+    ship (tools/verify_deploy.py does this after every deploy)."""
+    return version.info()
+
+
+@app.get("/api/metrics")
+def api_metrics():
+    """Per-route request counts, error rates and latency percentiles
+    (in-process, rolling window; resets on restart)."""
+    return observability.snapshot()
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(observability.prometheus(), media_type="text/plain; version=0.0.4")
+
+
 @app.get("/api/health")
 def health():
     """Diagnostic endpoint — confirms whether keys are actually loaded, without leaking values."""
     engine = get_engine()
     return {
+        **version.info(),
         "env_file_found": os.path.isfile(_ENV_PATH),
         "env_file_path": _ENV_PATH,
         "rapidapi_key_loaded": bool(os.environ.get("RAPIDAPI_KEY", "").strip()),
@@ -2878,6 +2909,7 @@ def chat(req: ChatRequest):
         classification = query_router.classify(question)
         intent = classification["intent"]
         entities = classification["entities"]
+        observability.incr(f"chat_intent.{getattr(intent, 'value', intent)}")
 
         # --- Real-Time Sentiment and Emotion Analysis: cheap lexicon scan,
         # runs on every message so its tone guidance can steer THIS reply,

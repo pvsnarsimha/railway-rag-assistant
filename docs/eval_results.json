@@ -1,0 +1,275 @@
+{
+ "version": "1.0.0",
+ "commit": "b1b71df581e41f0df48ac59a959ae53bca7c6cf0",
+ "generated_utc": "2026-10-01 05:35:02",
+ "python": "3.11.15",
+ "machine": "Linux x86_64",
+ "intent_routing": {
+  "n": 67,
+  "accuracy": 0.806,
+  "macro_f1": 0.8279,
+  "entity_accuracy": 0.8387,
+  "entity_checks": 31,
+  "per_intent": {
+   "alternative_route": {
+    "support": 4,
+    "precision": 1.0,
+    "recall": 0.5,
+    "f1": 0.667
+   },
+   "crowd_prediction": {
+    "support": 4,
+    "precision": 1.0,
+    "recall": 0.75,
+    "f1": 0.857
+   },
+   "general_faq": {
+    "support": 16,
+    "precision": 0.583,
+    "recall": 0.875,
+    "f1": 0.7
+   },
+   "help": {
+    "support": 4,
+    "precision": 0.8,
+    "recall": 1.0,
+    "f1": 0.889
+   },
+   "live_status": {
+    "support": 8,
+    "precision": 0.875,
+    "recall": 0.875,
+    "f1": 0.875
+   },
+   "nearby_stations": {
+    "support": 5,
+    "precision": 1.0,
+    "recall": 0.8,
+    "f1": 0.889
+   },
+   "pnr_status": {
+    "support": 6,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0
+   },
+   "seat_availability": {
+    "support": 6,
+    "precision": 1.0,
+    "recall": 0.667,
+    "f1": 0.8
+   },
+   "train_schedule": {
+    "support": 6,
+    "precision": 0.833,
+    "recall": 0.833,
+    "f1": 0.833
+   },
+   "trains_between": {
+    "support": 8,
+    "precision": 1.0,
+    "recall": 0.625,
+    "f1": 0.769
+   }
+  },
+  "misses": [
+   {
+    "text": "track train 12009 live",
+    "expected": "live_status",
+    "got": "general_faq"
+   },
+   {
+    "text": "check berth availability 12627 SBC to NDLS",
+    "expected": "seat_availability",
+    "got": "general_faq"
+   },
+   {
+    "text": "is there availability for 12423 on 15-12-2026",
+    "expected": "seat_availability",
+    "got": "general_faq"
+   },
+   {
+    "text": "stops of train 12627",
+    "expected": "train_schedule",
+    "got": "general_faq"
+   },
+   {
+    "text": "which trains go from Chennai to Bangalore",
+    "expected": "trains_between",
+    "got": "general_faq"
+   },
+   {
+    "text": "find trains Pune to Hyderabad tomorrow",
+    "expected": "trains_between",
+    "got": "general_faq"
+   },
+   {
+    "text": "show me trains Lucknow to Varanasi",
+    "expected": "trains_between",
+    "got": "general_faq"
+   },
+   {
+    "text": "nearby railway stations",
+    "expected": "nearby_stations",
+    "got": "general_faq"
+   },
+   {
+    "text": "other ways to reach Mumbai from Kolkata",
+    "expected": "alternative_route",
+    "got": "general_faq"
+   },
+   {
+    "text": "suggest backup route Bangalore to Pune",
+    "expected": "alternative_route",
+    "got": "train_schedule"
+   },
+   {
+    "text": "is sleeper class busy on 12009",
+    "expected": "crowd_prediction",
+    "got": "general_faq"
+   },
+   {
+    "text": "how do I book a ticket on IRCTC",
+    "expected": "general_faq",
+    "got": "help"
+   },
+   {
+    "text": "how can I get a refund if train is late",
+    "expected": "general_faq",
+    "got": "live_status"
+   }
+  ],
+  "entity_failures": [
+   {
+    "text": "track train 12009 live",
+    "field": "train_number",
+    "expected": "12009",
+    "got": null
+   },
+   {
+    "text": "check berth availability 12627 SBC to NDLS",
+    "field": "train_number",
+    "expected": "12627",
+    "got": null
+   },
+   {
+    "text": "is there availability for 12423 on 15-12-2026",
+    "field": "train_number",
+    "expected": "12423",
+    "got": null
+   },
+   {
+    "text": "stops of train 12627",
+    "field": "train_number",
+    "expected": "12627",
+    "got": null
+   },
+   {
+    "text": "is sleeper class busy on 12009",
+    "field": "train_number",
+    "expected": "12009",
+    "got": null
+   }
+  ]
+ },
+ "retrieval": {
+  "n": 51,
+  "engine": "tfidf-svd-lsa (fallback)",
+  "kb_entries": 95,
+  "hit_at_1": 0.6275,
+  "hit_at_3": 0.8627,
+  "hit_at_5": 0.902,
+  "mrr": 0.7461,
+  "latency": {
+   "n": 51,
+   "p50_ms": 23.47,
+   "p95_ms": 55.47,
+   "p99_ms": 76.73,
+   "mean_ms": 27.53
+  },
+  "misses": [
+   {
+    "question": "Why are trains delayed?",
+    "expected_any_of": [
+     "delay-causes"
+    ],
+    "got": [
+     "train-precedence-crossing",
+     "chart-preparation",
+     "gk-luxury-trains",
+     "outside-food-rules",
+     "foreign-tourist-quota"
+    ]
+   },
+   {
+    "question": "What facilities are available at stations?",
+    "expected_any_of": [
+     "station-facilities"
+    ],
+    "got": [
+     "station-hierarchy",
+     "outside-food-rules",
+     "helpline-numbers",
+     "wrong-coach-travel",
+     "differently-abled-facilities"
+    ]
+   },
+   {
+    "question": "Money deducted but ticket not booked",
+    "expected_any_of": [
+     "booking-payment-failed"
+    ],
+    "got": [
+     "e-ticket-vs-i-ticket",
+     "rule-cancel-time-slabs",
+     "rule-train-late-3-hours",
+     "wrong-coach-travel",
+     "premium-tatkal"
+    ]
+   },
+   {
+    "question": "Can I take my dog on the train?",
+    "expected_any_of": [
+     "pets-on-train"
+    ],
+    "got": [
+     "emergency-procedures",
+     "liquor-alcohol-rules",
+     "gk-history-first-trains",
+     "platform-allocation",
+     "train-precedence-crossing"
+    ]
+   }
+  ]
+ },
+ "latency": {
+  "classify": {
+   "n": 1340,
+   "p50_ms": 0.96,
+   "p95_ms": 1.124,
+   "p99_ms": 1.232,
+   "mean_ms": 0.97
+  },
+  "rag_retrieve_top5": {
+   "n": 100,
+   "p50_ms": 19.54,
+   "p95_ms": 41.85,
+   "p99_ms": 58.71,
+   "mean_ms": 23.4
+  },
+  "http_healthz": {
+   "n": 200,
+   "p50_ms": 5.09,
+   "p95_ms": 7.47,
+   "p99_ms": 9.81,
+   "mean_ms": 5.32
+  },
+  "http_chat_faq_offline": {
+   "n": 60,
+   "p50_ms": 46.34,
+   "p95_ms": 88.43,
+   "p99_ms": 102.82,
+   "mean_ms": 52.08
+  }
+ }
+}
