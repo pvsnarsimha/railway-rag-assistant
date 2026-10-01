@@ -1,0 +1,11 @@
+{
+  "_comment": "Ratchet: set just under the measured baseline (see docs/EVAL_REPORT.md). Raise these when a change improves the numbers; a PR that lowers them needs a written reason. Latency caps are deliberately loose (shared CI runners).",
+  "intent_accuracy_min": 0.78,
+  "entity_accuracy_min": 0.80,
+  "retrieval_hit_at_3_min": 0.83,
+  "retrieval_mrr_min": 0.72,
+  "classify_p95_ms_max": 10,
+  "retrieve_p95_ms_max": 300,
+  "healthz_p95_ms_max": 50,
+  "chat_faq_p95_ms_max": 600
+}

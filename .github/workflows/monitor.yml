@@ -1,0 +1,23 @@
+name: Production monitor
+# Runs against the live deployment. Set repository variable APP_URL
+# (Settings -> Secrets and variables -> Actions -> Variables), e.g. https://railway-rag-backend.onrender.com
+# A failed run emails repo watchers / shows red in the Actions tab.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+  # Post-deploy gate: call manually (or from a deploy hook via repository_dispatch) with the commit that should be live.
+  repository_dispatch:
+    types: [deployed]
+
+jobs:
+  verify:
+    if: vars.APP_URL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify live deployment
+        run: |
+          EXPECT="${{ github.event.client_payload.commit }}"
+          python tools/verify_deploy.py --url "${{ vars.APP_URL }}" ${EXPECT:+--expect-commit "$EXPECT"} --latency-budget-ms 8000
