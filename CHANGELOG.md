@@ -1,6 +1,12 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.2.0] - 2026-10-01
+### Changed
+- **Live Tracking redesign:** blue hero header (train number and name, route ends with times, journey progress bar with km covered/left), a "Right now" card (position, delay chip, speed / next-halt ETA / halts-to-go tiles, source and Report inaccuracy) and a "Journey timeline" heading with "Jump to train".
+- **Main page is clean:** after Stop (or "Change"), only the "Track a train" page shows. The "Next:" bar, GPS card, banners, tiles and timeline of the previous train are hidden. They stay mounted while the form is open so GPS/map state isn't lost.
+- Rebuilt `mobile_web/` (served at `/mobile-app`) with the new screen.
+
 ## [1.1.0] - 2026-10-01
 ### Changed
 - **Routing:** cue-based rules for train-number questions (live/seat/schedule/crowd), route questions without the exact phrases, "stations near X", "backup options" for alternative routes, and a policy gate so refund/cancel/rules questions containing "delay", "route" or "how do I" go to the knowledge base. Unseen-data accuracy 56.4% -> 76.9% (39 blind queries).
