@@ -26,6 +26,31 @@ import numpy as np
 
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "do", "does", "did", "i", "my", "me", "can", "get",
+    "to", "of", "in", "on", "for", "and", "or", "if", "it", "this", "that", "what", "which", "when", "how",
+    "at", "by", "with", "from", "as", "will", "would", "should", "there", "any", "please", "tell", "about",
+}
+# A question asking for a quantity ("how much", "what time", "minimum penalty") is answered by the
+# sentence that contains the number, which a semantic score alone often ranks below generic context.
+_QUANTITY_CUE_RE = re.compile(
+    r"\b(how (?:much|many|long|far|early|late|old)|what time|at what|when|number|fee|fees|charge|charges|"
+    r"penalty|fine|limit|minimum|maximum|free|age|hours?|days?|kg|fare|cost|price)\b", re.IGNORECASE)
+_DIGIT_RE = re.compile(r"\d")
+_LEXICAL_WEIGHT = 0.5
+_QUANTITY_BONUS = 0.3
+
+
+def _content_tokens(text: str) -> set:
+    return {t.rstrip("s") for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS and len(t) > 1}
+
+
+def _lexical_scores(query: str, sentences: List[str]) -> np.ndarray:
+    q = _content_tokens(query)
+    if not q:
+        return np.zeros(len(sentences))
+    return np.array([len(q & _content_tokens(s)) / len(q) for s in sentences])
 
 
 def _split_sentences(text: str) -> List[str]:
@@ -61,6 +86,14 @@ def compress_chunk(query: str, doc_id: str, category: str, text: str,
     except Exception:
         # If encoding fails for any reason, fail safe -> keep the whole chunk.
         return CompressedChunk(doc_id, category, text, text, 1.0)
+
+    # Hybrid score: the semantic similarity (min-max scaled so it is comparable) plus exact word
+    # overlap with the question, plus a bonus for number-bearing sentences on quantity questions.
+    spread = scores.max() - scores.min()
+    sem = (scores - scores.min()) / spread if spread > 1e-9 else np.zeros(len(scores))
+    scores = (1 - _LEXICAL_WEIGHT) * sem + _LEXICAL_WEIGHT * _lexical_scores(query, sentences)
+    if _QUANTITY_CUE_RE.search(query):
+        scores = scores + _QUANTITY_BONUS * np.array([1.0 if _DIGIT_RE.search(x) else 0.0 for x in sentences])
 
     keep_n = max(min_sentences, int(round(len(sentences) * keep_fraction)))
     keep_n = min(keep_n, len(sentences))

@@ -63,5 +63,17 @@
   "baroda": "BRC",
   "ratlam": "RTM",
   "kharagpur": "KGP",
-  "nandyal": "NDL"
+  "nandyal": "NDL",
+  "varanasi": "BSB",
+  "banaras": "BSB",
+  "mangalore": "MAQ",
+  "mangaluru": "MAQ",
+  "gorakhpur": "GKP",
+  "dehradun": "DDN",
+  "haridwar": "HW",
+  "jammu": "JAT",
+  "mysore": "MYS",
+  "mysuru": "MYS",
+  "rajkot": "RJT",
+  "warangal": "WL"
 }

@@ -1,0 +1,218 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+:root{--blue:#0d3b8e;--blue2:#1565c0;--ink:#101a33;--mut:#6b7691;--bg:#f4f6fb;--line:#e3e8f2;--ora:#e4570f;--grn:#2e7d32;--red:#d32f2f;--amb:#f59e0b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#dfe5f1;font-family:"Helvetica Neue",Arial,sans-serif;padding:40px;display:flex;gap:36px;flex-wrap:wrap;width:max-content}
+.wrap{display:flex;flex-direction:column;align-items:center;gap:14px}
+.cap{font-size:17px;font-weight:700;color:var(--ink);width:390px;text-align:center}
+.cap small{display:block;font-weight:400;color:var(--mut);font-size:13px;margin-top:3px}
+.phone{width:390px;height:844px;background:var(--bg);border-radius:34px;overflow:hidden;position:relative;box-shadow:0 18px 40px rgba(16,26,51,.25);border:6px solid #111}
+.status{height:26px;background:var(--blue);color:#fff;font-size:12px;display:flex;justify-content:space-between;padding:6px 18px 0}
+.scroll{position:absolute;top:26px;bottom:62px;left:0;right:0;overflow:hidden}
+.hero{background:var(--blue);color:#fff;padding:10px 16px 16px;border-radius:0 0 22px 22px}
+.row{display:flex;align-items:center;justify-content:space-between}
+.live{background:rgba(255,255,255,.16);border-radius:20px;padding:4px 10px;font-size:11px;font-weight:700;display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;background:#3ddc84}
+.stop{border:1px solid rgba(255,255,255,.5);border-radius:16px;padding:4px 12px;font-size:12px;font-weight:700}
+.hero h1{font-size:19px;margin-top:10px}
+.hero .sub{font-size:12px;opacity:.8;margin-top:2px}
+.route{display:flex;justify-content:space-between;margin-top:12px;font-size:12px}
+.route b{display:block;font-size:15px}
+.bar{height:6px;border-radius:3px;background:rgba(255,255,255,.25);margin:8px 0 4px;position:relative}
+.bar i{position:absolute;left:0;top:0;bottom:0;width:64%;background:#ffb74d;border-radius:3px}
+.bar u{position:absolute;left:64%;top:-5px;width:16px;height:16px;border-radius:50%;background:#fff;border:3px solid var(--ora);margin-left:-8px}
+.seg{display:flex;background:var(--bg);border-radius:12px;padding:3px;margin:12px 14px 0}
+.seg div{flex:1;text-align:center;font-size:12px;font-weight:600;padding:7px;border-radius:10px;color:var(--mut)}
+.seg .on{background:#fff;color:var(--blue);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.card{background:#fff;border:1px solid var(--line);border-radius:18px;margin:12px 14px 0;padding:14px;box-shadow:0 2px 8px rgba(16,26,51,.05)}
+.now h2{font-size:17px;color:var(--ink)}
+.now p{font-size:12.5px;color:var(--mut);margin-top:3px}
+.stats{display:flex;gap:8px;margin-top:12px}
+.stats div{flex:1;background:var(--bg);border-radius:12px;padding:9px;text-align:center}
+.stats b{display:block;font-size:18px;color:var(--ink)}
+.stats span{font-size:10.5px;color:var(--mut)}
+.chips{display:flex;gap:8px;margin:12px 14px 0}
+.chip{flex:1;background:#fff;border:1px solid var(--line);border-radius:14px;padding:9px 4px;text-align:center;font-size:11px;font-weight:600;color:var(--ink)}
+.chip svg{display:block;margin:0 auto 4px}
+.arr{border:2px solid var(--blue);position:relative}
+.arr .tag{position:absolute;top:-10px;left:14px;background:var(--blue);color:#fff;font-size:10px;font-weight:700;padding:2px 9px;border-radius:10px;letter-spacing:.5px}
+.arr h3{font-size:16px;color:var(--ink);margin-top:4px}
+.arr .eta{font-size:12.5px;color:var(--mut);margin-top:2px}
+.arr .eta b{color:var(--ora)}
+.sep{height:1px;background:var(--line);margin:12px 0}
+.tg{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.tg .l{display:flex;gap:10px;align-items:center}
+.ic{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex:none}
+.tg b{font-size:13.5px;color:var(--ink);display:block}
+.tg span{font-size:11.5px;color:var(--mut)}
+.sw{width:44px;height:26px;border-radius:13px;background:#cfd6e4;position:relative;flex:none}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff}
+.sw.on{background:var(--grn)}.sw.on::after{left:21px}
+.pills{display:flex;gap:5px;margin-top:10px}
+.pill{white-space:nowrap;border:1px solid var(--line);border-radius:16px;padding:5px 9px;font-size:11.5px;color:var(--ink);background:#fff}
+.pill.on{background:var(--blue);color:#fff;border-color:var(--blue)}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;border-radius:14px;padding:12px;font-weight:700;font-size:14px;margin-top:10px}
+.btn.dark{background:#0b1220;color:#fff}.btn.pri{background:var(--blue);color:#fff}.btn.ghost{background:#eef3fc;color:var(--blue)}
+.tl{font-size:11px;letter-spacing:1px;color:var(--mut);font-weight:700;margin:16px 16px 0;display:flex;justify-content:space-between}
+.tl a{color:var(--blue);letter-spacing:0}
+.st{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px;color:var(--ink)}
+.st:last-child{border:0}
+.st .t{width:48px;color:var(--mut);font-size:12px}
+.st .n{flex:1}
+.st .n small{display:block;color:var(--mut);font-size:11px}
+.node{width:12px;height:12px;border-radius:50%;border:3px solid #9fb0d3;background:#fff;flex:none}
+.node.done{background:#9fb0d3}.node.cur{border-color:var(--ora);background:var(--ora)}.node.dest{border-color:var(--blue);background:var(--blue)}
+.bell{width:30px;height:30px;border-radius:50%;background:#eef3fc;display:flex;align-items:center;justify-content:center}
+.bell.on{background:var(--grn)}
+.bottom{position:absolute;left:10px;right:10px;bottom:70px;background:#1b1b33;color:#fff;border-radius:24px;padding:9px 12px;display:flex;align-items:center;justify-content:space-between;font-size:12px;z-index:3}
+.bottom b{font-size:13px}.bottom em{display:block;color:#ff8a80;font-style:normal;font-weight:700;font-size:12px}
+.bb{background:rgba(255,255,255,.14);padding:8px 10px;border-radius:14px;font-weight:600;font-size:12px;margin-left:6px}
+.nav{position:absolute;bottom:0;left:0;right:0;height:62px;background:#fff;border-top:1px solid var(--line);display:flex;justify-content:space-around;align-items:center;font-size:10px;color:var(--mut)}
+.nav div{text-align:center}.nav .on{color:var(--blue);font-weight:700}
+.nav i{display:block;width:20px;height:20px;border-radius:6px;background:#c9d2e6;margin:0 auto 3px}.nav .on i{background:var(--blue)}
+.dim{position:absolute;inset:0;background:rgba(10,18,40,.55);z-index:5}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:#fff;border-radius:26px 26px 0 0;padding:14px 18px 22px;z-index:6}
+.grab{width:42px;height:4px;border-radius:2px;background:#cfd6e4;margin:0 auto 12px}
+.sheet h2{font-size:18px;color:var(--ink)}.sheet p{font-size:12.5px;color:var(--mut);margin-top:3px}
+.lab{font-size:11.5px;font-weight:700;color:var(--mut);margin:14px 0 6px;letter-spacing:.4px}
+.inp{border:1px solid var(--line);background:var(--bg);border-radius:12px;padding:12px;font-size:14px;color:var(--ink);display:flex;justify-content:space-between}
+.ok{background:#e8f5e9;color:var(--grn);border-radius:12px;padding:10px;font-size:12.5px;font-weight:600;margin-top:12px}
+.badge{background:#fff3e0;color:#b45309;border-radius:10px;padding:3px 8px;font-size:10.5px;font-weight:700}
+.ann{position:absolute;right:8px;background:#fff3cd;border:1.5px dashed #e0a100;color:#7a5600;font-size:11px;font-weight:700;padding:3px 8px;border-radius:8px;z-index:9}
+.field{border:1px solid var(--line);background:#fff;border-radius:14px;padding:12px 14px;font-size:15px;color:var(--ink);display:flex;justify-content:space-between;align-items:center;margin-top:6px}
+.field .ph{color:#9aa6bd}.lbl{font-size:11.5px;font-weight:700;color:var(--mut);margin-top:14px;letter-spacing:.4px}
+.dchips{display:flex;gap:8px;margin-top:6px}.dchips div{flex:1;text-align:center;border:1px solid var(--line);background:#fff;border-radius:12px;padding:10px 4px;font-size:12.5px;font-weight:600;color:var(--ink)}.dchips .on{background:var(--blue);color:#fff;border-color:var(--blue)}
+.rec{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}.rec:last-child{border:0}
+.rec .ic{background:#eef3fc;color:var(--blue)}.rec b{font-size:13.5px;color:var(--ink);display:block}.rec span{font-size:11.5px;color:var(--mut)}
+.heroI{background:var(--blue);color:#fff;padding:16px 18px 54px;border-radius:0 0 26px 26px}.heroI small{letter-spacing:2px;font-size:11px;opacity:.75;font-weight:700}.heroI h1{font-size:23px;line-height:1.2;margin-top:6px}
+.train{margin-top:14px;height:30px;position:relative}.train i{position:absolute;bottom:6px;height:18px;border-radius:6px;background:#fff}.train em{position:absolute;bottom:0;left:0;right:0;height:3px;background:rgba(255,255,255,.35);border-radius:2px}
+.up{margin:-38px 14px 0;position:relative}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="map" viewBox="0 0 24 24"><path fill="#e4570f" d="M12 2a7 7 0 0 0-7 7c0 5 7 13 7 13s7-8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></symbol>
+<symbol id="share" viewBox="0 0 24 24"><path fill="#2e7d32" d="M16 11a3 3 0 1 0-3-3 3 3 0 0 0 3 3zM8 11a3 3 0 1 0-3-3 3 3 0 0 0 3 3zm0 2c-2.3 0-7 1.2-7 3.5V19h14v-2.5C15 14.2 10.3 13 8 13zm8 0c-.3 0-.6 0-1 .1 1.2.8 2 1.9 2 3.4V19h6v-2.5c0-2.3-4.700-3.500-7-3.500z"/></symbol>
+<symbol id="grid" viewBox="0 0 24 24"><path fill="#1565c0" d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></symbol>
+<symbol id="clock" viewBox="0 0 24 24"><path fill="#6a1b9a" d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 11h-5v-2h4V6h2z"/></symbol>
+<symbol id="bell" viewBox="0 0 24 24"><path fill="currentColor" d="M12 22a2.500 2.500 0 0 0 2.500-2.500h-5A2.500 2.500 0 0 0 12 22zm7-6V11a7 7 0 0 0-5-6.700V3a2 2 0 0 0-4 0v1.300A7 7 0 0 0 5 11v5l-2 2v1h18v-1z"/></symbol>
+<symbol id="car" viewBox="0 0 24 24"><path fill="currentColor" d="M5 11l1.500-4.500A2 2 0 0 1 8.400 5h7.200a2 2 0 0 1 1.900 1.500L19 11a2 2 0 0 1 2 2v5h-2v2h-3v-2H8v2H5v-2H3v-5a2 2 0 0 1 2-2zm2.200 0h9.600l-1-3H8.200zM6.500 15a1.200 1.200 0 1 0 0 .01zm11 0a1.200 1.200 0 1 0 0 .01z"/></symbol>
+</defs></svg>
+
+
+<div class="wrap"><div class="cap">0 · Initial page (before tracking)<small>Simple: train → date → Start. Alarm is offered right here</small></div>
+<div class="phone"><div class="status"><span>8:40</span><span>14%</span></div>
+<div class="scroll">
+ <div class="heroI"><small>LIVE TRACKING</small><h1>Where is my train right now?</h1>
+  <div class="train"><i style="left:0;width:48px"></i><i style="left:52px;width:48px"></i><i style="left:104px;width:48px"></i><i style="left:156px;width:58px;border-radius:6px 16px 6px 6px;background:#ffb74d"></i><em></em></div></div>
+ <div class="card up" style="margin-top:-34px">
+  <div class="lbl" style="margin-top:0">TRAIN NUMBER OR NAME</div><div class="field"><span class="ph">e.g. 12706 or Simhapuri</span><span>🔍</span></div>
+  <div class="lbl">JOURNEY DATE</div>
+  <div class="dchips"><div>Yesterday</div><div class="on">Today</div><div>Tomorrow</div><div>Pick…</div></div>
+  <div class="lbl">GETTING OFF AT (OPTIONAL)</div><div class="field"><span class="ph">Destination station, e.g. VSKP</span><span style="color:var(--mut)">▾</span></div>
+  <div class="tg" style="margin-top:10px;background:#e8f5e9;border-radius:12px;padding:9px 10px"><div class="l"><div class="ic" style="background:#2e7d32;color:#fff;width:30px;height:30px"><svg width="16" height="16"><use href="#bell"/></svg></div><div><b style="font-size:12.5px">Wake me up before I arrive</b><span>Smart Alarm · 20 min before</span></div></div><div class="sw on"></div></div>
+  <div class="btn pri" style="font-size:15px;padding:14px">Start tracking</div>
+ </div>
+ <div class="tl"><span>RECENT TRAINS</span><a>Clear</a></div>
+ <div class="card" style="padding:4px 14px">
+  <div class="rec"><div class="ic"><svg width="18" height="18"><use href="#clock"/></svg></div><div style="flex:1"><b>12706 · Simhapuri Express</b><span>SC → VSKP · 30 Sep</span></div><span style="color:var(--blue);font-weight:700">Track ›</span></div>
+  <div class="rec"><div class="ic"><svg width="18" height="18"><use href="#clock"/></svg></div><div style="flex:1"><b>12760 · Charminar Express</b><span>HYB → MAS · 27 Sep</span></div><span style="color:var(--blue);font-weight:700">Track ›</span></div>
+ </div>
+</div>
+<div class="nav"><div><i></i>Home</div><div><i></i>Assistant</div><div class="on"><i></i>Live Tracking</div><div><i></i>More Tools</div><div><i></i>Settings</div></div>
+</div></div>
+<!-- ============ SCREEN 1 ============ -->
+<div class="wrap"><div class="cap">1 · Live Tracking (in transit)<small>Everything a passenger needs, in the order they need it</small></div>
+<div class="phone"><div class="status"><span>8:45</span><span>13%</span></div>
+<div class="scroll">
+ <div class="hero">
+  <div class="row"><div class="live"><span class="dot"></span>LIVE · Internet</div><div class="stop">Stop</div></div>
+  <h1>12706 · Simhapuri Express</h1><div class="sub">Secunderabad Jn → Visakhapatnam · 30 Sep</div>
+  <div class="route"><div>SC<b>Secunderabad</b>17:40</div><div style="text-align:right">VSKP<b>Visakhapatnam</b>23:34</div></div>
+  <div class="bar"><i></i><u></u></div>
+  <div class="row" style="font-size:11px;opacity:.85"><span>238 km done</span><span>131 km to go</span></div>
+ </div>
+ <div class="seg"><div class="on">Internet</div><div>GPS · I'm on this train</div></div>
+ <div class="card now"><div class="row"><h2>Crossed Rajahmundry</h2><span class="badge" style="background:#fdecec;color:#c62828">+18 min late</span></div>
+  <p>12 km to Samalkot Jn · next halt ETA 21:07</p>
+  <div class="stats"><div><b>68</b><span>km/h now</span></div><div><b>21:07</b><span>Next halt ETA</span></div><div><b>6</b><span>Halts to go</span></div></div></div>
+
+ <div class="card arr"><span class="tag">YOUR ARRIVAL</span>
+  <div class="row"><div><h3>Visakhapatnam · VSKP</h3><div class="eta">Arrives <b>23:52</b> (+18m) · in 2h 31m</div></div><span style="color:var(--blue);font-size:12px;font-weight:700">Change</span></div>
+  <div class="sep"></div>
+  <div class="tg"><div class="l"><div class="ic" style="background:#e8f5e9;color:#2e7d32"><svg width="18" height="18"><use href="#bell"/></svg></div><div><b>Smart Alarm</b><span>Wake me 20 min before arrival</span></div></div><div class="sw on"></div></div>
+  <div class="pills"><div class="pill">15 min</div><div class="pill on">20 min</div><div class="pill">30 min</div><div class="pill">45 min</div><div class="pill">Custom</div></div>
+  <div class="sep"></div>
+  <div class="tg"><div class="l"><div class="ic" style="background:#fff3e0;color:#e4570f"><svg width="18" height="18"><use href="#car"/></svg></div><div><b>Ride at the exit</b><span>Remind me to book a cab</span></div></div><div class="sw"></div></div>
+  <div class="btn dark"><svg width="16" height="16" style="color:#ffc107"><use href="#car"/></svg>Book a ride &nbsp;›</div>
+ </div>
+
+ <div class="chips">
+  <div class="chip"><svg width="22" height="22"><use href="#map"/></svg>Train on map</div>
+  <div class="chip"><svg width="22" height="22"><use href="#share"/></svg>Share trip</div>
+  <div class="chip"><svg width="22" height="22"><use href="#grid"/></svg>Coach layout</div>
+  <div class="chip"><svg width="22" height="22"><use href="#clock"/></svg>Time Table</div>
+ </div>
+ <div class="tl"><span>JOURNEY TIMELINE</span><a>Jump to train ↓</a></div>
+ <div class="card" style="padding:6px 14px">
+  <div class="st"><div class="t">20:12</div><div class="node done"></div><div class="n">Vijayawada Jn<small>On time</small></div></div>
+  <div class="st"><div class="t">20:45</div><div class="node cur"></div><div class="n"><b>Rajahmundry</b><small style="color:var(--ora)">Train is here · +18m</small></div></div>
+ </div>
+</div>
+<div class="bottom"><div>Next: <b>Samalkot Jn</b><em>+18 min late</em></div><div style="display:flex"><div class="bb">Coach</div><div class="bb">Timetable</div></div></div>
+<div class="nav"><div><i></i>Home</div><div><i></i>Assistant</div><div class="on"><i></i>Live Tracking</div><div><i></i>More Tools</div><div><i></i>Settings</div></div>
+</div></div>
+
+<!-- ============ SCREEN 2: timeline w/ bells ============ -->
+<div class="wrap"><div class="cap">2 · Timeline = set alarm on any station<small>Tap a bell on any stop (or "Change") to alarm a different station</small></div>
+<div class="phone"><div class="status"><span>8:46</span><span>13%</span></div>
+<div class="scroll">
+ <div class="hero" style="padding-bottom:12px"><div class="row"><div class="live"><span class="dot"></span>LIVE · Internet</div><div class="stop">Stop</div></div>
+  <h1 style="font-size:16px">12706 · Simhapuri Express</h1><div class="sub">Rajahmundry · +18m · 64% done</div></div>
+ <div class="tl" style="margin-top:14px"><span>JOURNEY TIMELINE</span><a>Jump to train ↓</a></div>
+ <div class="card" style="padding:6px 14px">
+  <div class="st"><div class="t">20:12</div><div class="node done"></div><div class="n">Vijayawada Jn<small>Departed on time</small></div><div class="bell"><svg width="15" height="15" style="color:#8aa0c8"><use href="#bell"/></svg></div></div>
+  <div class="st"><div class="t">20:45</div><div class="node cur"></div><div class="n"><b>Rajahmundry</b><small style="color:var(--ora)">Train is here · +18m</small></div><div class="bell"><svg width="15" height="15" style="color:#8aa0c8"><use href="#bell"/></svg></div></div>
+  <div class="st"><div class="t">21:07</div><div class="node"></div><div class="n">Samalkot Jn<small>ETA · +18m</small></div><div class="bell"><svg width="15" height="15" style="color:#8aa0c8"><use href="#bell"/></svg></div></div>
+  <div class="st"><div class="t">21:48</div><div class="node"></div><div class="n">Anakapalle<small>ETA · +18m</small></div><div class="bell on"><svg width="15" height="15" style="color:#fff"><use href="#bell"/></svg></div></div>
+  <div class="st" style="background:#f2f6ff;margin:0 -14px;padding:9px 14px;border-radius:12px"><div class="t" style="color:var(--blue);font-weight:700">23:52</div><div class="node dest"></div><div class="n"><b>Visakhapatnam</b><small style="color:var(--blue)">Your destination · alarm 20 min before</small></div><div class="bell on"><svg width="15" height="15" style="color:#fff"><use href="#bell"/></svg></div></div>
+ </div>
+ <div class="card" style="background:#e8f5e9;border-color:#b7dfb9"><div class="tg"><div class="l"><div class="ic" style="background:#2e7d32;color:#fff"><svg width="18" height="18"><use href="#bell"/></svg></div><div><b style="color:#1b5e20">2 alarms armed</b><span>Rings even if you close the app</span></div></div></div></div>
+</div>
+<div class="bottom"><div>Next: <b>Samalkot Jn</b><em>+18 min late</em></div><div style="display:flex"><div class="bb">Coach</div><div class="bb">Timetable</div></div></div>
+<div class="nav"><div><i></i>Home</div><div><i></i>Assistant</div><div class="on"><i></i>Live Tracking</div><div><i></i>More Tools</div><div><i></i>Settings</div></div>
+</div></div>
+
+<!-- ============ SCREEN 3: alarm sheet ============ -->
+<div class="wrap"><div class="cap">3 · Smart Alarm sheet<small>Opens from "Change" / a bell — full options, one clear button</small></div>
+<div class="phone"><div class="status"><span>8:47</span><span>13%</span></div>
+<div class="scroll"><div class="hero" style="padding-bottom:30px"><h1>12706 · Simhapuri Express</h1></div></div>
+<div class="dim"></div>
+<div class="sheet"><div class="grab"></div>
+ <h2>Smart Alarm</h2><p>Wake-up alert as the train nears your station — rings even if you close the app.</p>
+ <div class="lab">DESTINATION STATION</div><div class="inp"><span><b>VSKP</b> · Visakhapatnam</span><span>▾</span></div>
+ <div class="lab">ALERT ME BEFORE ARRIVAL</div>
+ <div class="pills" style="flex-wrap:wrap"><div class="pill">15 min</div><div class="pill on">20 min</div><div class="pill">30 min</div><div class="pill">40 min</div><div class="pill">45 min</div><div class="pill">Custom</div></div>
+ <div class="ok">Will ring at ~23:32 · based on live +18m delay</div>
+ <div class="btn pri">Set alarm</div><div class="btn ghost">Cancel</div>
+</div></div></div>
+
+<!-- ============ SCREEN 4: trip complete ============ -->
+<div class="wrap"><div class="cap">4 · After arrival<small>Alarm and ride cards disappear; recap takes the top spot</small></div>
+<div class="phone"><div class="status"><span>8:50</span><span>12%</span></div>
+<div class="scroll">
+ <div class="hero"><div class="row"><div class="live" style="background:rgba(255,255,255,.22)">Journey complete</div><div class="stop">Done</div></div>
+  <h1>12706 · Simhapuri Express</h1><div class="sub">Secunderabad Jn → Visakhapatnam · 30 Sep</div>
+  <div class="bar"><i style="width:100%"></i></div></div>
+ <div class="card"><div class="row"><h2 style="font-size:17px;color:var(--ink)">Trip complete</h2><span class="badge" style="background:#fdecec;color:#c62828">+18m late</span></div>
+  <p style="font-size:12.5px;color:var(--mut);margin-top:4px">Secunderabad Jn → Visakhapatnam · worst delay at Rajamundry (+18m)</p>
+  <div class="stats"><div><b>369</b><span>km</span></div><div><b>6h 12m</b><span>travel time</span></div><div><b>62</b><span>avg km/h</span></div></div>
+  <div class="btn pri">Share this trip recap</div></div>
+ <div class="card"><div class="tg"><div class="l"><div class="ic" style="background:#fff3e0;color:#e4570f"><svg width="18" height="18"><use href="#car"/></svg></div><div><b>Need a ride from VSKP?</b><span>Ola · Uber · Rapido, pickup pre-set</span></div></div></div>
+  <div class="btn dark" style="margin-top:10px">Book a ride ›</div></div>
+ <div class="tl"><span>JOURNEY TIMELINE</span><a>Jump to train ↓</a></div>
+ <div class="card" style="padding:6px 14px">
+  <div class="st"><div class="t">23:52</div><div class="node dest"></div><div class="n"><b>Visakhapatnam</b><small>Arrived +18m</small></div></div>
+  <div class="st"><div class="t">21:48</div><div class="node done"></div><div class="n">Anakapalle<small>Departed +18m</small></div></div>
+ </div>
+</div>
+<div class="nav"><div><i></i>Home</div><div><i></i>Assistant</div><div class="on"><i></i>Live Tracking</div><div><i></i>More Tools</div><div><i></i>Settings</div></div>
+</div></div>
+</body></html>

@@ -1,0 +1,10 @@
+{
+  "_comment": "Gate for the OFFLINE answer path (no LLM, extractive fallback), set just under the measured baseline. decline_rate_min is 0 on purpose: the offline path does not decline off-topic questions yet (a known gap, see docs/ANSWER_EVAL_REPORT.md). LLM-mode numbers come from `answer_eval.py --url <deployed app>`.",
+  "fact_recall_min": 0.88,
+  "full_fact_rate_min": 0.86,
+  "source_hit_min": 0.90,
+  "unsupported_number_rate_max": 0.07,
+  "decline_rate_min": 0.0,
+  "honest_rate_min": 0.9,
+  "latency_p95_ms_max": 600
+}

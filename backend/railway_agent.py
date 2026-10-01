@@ -25,6 +25,7 @@ Design notes
   * Tools are declared once (TOOLS) and converted to each provider's format.
 """
 
+import observability
 import json
 import os
 import re
@@ -473,6 +474,7 @@ def is_available() -> bool:
     return bool(os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("ANTHROPIC_API_KEY", "").strip())
 
 
+@observability.timed("agent")
 def run_agent(question: str, extra_instructions: str = "") -> AgentResult:
     """Runs the tool-using agent. Never raises. result.answer is None when no
     provider is configured or every provider failed (see result.error), so the

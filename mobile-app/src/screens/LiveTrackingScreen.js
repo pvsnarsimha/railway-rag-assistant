@@ -55,6 +55,7 @@ const IS_WEB = Platform.OS === "web";
 
 const PUSH_TOKEN_KEY = "moreTools.pushToken";
 const ALERTS_KEY = "moreTools.delayAlerts";
+const RECENT_TRAINS_KEY = "liveTracking.recentTrains";
 
 // FEATURE ("Start tracking should show the live tracking INSTANTLY, and
 // coming back to the app it should be back on the live position within a
@@ -807,6 +808,28 @@ export default function LiveTrackingScreen({ navigation }) {
   const delayModalKey = delayModalStation ? `${delayModalStation.trainNumber}|${delayModalStation.date}|${delayModalStation.code}` : null;
   const delayWatchBusy = !!delayModalKey && delayWatchBusyKey === delayModalKey;
   const delayWatchStatus = delayWatchStatusState && delayWatchStatusState.key === delayModalKey ? delayWatchStatusState : null;
+  // Arm the alarm chosen on the initial page as soon as the first live
+  // position is in, and pre-fill the alarm station with the destination.
+  useEffect(() => {
+    if (!alarmStation && payload && !alarmArmed) {
+      const d = dest.trim().toUpperCase();
+      const tl = payload.timeline || [];
+      const last = tl.length ? String(tl[tl.length - 1].code || "").toUpperCase() : "";
+      if (d || last) setAlarmStation(d || last);
+    }
+  }, [payload, alarmStation, alarmArmed, dest]);
+  useEffect(() => {
+    if (autoArmRef.current && payload && alarmStation && !alarmArmed && !alarmBusy) {
+      autoArmRef.current = false;
+      setSmartAlarm();
+    }
+  }, [payload, alarmStation, alarmArmed, alarmBusy, setSmartAlarm]);
+  useEffect(() => {
+    AsyncStorage.getItem(RECENT_TRAINS_KEY).then((raw) => {
+      try { const v = JSON.parse(raw || "[]"); if (Array.isArray(v)) setRecentTrains(v.slice(0, 5)); } catch (e) { /* ignore */ }
+    }).catch(() => {});
+  }, []);
+
   const reloadWatchesSeqRef = useRef(0);
   // FEATURE: bell auto-off + "arriving in ~10 min" notices shown in-app.
   const [bellNotice, setBellNotice] = useState(null);
@@ -899,6 +922,12 @@ export default function LiveTrackingScreen({ navigation }) {
   const [alarmBusy, setAlarmBusy] = useState(false);
   const [alarmStatus, setAlarmStatus] = useState(null);
   const [alarmArmed, setAlarmArmed] = useState(false);
+  // REDESIGN (initial page): "wake me up" toggle next to the destination
+  // field, a collapsed boarding-station field, and recently tracked trains.
+  const [alarmOnStart, setAlarmOnStart] = useState(true);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [recentTrains, setRecentTrains] = useState([]);
+  const autoArmRef = useRef(false);
   const alarmNotificationIdRef = useRef(null);
 
   // Reflects already-armed station alerts for the TRACKED train+date back
@@ -1616,8 +1645,34 @@ export default function LiveTrackingScreen({ navigation }) {
   // freezes it into activeParamsRef for any future auto-reconnect, and
   // (re-)opens the socket for it. A fresh manual start always re-arms
   // auto-reconnect (manualStopRef = false), even after a prior "Stop".
+  function rememberRecent(params) {
+    const entry = { trainNumber: params.trainNumber, source: params.source || "", dest: params.dest || "" };
+    setRecentTrains((cur) => {
+      const next = [entry, ...cur.filter((r) => r.trainNumber !== entry.trainNumber)].slice(0, 5);
+      AsyncStorage.setItem(RECENT_TRAINS_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }
+
+  function trackRecent(r) {
+    setTrainNumber(r.trainNumber); setSource(r.source || ""); setDest(r.dest || ""); setTrackDate("");
+    autoArmRef.current = false;
+    startTracking({ trainNumber: r.trainNumber, date: "", source: r.source || "", dest: r.dest || "" }, false);
+    rememberRecent({ trainNumber: r.trainNumber, source: r.source, dest: r.dest });
+  }
+
+  function dayOffsetString(offset) {
+    const d = new Date(); d.setDate(d.getDate() + offset);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`;
+  }
+
   function connect() {
     if (!trainNumber.trim()) return;
+    const destCode = dest.trim().toUpperCase();
+    autoArmRef.current = alarmOnStart && !!destCode;
+    if (destCode) setAlarmStation(destCode);
+    rememberRecent({ trainNumber: trainNumber.trim(), source: source.trim(), dest: dest.trim() });
     startTracking({
       trainNumber: trainNumber.trim(),
       date: trackDate.trim(),
@@ -2001,7 +2056,21 @@ export default function LiveTrackingScreen({ navigation }) {
   // route.params.trainNumber auto-fetch, and MoreToolsScreen.js's
   // initialTab/trainNumber pre-fill for its Coach Layout tab) instead of
   // making the user re-type it.
-  const showBottomBar = !!payload && !ltJourneyLikelyComplete && !!payload.next_station;
+  // The "Track a train" page (no train yet, or the form re-opened with
+  // "Change") shows ONLY the form: no leftover Next bar, banners, tiles,
+  // GPS card or timeline from a train that is no longer on screen.
+  const onFormPage = !activeTrack || formOpen;
+  const showBottomBar = !onFormPage && !!payload && !ltJourneyLikelyComplete && !!payload.next_station;
+
+  // Leaflet can't measure itself inside a display:none parent; tell it to
+  // re-measure when the tracking view comes back after the form was open.
+  useEffect(() => {
+    if (IS_WEB && !onFormPage && typeof window !== "undefined") {
+      const id = setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
+      return () => clearTimeout(id);
+    }
+    return undefined;
+  }, [onFormPage]);
 
   // RailYatri-style status sentence for the status card.
   const ltStatus = (() => {
@@ -2050,6 +2119,64 @@ export default function LiveTrackingScreen({ navigation }) {
     return { headline, sub };
   })();
 
+  // Hero header numbers (display only, all from real payload values):
+  // route ends with their times, journey progress by km when the provider
+  // reports distances (else by stops passed), and the departure line.
+  const lxHero = (() => {
+    const first = timeline[0] || null;
+    const last = timeline.length >= 2 ? timeline[timeline.length - 1] : null;
+    const totalKm = last && last.distance_km != null ? last.distance_km : null;
+    const coveredKm = ltTotalCoveredKm != null ? ltTotalCoveredKm : ltLastReportingDistanceKm;
+    const reached = timeline.filter((x) => x.status === "passed" || x.status === "current").length;
+    let frac = 0;
+    if (ltJourneyLikelyComplete) frac = 1;
+    else if (totalKm && coveredKm != null) frac = Math.max(0, Math.min(1, coveredKm / totalKm));
+    else if (timeline.length > 1) frac = Math.min(1, reached / (timeline.length - 1));
+    const pct = Math.round(frac * 100);
+    const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+    const dep = first && first.departure ? first.departure : null;
+    const departed = !!(dep && dep.actual && dep.actual_is_predicted !== true);
+    const depTime = dep ? hhmm(dep.actual || dep.expected || dep.scheduled) : null;
+    const depDelay = dep && dep.delay_minutes != null ? dep.delay_minutes : null;
+    let depLine = null;
+    if (depTime) {
+      if (!departed) depLine = `Departs ${depTime}`;
+      else depLine = depDelay > 0 ? `Departed ${depTime} (+${depDelay} min)` : `On time departure ${depTime}`;
+    }
+    const arr = last && last.arrival ? last.arrival : null;
+    const destEta = last ? hhmm(last.predicted_eta || (arr && (arr.actual || arr.expected || arr.scheduled))) : null;
+    const destDay = last ? dayNumberForEntry(last, journeyStartDate) : null;
+    return {
+      first, last, frac, pct,
+      coveredKm, leftKm: totalKm != null && coveredKm != null ? Math.max(0, Math.round((totalKm - coveredKm) * 10) / 10) : null,
+      reached, totalStops: timeline.length,
+      depLine, depSched: dep ? hhmm(dep.scheduled) : null, destEta, destDay,
+    };
+  })();
+  const lxSpeed = (() => {
+    const v = payload && (payload.recency_weighted_speed_kmph ?? payload.instant_speed_kmph ?? payload.display_speed_kmph);
+    return v != null && !Number.isNaN(Number(v)) ? Math.round(Number(v)) : null;
+  })();
+  const lxNextEta = payload ? (payload.next_station_live_eta || payload.next_station_expected_arrival || null) : null;
+  const lxHaltsLeft = timeline.filter((x) => x.kind !== "intermediate" && x.status !== "passed" && x.status !== "current").length;
+  const lxSourceLabel = gpsOn ? "GPS" : payload && payload.live_source === "railradar" ? "RailRadar"
+    : payload && payload.live_source === "railkit" ? "RailKit" : "Live data";
+
+  // "Jump to train": same scroll the first payload triggers, on demand.
+  const jumpToTrain = () => {
+    const target = currentStationRowRef.current || lastStationRowRef.current;
+    if (!target) return;
+    if (IS_WEB) {
+      target.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    } else if (scrollContentRef.current && scrollRef.current && target.measureLayout) {
+      target.measureLayout(
+        scrollContentRef.current,
+        (x, y) => scrollRef.current?.scrollTo({ y: Math.max(0, y - 220), animated: true }),
+        () => {},
+      );
+    }
+  };
+
   return (
     <View style={styles.flex}>
     <ScrollView ref={scrollRef} style={styles.flex} contentContainerStyle={[styles.content, showBottomBar && styles.contentWithBar]}>
@@ -2076,7 +2203,7 @@ export default function LiveTrackingScreen({ navigation }) {
             train, then the same form fields in a rounded card below. */}
         <View style={styles.pxHero}>
           <Text style={styles.pxKicker}>{t("LIVE TRACKING")}</Text>
-          <Text style={styles.pxHeroTitle}>{t("Every journey, beautifully tracked.")}</Text>
+          <Text style={styles.pxHeroTitle}>{t("Where is my train right now?")}</Text>
           <Text style={styles.pxHeroSub}>{t("Shows the live position instantly and keeps it updating every few seconds.")}</Text>
           <View style={styles.pxTrain} pointerEvents="none">
             <View style={styles.pxTrainBody}>
@@ -2091,18 +2218,40 @@ export default function LiveTrackingScreen({ navigation }) {
         <View style={styles.pxFormCard}>
           <Text style={styles.pxFormTitle}>{t("Track a train")}</Text>
           <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
-          <Text style={styles.fieldLabel}>{"Date (optional \u2014 defaults to today)"}</Text>
-          <TouchableOpacity style={styles.dateField} onPress={() => { datePickForHeaderRef.current = false; setDayPickerVisible(true); }} activeOpacity={0.7}>
-            <Ionicons name="calendar-outline" size={16} color={colors.primary} />
-            <Text style={styles.dateFieldText}>
-              {trackDate.trim() ? (formatLongLabel(fromDdMmYyyy(trackDate)) || trackDate) : "Today"}
-            </Text>
-            <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-          </TouchableOpacity>
-          <View style={styles.row}>
-            <LabeledInput label="Source (optional)" placeholder="e.g. SC" value={source} onChangeText={setSource} style={styles.half} />
-            <LabeledInput label="Dest (optional)" placeholder="e.g. BZA" value={dest} onChangeText={setDest} style={styles.half} />
+          <Text style={styles.fieldLabel}>{t("Journey date")}</Text>
+          <View style={styles.dateChipRow}>
+            {[["Yesterday", -1], ["Today", 0], ["Tomorrow", 1]].map(([label, off]) => {
+              const active = !dayPickerVisible && trackDateLabel(trackDate) === label;
+              return (
+                <TouchableOpacity key={label} style={[styles.dateChip, active && styles.dateChipActive]} onPress={() => setTrackDate(off === 0 ? "" : dayOffsetString(off))} activeOpacity={0.8}>
+                  <Text style={[styles.dateChipText, active && styles.dateChipTextActive]}>{t(label)}</Text>
+                </TouchableOpacity>
+              );
+            })}
+            <TouchableOpacity
+              style={[styles.dateChip, !["Yesterday", "Today", "Tomorrow"].includes(trackDateLabel(trackDate)) && styles.dateChipActive]}
+              onPress={() => { datePickForHeaderRef.current = false; setDayPickerVisible(true); }} activeOpacity={0.8}
+            >
+              <Text style={[styles.dateChipText, !["Yesterday", "Today", "Tomorrow"].includes(trackDateLabel(trackDate)) && styles.dateChipTextActive]}>
+                {["Yesterday", "Today", "Tomorrow"].includes(trackDateLabel(trackDate)) ? t("Pick\u2026") : trackDateLabel(trackDate)}
+              </Text>
+            </TouchableOpacity>
           </View>
+          <LabeledInput label="Getting off at (optional)" placeholder="Destination station, e.g. VSKP" value={dest} onChangeText={setDest} autoCapitalize="characters" />
+          {dest.trim() ? (
+            <TouchableOpacity style={styles.alarmOnStartRow} onPress={() => setAlarmOnStart((v) => !v)} activeOpacity={0.8}>
+              <Ionicons name="alarm-outline" size={18} color="#1B5E20" style={{ marginRight: 8 }} />
+              <Text style={styles.alarmOnStartText}>{`Wake me up before I reach ${dest.trim().toUpperCase()} (${alarmLeadMinutes} min)`}</Text>
+              <View style={[styles.miniSwitch, alarmOnStart && styles.miniSwitchOn]}><View style={styles.miniKnob} /></View>
+            </TouchableOpacity>
+          ) : null}
+          {sourceOpen ? (
+            <LabeledInput label="Boarding station (optional)" placeholder="e.g. SC" value={source} onChangeText={setSource} autoCapitalize="characters" />
+          ) : (
+            <TouchableOpacity onPress={() => setSourceOpen(true)} style={{ marginTop: spacing.sm }}>
+              <Text style={styles.recentGo}>{"+ Add boarding station"}</Text>
+            </TouchableOpacity>
+          )}
           <View style={styles.row}>
             {/* No spinner / "Connecting…" state: tracking starts at once —
                 the last known position is shown instantly and the live
@@ -2113,39 +2262,33 @@ export default function LiveTrackingScreen({ navigation }) {
             ) : null}
           </View>
         </View>
+        {recentTrains.length ? (
+          <View style={styles.pxSettingsCard}>
+            <Text style={styles.pxSettingsTitle}>{t("Recent trains")}</Text>
+            {recentTrains.map((r) => (
+              <TouchableOpacity key={r.trainNumber} style={styles.recentRow} onPress={() => trackRecent(r)} activeOpacity={0.7}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.recentTitle}>{`Train ${r.trainNumber}`}</Text>
+                  {(r.source || r.dest) ? <Text style={styles.recentSub}>{`${r.source || "\u2014"} \u2192 ${r.dest || "\u2014"}`}</Text> : null}
+                </View>
+                <Text style={styles.recentGo}>{"Track \u203A"}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
         </>
       ) : (
         <>
-        <View style={styles.ryHeader}>
-          <View style={styles.pxGlow} pointerEvents="none" />
-          {/* REDESIGN (RailYatri-style header): "12728 - Godavari Sf Express",
-              route, and a Today/Yesterday date switch — the form itself is
-              tucked away behind "Change" once a train is being tracked. */}
-          <View style={styles.ryHeaderTop}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.ryTrainTitle} numberOfLines={1}>
-                {activeTrack.trainNumber}{payload?.train_name ? ` - ${toDisplayCase(payload.train_name)}` : ""}
+        <View style={styles.lxHero}>
+          <View style={styles.lxGlow} pointerEvents="none" />
+          <View style={styles.lxTopRow}>
+            <TouchableOpacity onPress={refreshNow} activeOpacity={0.8} style={styles.lxLivePill}>
+              <View style={[styles.lxLiveDot, { backgroundColor: gpsOn ? "#FFB347" : payload ? "#4ADE80" : connection === "error" ? "#FF8A80" : "#CBD5E1" }]} />
+              <Text style={styles.lxLivePillText} numberOfLines={1}>
+                {gpsOn ? "GPS" : payload ? "LIVE" : connection === "error" ? "Can't reach server" : "Loading…"}
+                {payload?.status_updated_at ? ` · ${formatAsOfAgo(payload.status_updated_at)}` : ""}
               </Text>
-              {timeline.length >= 2 ? (
-                <Text style={styles.ryTrainSub} numberOfLines={1}>
-                  {(timeline[0].code || timeline[0].name)}-{(timeline[timeline.length - 1].code || timeline[timeline.length - 1].name)}
-                  {payload?.train_name ? "" : ` · ${toDisplayCase(timeline[0].name)} → ${toDisplayCase(timeline[timeline.length - 1].name)}`}
-                </Text>
-              ) : null}
-            </View>
-            <TouchableOpacity style={styles.ryDateBtn} onPress={() => { datePickForHeaderRef.current = true; setDayPickerVisible(true); }}>
-              <Text style={styles.ryDateBtnText}>{trackDateLabel(activeTrack.date)}</Text>
-              <Ionicons name="caret-down" size={12} color="#fff" />
             </TouchableOpacity>
-          </View>
-          <View style={styles.ryHeaderRow}>
-            <LiveBadge connection={connection} hasPayload={!!payload} gpsOn={gpsOn} />
-            {payload?.status_updated_at ? (
-              <TouchableOpacity onPress={refreshNow} style={styles.refreshRow}>
-                <Ionicons name="refresh" size={13} color="#C9B8FF" />
-                <Text style={styles.refreshText}>{gpsOn ? "GPS fix" : "Position"} {formatAsOfAgo(payload.status_updated_at)}</Text>
-              </TouchableOpacity>
-            ) : null}
             <View style={{ flex: 1 }} />
             <TouchableOpacity onPress={shareTrackingLink} style={styles.ryIconBtn} accessibilityLabel="Share link">
               <Ionicons name="share-social-outline" size={16} color="#fff" />
@@ -2153,10 +2296,61 @@ export default function LiveTrackingScreen({ navigation }) {
             <TouchableOpacity onPress={() => setFormOpen(true)} style={styles.ryIconBtn} accessibilityLabel="Change train">
               <Ionicons name="create-outline" size={16} color="#fff" />
             </TouchableOpacity>
-            <TouchableOpacity onPress={stopTracking} style={styles.ryStopBtn}>
+            <TouchableOpacity onPress={stopTracking} style={styles.ryStopBtn} accessibilityLabel="Stop tracking">
               <Text style={styles.ryStopBtnText}>Stop</Text>
             </TouchableOpacity>
           </View>
+
+          <View style={styles.lxTitleRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.lxTitle} numberOfLines={2}>
+                {activeTrack.trainNumber}{payload?.train_name ? ` \u00B7 ${toDisplayCase(payload.train_name)}` : ""}
+              </Text>
+              <Text style={styles.lxSubline} numberOfLines={2}>
+                {[timeline.length ? formatJourneyDayLabel(journeyStartDate, 1) : null, lxHero.depLine].filter(Boolean).join(" \u00B7 ") || "Getting the live position\u2026"}
+              </Text>
+            </View>
+            <TouchableOpacity style={styles.ryDateBtn} onPress={() => { datePickForHeaderRef.current = true; setDayPickerVisible(true); }}>
+              <Text style={styles.ryDateBtnText}>{trackDateLabel(activeTrack.date)}</Text>
+              <Ionicons name="caret-down" size={12} color="#fff" />
+            </TouchableOpacity>
+          </View>
+
+          {lxHero.first && lxHero.last ? (
+            <>
+              <View style={styles.lxRouteRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.lxCode}>{lxHero.first.code || ""}</Text>
+                  <Text style={styles.lxStationName} numberOfLines={1}>{toDisplayCase(lxHero.first.name)}</Text>
+                  {lxHero.depSched ? <Text style={styles.lxStationTime}>{lxHero.depSched}</Text> : null}
+                </View>
+                <View style={{ flex: 1, alignItems: "flex-end" }}>
+                  <Text style={styles.lxCode}>{lxHero.last.code || ""}</Text>
+                  <Text style={[styles.lxStationName, { textAlign: "right" }]} numberOfLines={1}>{toDisplayCase(lxHero.last.name)}</Text>
+                  {lxHero.destEta ? (
+                    <Text style={[styles.lxStationTime, { textAlign: "right" }]}>
+                      {`ETA ${lxHero.destEta}${lxHero.destDay && lxHero.destDay > 1 ? ` \u00B7 Day ${lxHero.destDay}` : ""}`}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+              <View style={styles.lxProgressWrap}>
+                <View style={styles.lxProgressTrack} />
+                <View style={[styles.lxProgressFill, { width: `${lxHero.pct}%` }]} />
+                <View style={[styles.lxProgressMarker, { left: `${lxHero.pct}%` }]}>
+                  <Ionicons name="train" size={13} color={colors.primary} />
+                </View>
+              </View>
+              <View style={styles.lxProgressFoot}>
+                <Text style={styles.lxProgressFootText}>
+                  {lxHero.coveredKm != null ? `${Math.round(lxHero.coveredKm)} km covered` : `${lxHero.reached} of ${lxHero.totalStops} stops reached`}
+                </Text>
+                <Text style={styles.lxProgressFootText}>
+                  {lxHero.leftKm != null ? `${lxHero.pct}% \u00B7 ${Math.round(lxHero.leftKm).toLocaleString()} km left` : `${lxHero.pct}%`}
+                </Text>
+              </View>
+            </>
+          ) : null}
 
           {/* Internet | GPS switch — GPS only after "Are you inside the train?" */}
           <View style={styles.modeSwitch}>
@@ -2164,18 +2358,120 @@ export default function LiveTrackingScreen({ navigation }) {
               style={[styles.modeBtn, !gpsOn && styles.modeBtnActive]}
               onPress={() => { if (gpsOn) stopGps(); }}
             >
-              <Ionicons name="globe-outline" size={14} color={!gpsOn ? "#2A0E5C" : "#E4DAFF"} />
+              <Ionicons name="globe-outline" size={14} color={!gpsOn ? colors.primary : "#DCE8FF"} />
               <Text style={[styles.modeBtnText, !gpsOn && styles.modeBtnTextActive]}>Internet</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.modeBtn, gpsOn && styles.modeBtnActive]}
               onPress={() => { if (!gpsOn) askGps("manual"); }}
             >
-              <Ionicons name="navigate-outline" size={14} color={gpsOn ? "#2A0E5C" : "#E4DAFF"} />
+              <Ionicons name="navigate-outline" size={14} color={gpsOn ? colors.primary : "#DCE8FF"} />
               <Text style={[styles.modeBtnText, gpsOn && styles.modeBtnTextActive]}>GPS · I'm on this train</Text>
             </TouchableOpacity>
           </View>
         </View>
+
+        {payload ? (
+          <View ref={quickBarRef} style={styles.lxNowCard}>
+            <View style={styles.lxNowRow}>
+              <View style={styles.lxNowIcon}>
+                <Ionicons name={gpsOn ? "navigate" : "location"} size={20} color="#E5484D" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.lxNowTitle} numberOfLines={2}>{ltStatus.headline}</Text>
+                {ltStatus.sub ? <Text style={styles.lxNowSub} numberOfLines={3}>{ltStatus.sub}</Text> : null}
+              </View>
+              <DelayPill minutes={ltEffectiveDelay} />
+            </View>
+            <View style={styles.lxTiles}>
+              <View style={styles.lxTile}>
+                <Text style={styles.lxTileValue}>{lxSpeed != null ? lxSpeed : "\u2014"}</Text>
+                <Text style={styles.lxTileLabel}>km/h now</Text>
+              </View>
+              <View style={styles.lxTile}>
+                <Text style={styles.lxTileValue}>{lxNextEta ? String(lxNextEta).slice(0, 5) : "\u2014"}</Text>
+                <Text style={styles.lxTileLabel}>Next halt ETA</Text>
+              </View>
+              <View style={styles.lxTile}>
+                <Text style={styles.lxTileValue}>{ltJourneyLikelyComplete ? 0 : lxHaltsLeft}</Text>
+                <Text style={styles.lxTileLabel}>Halts to go</Text>
+              </View>
+            </View>
+            <View style={styles.lxNowFoot}>
+              <Text style={styles.lxNowFootText} numberOfLines={1}>
+                {lxSourceLabel}{payload?.status_updated_at ? ` \u00B7 updated ${formatAsOfAgo(payload.status_updated_at)}` : ""}
+              </Text>
+              {!gpsOn ? (
+                <TouchableOpacity
+                  disabled={reportState !== "idle" || !payload?.status_response_id}
+                  onPress={() => reportInaccuracy(payload.status_response_id)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Text style={styles.lxReportText}>
+                    {reportState === "sending" ? "Reporting\u2026" : reportState === "sent" ? "Reported \u2014 thanks" : "Report inaccuracy"}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
+
+        {/* REDESIGN: "Your arrival" — Smart Alarm + Book a ride together,
+            right under the Right-now card, because both are about getting
+            off at your station (they used to sit far below the timeline). */}
+        {payload && !ltJourneyLikelyComplete ? (
+          <View style={styles.arrivalWrap}>
+            <Text style={styles.arrivalKicker}>{"YOUR ARRIVAL"}</Text>
+      {/* FEATURE: Smart Alarm, right on Live Tracking (moved off the
+          separate More Tools menu — see the top-of-file comment). Only
+          shows once a train is actually being tracked; arming an alarm
+          before that point doesn't mean anything. */}
+      {(
+        <SectionCard title="⏰ Smart Alarm" subtitle="Rings before this train reaches your station — even if you close the app.">
+          <LabeledInput label="Getting off at (station code)" value={alarmStation} onChangeText={setAlarmStation} autoCapitalize="characters" editable={!alarmArmed} />
+          <Text style={styles.fieldLabel}>Alert me before arrival</Text>
+          <View style={styles.chipRow}>
+            {["15", "20", "30", "40", "45"].map((m) => (
+              <TouchableOpacity
+                key={m}
+                disabled={alarmArmed}
+                onPress={() => { setAlarmLeadMinutes(m); setAlarmCustomOpen(false); }}
+                style={[styles.alarmChip, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipActive]}
+              >
+                <Text style={[styles.alarmChipText, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipTextActive]}>{m} min</Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity disabled={alarmArmed} onPress={() => setAlarmCustomOpen(true)} style={[styles.alarmChip, alarmCustomOpen && styles.alarmChipActive]}>
+              <Text style={[styles.alarmChipText, alarmCustomOpen && styles.alarmChipTextActive]}>Custom</Text>
+            </TouchableOpacity>
+          </View>
+          {alarmCustomOpen && (
+            <LabeledInput
+              label="Custom — minutes, or H:MM for 1hr+ (e.g. 1:30 = 1hr 30min)"
+              value={alarmCustomText} onChangeText={setAlarmCustomText}
+              keyboardType="numbers-and-punctuation" editable={!alarmArmed}
+            />
+          )}
+          <PrimaryButton
+            title={alarmArmed ? "Armed" : "Set Alarm"} onPress={setSmartAlarm} loading={alarmBusy}
+            disabled={alarmArmed} style={{ marginTop: spacing.sm }}
+          />
+          {alarmArmed && (
+            <TouchableOpacity onPress={cancelSmartAlarm} style={{ marginTop: spacing.sm }}>
+              <Text style={styles.removeAlarmText}>Remove alarm for this station</Text>
+            </TouchableOpacity>
+          )}
+          {alarmStatus && <Text style={styles.webNoticeText}>{alarmStatus}</Text>}
+        </SectionCard>
+      )}
+
+          {/* Book a ride home from the station you get off at (Ola / Uber /
+              Rapido, pickup pre-set) — hidden once the journey is over. */}
+          {bellsEnabledForPayload && !ltJourneyLikelyComplete && timeline.length ? (
+            <BookRideCard timeline={timeline} dest={dest} preferredCodes={Object.keys(stationWatches)} trainNumber={activeTrack.trainNumber} />
+          ) : null}
+          </View>
+        ) : null}
 
         {/* Alerts & notification settings — same controls, own light card. */}
         <View style={styles.pxSettingsCard}>
@@ -2288,6 +2584,10 @@ export default function LiveTrackingScreen({ navigation }) {
         </>
       )}
 
+      {/* Everything below belongs to the train being tracked. It stays
+          mounted (GPS verification, map, timers keep their state) but is
+          hidden while the "Track a train" page is showing. */}
+      <View style={onFormPage ? styles.hiddenView : null}>
       {modeNotice ? (
         <View style={styles.ryRedBanner}>
           <Ionicons name="alert-circle-outline" size={18} color="#fff" />
@@ -2357,40 +2657,31 @@ export default function LiveTrackingScreen({ navigation }) {
               Coach layout / Time Table) — same handlers, same navigation. */}
           <View style={styles.pxTiles}>
             <TouchableOpacity onPress={toggleMap} style={[styles.pxTile, { backgroundColor: "#E4570F" }]} activeOpacity={0.85}>
-              <Ionicons name="map" size={22} color="#fff" />
-              <Text style={styles.pxTileTitle}>{showMap ? "Hide train on map" : "Train on map"}</Text>
-              <Text style={styles.pxTileSub}>{t("Live position")}</Text>
+              <Ionicons name="map" size={20} color="#fff" />
+              <Text style={styles.pxTileTitle}>{showMap ? "Hide map" : "Map"}</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={shareTrackingLink} style={[styles.pxTile, { backgroundColor: "#2E7D32" }]} activeOpacity={0.85}>
-              <Ionicons name="people" size={22} color="#fff" />
-              <Text style={styles.pxTileTitle}>{t("Share trip")}</Text>
-              <Text style={styles.pxTileSub}>{t("Family sees you live")}</Text>
+              <Ionicons name="people" size={20} color="#fff" />
+              <Text style={styles.pxTileTitle}>{t("Share")}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               onPress={() => navigation?.navigate?.("More", { initialTab: "coach", trainNumber: trainNumber.trim() })}
               style={[styles.pxTile, { backgroundColor: "#1565C0" }]}
               activeOpacity={0.85}
             >
-              <Ionicons name="grid" size={22} color="#fff" />
-              <Text style={styles.pxTileTitle}>{t("Coach layout")}</Text>
-              <Text style={styles.pxTileSub}>{t("Find your coach")}</Text>
+              <Ionicons name="grid" size={20} color="#fff" />
+              <Text style={styles.pxTileTitle}>{t("Coach")}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               onPress={() => navigation?.navigate?.("Home", { screen: "TrainSchedule", params: { trainNumber: trainNumber.trim() } })}
               style={[styles.pxTile, { backgroundColor: "#6A1B9A" }]}
               activeOpacity={0.85}
             >
-              <Ionicons name="time" size={22} color="#fff" />
-              <Text style={styles.pxTileTitle}>{t("Time Table")}</Text>
-              <Text style={styles.pxTileSub}>{t("Full schedule")}</Text>
+              <Ionicons name="time" size={20} color="#fff" />
+              <Text style={styles.pxTileTitle}>{t("Timetable")}</Text>
             </TouchableOpacity>
           </View>
           {mapError && <Text style={styles.errorText}>{mapError}</Text>}
-          {/* Book a ride home from the station you get off at (Ola / Uber /
-              Rapido, pickup pre-set) — hidden once the journey is over. */}
-          {bellsEnabledForPayload && !ltJourneyLikelyComplete && timeline.length ? (
-            <BookRideCard timeline={timeline} dest={dest} preferredCodes={Object.keys(stationWatches)} trainNumber={activeTrack.trainNumber} />
-          ) : null}
         </>
       ) : null}
       {IS_WEB ? (
@@ -2507,40 +2798,6 @@ export default function LiveTrackingScreen({ navigation }) {
               HH:MM · 2 km to Y", "Train has reached destination." — and the
               next halt's live ETA underneath. On GPS it's the phone's own
               position on the route. */}
-          <View ref={quickBarRef} style={styles.ryStatusCard}>
-            <View style={styles.pxLiveTopRow}>
-              <View style={[styles.pxLivePill, gpsOn && { backgroundColor: colors.accent }]}>
-                <Ionicons name={gpsOn ? "navigate" : "radio"} size={11} color="#111" />
-                <Text style={styles.pxLivePillText}>{gpsOn ? "GPS" : ltJourneyLikelyComplete ? t("COMPLETED") : t("LIVE NOW")}</Text>
-              </View>
-              <Text style={styles.pxLiveTrainNo}>{activeTrack?.trainNumber}</Text>
-            </View>
-            <Text style={styles.ryStatusText}>{ltStatus.headline}</Text>
-            {ltStatus.sub ? <Text style={styles.ryStatusSub}>{ltStatus.sub}</Text> : null}
-            {(() => {
-              // Display only: share of reported stops already passed.
-              const total = timeline.length;
-              const passed = timeline.filter((x) => x.status === "passed").length;
-              const frac = ltJourneyLikelyComplete ? 1 : total > 1 ? Math.min(1, passed / (total - 1)) : 0;
-              return (
-                <View style={styles.pxProgressWrap}>
-                  <View style={styles.pxProgressTrack} />
-                  <View style={[styles.pxProgressFill, { width: `${Math.round(frac * 100)}%` }]} />
-                  <View style={[styles.pxProgressDot, { left: `${Math.round(frac * 100)}%` }]} />
-                  {total >= 2 ? (
-                    <View style={styles.pxProgressEnds}>
-                      <Text style={styles.pxProgressEndText}>{timeline[0].code || ""}</Text>
-                      <Text style={styles.pxProgressEndText}>{timeline[total - 1].code || ""}</Text>
-                    </View>
-                  ) : null}
-                </View>
-              );
-            })()}
-            <View style={styles.pxLiveBottomRow}>
-              <DelayPill minutes={ltEffectiveDelay} />
-            </View>
-          </View>
-
           <TouchableOpacity onPress={() => setShowMoreStats((v) => !v)} style={styles.moreStatsToggle}>
             <Text style={styles.moreStatsToggleText}>{showMoreStats ? "▾ Hide more details" : "▸ More details"}</Text>
           </TouchableOpacity>
@@ -2594,6 +2851,12 @@ export default function LiveTrackingScreen({ navigation }) {
               boundary (RailKit's own per-stop day field), and consecutive
               non-halting stations collapsed into a tappable
               "+N No-Halt stations" row — same layout as the reference. */}
+          <View style={styles.lxTimelineHead}>
+            <Text style={styles.lxTimelineHeadText}>JOURNEY TIMELINE</Text>
+            <TouchableOpacity onPress={jumpToTrain} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={styles.lxJumpText}>Jump to train {"\u2193"}</Text>
+            </TouchableOpacity>
+          </View>
           <SectionCard title="Running status — every station" subtitle={`${timeline.length} stops reported`}>
             <View style={styles.tlColHeaderRow}>
               <Text style={styles.tlColHeaderSide}>Arrival</Text>
@@ -2674,63 +2937,10 @@ export default function LiveTrackingScreen({ navigation }) {
               });
             })()}
           </SectionCard>
-
-          <SectionCard title="Crowd prediction" subtitle={payload.crowd_disclaimer}>
-            <InfoRow label="Level" value={payload.crowd_level || "—"} />
-            <InfoRow label="Score" value={payload.crowd_score != null ? String(payload.crowd_score) : "—"} />
-            {!!payload.crowd_basis?.length && (
-              <View style={styles.basisList}>
-                {payload.crowd_basis.map((b, i) => (
-                  <Text key={i} style={styles.basisItem}>• {b}</Text>
-                ))}
-              </View>
-            )}
-          </SectionCard>
         </>
       )}
 
-      {/* FEATURE: Smart Alarm, right on Live Tracking (moved off the
-          separate More Tools menu — see the top-of-file comment). Only
-          shows once a train is actually being tracked; arming an alarm
-          before that point doesn't mean anything. */}
-      {payload && (
-        <SectionCard title="⏰ Smart Alarm" subtitle="Wake-up alert as this train nears a station you pick — rings even if you close the app.">
-          <LabeledInput label="Destination station code" value={alarmStation} onChangeText={setAlarmStation} autoCapitalize="characters" editable={!alarmArmed} />
-          <Text style={styles.fieldLabel}>Alert me before arrival</Text>
-          <View style={styles.chipRow}>
-            {["15", "20", "30", "40", "45"].map((m) => (
-              <TouchableOpacity
-                key={m}
-                disabled={alarmArmed}
-                onPress={() => { setAlarmLeadMinutes(m); setAlarmCustomOpen(false); }}
-                style={[styles.alarmChip, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipActive]}
-              >
-                <Text style={[styles.alarmChipText, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipTextActive]}>{m} min</Text>
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity disabled={alarmArmed} onPress={() => setAlarmCustomOpen(true)} style={[styles.alarmChip, alarmCustomOpen && styles.alarmChipActive]}>
-              <Text style={[styles.alarmChipText, alarmCustomOpen && styles.alarmChipTextActive]}>Custom</Text>
-            </TouchableOpacity>
-          </View>
-          {alarmCustomOpen && (
-            <LabeledInput
-              label="Custom — minutes, or H:MM for 1hr+ (e.g. 1:30 = 1hr 30min)"
-              value={alarmCustomText} onChangeText={setAlarmCustomText}
-              keyboardType="numbers-and-punctuation" editable={!alarmArmed}
-            />
-          )}
-          <PrimaryButton
-            title={alarmArmed ? "Armed" : "Set Alarm"} onPress={setSmartAlarm} loading={alarmBusy}
-            disabled={alarmArmed} style={{ marginTop: spacing.sm }}
-          />
-          {alarmArmed && (
-            <TouchableOpacity onPress={cancelSmartAlarm} style={{ marginTop: spacing.sm }}>
-              <Text style={styles.removeAlarmText}>Remove alarm for this station</Text>
-            </TouchableOpacity>
-          )}
-          {alarmStatus && <Text style={styles.webNoticeText}>{alarmStatus}</Text>}
-        </SectionCard>
-      )}
+      </View>
     </View>
     </ScrollView>
     {showBottomBar && (
@@ -3688,6 +3898,62 @@ const styles = StyleSheet.create({
   },
   ryStopBtn: { paddingVertical: 6, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: "#F2453D" },
   ryStopBtnText: { color: "#fff", fontWeight: "800", fontSize: 12 },
+  // REDESIGN (hero header + "Right now" card): blue gradient-style header
+  // with route ends and a journey progress bar, then a white card
+  // overlapping its lower edge with the live position and three tiles.
+  lxHero: {
+    backgroundColor: "#1D5FDB", borderRadius: 24, padding: spacing.lg, paddingBottom: 44,
+    overflow: "hidden", shadowColor: "#1D5FDB", shadowOpacity: 0.3, shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 }, elevation: 5,
+  },
+  lxGlow: {
+    position: "absolute", top: -100, right: -80, width: 260, height: 260, borderRadius: 130,
+    backgroundColor: "#4C8DF7", opacity: 0.45,
+  },
+  lxTopRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  lxLivePill: {
+    flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(255,255,255,0.18)",
+    borderRadius: radius.pill, paddingVertical: 5, paddingHorizontal: 12, maxWidth: "60%",
+  },
+  lxLiveDot: { width: 8, height: 8, borderRadius: 4 },
+  lxLivePillText: { color: "#fff", fontWeight: "800", fontSize: 12.5 },
+  lxTitleRow: { flexDirection: "row", alignItems: "flex-start", gap: 8, marginTop: spacing.md },
+  lxTitle: { fontSize: 22, fontWeight: "900", color: "#fff", lineHeight: 28 },
+  lxSubline: { fontSize: 13, color: "#DCE8FF", marginTop: 4, fontWeight: "600", lineHeight: 18 },
+  lxRouteRow: { flexDirection: "row", alignItems: "flex-start", gap: 12, marginTop: spacing.lg },
+  lxCode: { fontSize: 24, fontWeight: "900", color: "#fff" },
+  lxStationName: { fontSize: 12.5, color: "#DCE8FF", marginTop: 1 },
+  lxStationTime: { fontSize: 13, color: "#fff", fontWeight: "700", marginTop: 2 },
+  lxProgressWrap: { marginTop: spacing.md, height: 28, justifyContent: "center" },
+  lxProgressTrack: { position: "absolute", left: 0, right: 0, height: 5, borderRadius: 3, backgroundColor: "rgba(255,255,255,0.28)" },
+  lxProgressFill: { position: "absolute", left: 0, height: 5, borderRadius: 3, backgroundColor: "#fff" },
+  lxProgressMarker: {
+    position: "absolute", marginLeft: -14, width: 28, height: 28, borderRadius: 14, backgroundColor: "#fff",
+    alignItems: "center", justifyContent: "center", shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 }, elevation: 4,
+  },
+  lxProgressFoot: { flexDirection: "row", justifyContent: "space-between", marginTop: 4 },
+  lxProgressFootText: { fontSize: 12, color: "#DCE8FF", fontWeight: "700" },
+  lxNowCard: {
+    backgroundColor: "#fff", borderRadius: 22, padding: spacing.md, marginHorizontal: spacing.sm,
+    marginTop: -32, marginBottom: spacing.md, borderWidth: 1, borderColor: colors.border,
+    shadowColor: "#0B1F4D", shadowOpacity: 0.12, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 6,
+  },
+  lxNowRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  lxNowIcon: { width: 44, height: 44, borderRadius: 14, backgroundColor: "#EAF1FF", alignItems: "center", justifyContent: "center" },
+  lxNowTitle: { fontSize: 16.5, fontWeight: "800", color: colors.text, lineHeight: 22 },
+  lxNowSub: { fontSize: 12.5, color: colors.textMuted, marginTop: 2, lineHeight: 17 },
+  lxTiles: { flexDirection: "row", gap: 10, marginTop: spacing.md },
+  lxTile: { flex: 1, backgroundColor: "#F2F5FB", borderRadius: 14, paddingVertical: 12, alignItems: "center" },
+  lxTileValue: { fontSize: 22, fontWeight: "900", color: colors.text },
+  lxTileLabel: { fontSize: 11.5, color: colors.textMuted, marginTop: 2, fontWeight: "600" },
+  lxNowFoot: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: spacing.sm, gap: 8 },
+  lxNowFootText: { flex: 1, fontSize: 11.5, color: colors.textMuted },
+  lxReportText: { fontSize: 12, color: colors.primary, fontWeight: "700" },
+  lxTimelineHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: spacing.sm, marginBottom: spacing.sm, paddingHorizontal: 4 },
+  lxTimelineHeadText: { fontSize: 12.5, fontWeight: "900", color: colors.textMuted, letterSpacing: 0.8 },
+  lxJumpText: { fontSize: 13, fontWeight: "800", color: colors.primary },
+  hiddenView: { display: "none" },
   badgeRowInline: { flexDirection: "row", alignItems: "center", gap: 5 },
   modeSwitch: {
     flexDirection: "row", marginTop: spacing.md, borderRadius: radius.pill, padding: 3,
@@ -3695,8 +3961,8 @@ const styles = StyleSheet.create({
   },
   modeBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingVertical: 8, borderRadius: radius.pill },
   modeBtnActive: { backgroundColor: "#fff" },
-  modeBtnText: { fontSize: 12.5, fontWeight: "700", color: "#E4DAFF" },
-  modeBtnTextActive: { color: "#2A0E5C" },
+  modeBtnText: { fontSize: 12.5, fontWeight: "700", color: "#DCE8FF" },
+  modeBtnTextActive: { color: colors.primary },
   ryRedBanner: {
     flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#F2453D",
     borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: spacing.sm,
@@ -3783,10 +4049,26 @@ const styles = StyleSheet.create({
   pxSettingsTitle: { fontSize: 13, fontWeight: "800", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 1 },
   pxTiles: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 10, marginTop: spacing.sm, marginBottom: spacing.xs },
   pxTile: {
-    width: "48.5%", borderRadius: 18, padding: spacing.md, minHeight: 84, justifyContent: "flex-end",
+    width: "23.5%", borderRadius: 14, paddingVertical: spacing.sm, paddingHorizontal: 4, minHeight: 66, justifyContent: "center", alignItems: "center",
     shadowColor: "#000", shadowOpacity: 0.12, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 3,
   },
-  pxTileTitle: { color: "#fff", fontSize: 15, fontWeight: "800", marginTop: spacing.sm },
+  pxTileTitle: { color: "#fff", fontSize: 11.5, fontWeight: "800", marginTop: 4, textAlign: "center" },
+  arrivalWrap: { marginTop: spacing.sm },
+  arrivalKicker: { alignSelf: "flex-start", backgroundColor: colors.primary, color: "#fff", fontSize: 10, fontWeight: "800", letterSpacing: 1, paddingHorizontal: 10, paddingVertical: 3, borderRadius: 10, marginBottom: -2, marginLeft: 14, zIndex: 1 },
+  dateChipRow: { flexDirection: "row", gap: 8, marginTop: 6 },
+  dateChip: { flex: 1, alignItems: "center", paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: "#e3e8f2", backgroundColor: "#fff" },
+  dateChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  dateChipText: { fontSize: 12.5, fontWeight: "700", color: colors.text },
+  dateChipTextActive: { color: "#fff" },
+  alarmOnStartRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: "#E8F5E9", borderRadius: 12, padding: 10, marginTop: 10 },
+  alarmOnStartText: { flex: 1, fontSize: 12.5, fontWeight: "700", color: "#1B5E20" },
+  miniSwitch: { width: 44, height: 26, borderRadius: 13, backgroundColor: "#cfd6e4", justifyContent: "center", paddingHorizontal: 3 },
+  miniSwitchOn: { backgroundColor: "#2E7D32", alignItems: "flex-end" },
+  miniKnob: { width: 20, height: 20, borderRadius: 10, backgroundColor: "#fff" },
+  recentRow: { flexDirection: "row", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#e3e8f2" },
+  recentTitle: { fontSize: 13.5, fontWeight: "700", color: colors.text },
+  recentSub: { fontSize: 11.5, color: colors.textMuted, marginTop: 1 },
+  recentGo: { color: colors.primary, fontWeight: "800", fontSize: 12.5 },
   pxTileSub: { color: "rgba(255,255,255,0.8)", fontSize: 11, fontWeight: "600", marginTop: 2 },
   tlGpsBadge: { borderColor: colors.accent, backgroundColor: "#FFF4E5" },
   tlPredictedMuted: { fontSize: 10.5, color: colors.textMuted, marginTop: 2 },
