@@ -21,6 +21,9 @@ services:
     runtime: node
     plan: free
     rootDir: railkit-service
+    branch: main            # only main deploys: never a feature branch or a hand-applied patch
+    autoDeployTrigger: checksPass   # deploy only after CI is green
+    healthCheckPath: /health
     buildCommand: npm install
     startCommand: npm start
     envVars:
@@ -38,6 +41,12 @@ services:
     runtime: python
     plan: free
     rootDir: backend
+    branch: main            # only main deploys: never a feature branch or a hand-applied patch
+    autoDeployTrigger: checksPass   # deploy only after CI is green
+    # Cheap liveness probe (no engine access). Render keeps the previous
+    # instance serving until the new one passes it, which also gives
+    # zero-downtime deploys and automatic rollback of a build that won't boot.
+    healthCheckPath: /healthz
     # Lean install for the free tier's 512MB RAM — see
     # requirements-render.txt's own header comment for why, and swap to
     # `pip install -r requirements.txt` if you upgrade to a bigger plan
