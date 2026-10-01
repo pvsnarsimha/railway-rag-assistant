@@ -2237,18 +2237,20 @@ export default function LiveTrackingScreen({ navigation }) {
               </Text>
             </TouchableOpacity>
           </View>
-          <LabeledInput label="Getting off at (optional)" placeholder="Destination station, e.g. VSKP" value={dest} onChangeText={setDest} autoCapitalize="characters" />
+          <View style={{ marginTop: spacing.md }}>
+            <LabeledInput label="Getting off at (optional)" placeholder="Destination station, e.g. VSKP" value={dest} onChangeText={setDest} autoCapitalize="characters" />
+          </View>
           {dest.trim() ? (
             <TouchableOpacity style={styles.alarmOnStartRow} onPress={() => setAlarmOnStart((v) => !v)} activeOpacity={0.8}>
               <Ionicons name="alarm-outline" size={18} color="#1B5E20" style={{ marginRight: 8 }} />
-              <Text style={styles.alarmOnStartText}>{`Wake me up before I reach ${dest.trim().toUpperCase()} (${alarmLeadMinutes} min)`}</Text>
+              <Text style={styles.alarmOnStartText}>{`Wake me ${alarmLeadMinutes} min before ${dest.trim().toUpperCase()}`}</Text>
               <View style={[styles.miniSwitch, alarmOnStart && styles.miniSwitchOn]}><View style={styles.miniKnob} /></View>
             </TouchableOpacity>
           ) : null}
           {sourceOpen ? (
             <LabeledInput label="Boarding station (optional)" placeholder="e.g. SC" value={source} onChangeText={setSource} autoCapitalize="characters" />
           ) : (
-            <TouchableOpacity onPress={() => setSourceOpen(true)} style={{ marginTop: spacing.sm }}>
+            <TouchableOpacity onPress={() => setSourceOpen(true)} style={{ marginTop: spacing.sm, marginBottom: spacing.sm }}>
               <Text style={styles.recentGo}>{"+ Add boarding station"}</Text>
             </TouchableOpacity>
           )}
