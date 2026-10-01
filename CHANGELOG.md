@@ -1,6 +1,10 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.0.2] - 2026-10-01
+### Fixed
+- A web search that failed soft (empty result) was cached for 15 minutes, blocking good results for that question. Empty results are no longer cached (`cached(..., skip_empty=True)`).
+
 ## [1.0.1] - 2026-10-01
 ### Added
 - Per-request step timings: the JSON access-log line for a slow request now names the intent and how long each outside call took (`railkit`, `rapidapi`, `railradar`, `web_search`, `gemini`, `claude`, `agent`, `rag_retrieve`). The same steps are aggregated (count, errors, p50/p95/max) in `/api/metrics` and `/metrics`.

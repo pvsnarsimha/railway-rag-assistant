@@ -219,7 +219,7 @@ def _search_duckduckgo(query: str, max_results: int) -> List[WebSearchResult]:
     return results[:max_results]
 
 
-@cached(ttl_seconds=900, prefix="web_search")  # 15 min — news/live topics move, but not that fast
+@cached(ttl_seconds=900, prefix="web_search", skip_empty=True)  # 15 min; an empty (failed) search is never remembered
 @observability.timed("web_search")
 def search_web(query: str, max_results: int = 3) -> List[WebSearchResult]:
     """
