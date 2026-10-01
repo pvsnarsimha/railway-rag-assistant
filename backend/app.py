@@ -309,6 +309,7 @@ def _is_transient_gemini_error(exc: Exception) -> bool:
     return "503" in text or "UNAVAILABLE" in text
 
 
+@observability.timed("gemini")
 def _call_gemini(system_prompt: str, user_prompt: str):
     """Calls Gemini for final answer synthesis (text only — GPS, live status,
     routes, policy/FAQ, everything _synthesize() handles). Requires
@@ -402,6 +403,7 @@ def _call_gemini(system_prompt: str, user_prompt: str):
     return None, f"Gemini synthesis call failed ({type(last_exc).__name__}): {last_exc}"
 
 
+@observability.timed("claude")
 def _call_claude(system_prompt: str, user_prompt: str):
     """Calls Claude for final answer synthesis. Requires ANTHROPIC_API_KEY.
 
@@ -2910,6 +2912,7 @@ def chat(req: ChatRequest):
         intent = classification["intent"]
         entities = classification["entities"]
         observability.incr(f"chat_intent.{getattr(intent, 'value', intent)}")
+        observability.note("intent", getattr(intent, "value", str(intent)))
 
         # --- Real-Time Sentiment and Emotion Analysis: cheap lexicon scan,
         # runs on every message so its tone guidance can steer THIS reply,

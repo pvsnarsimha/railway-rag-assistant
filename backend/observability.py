@@ -15,6 +15,8 @@ Request metrics + structured access logs, dependency-free.
   with several workers each reports its own slice. Scrape or poll it; do
   not treat it as durable history.
 """
+import contextvars
+import functools
 import json
 import logging
 import threading
@@ -33,6 +35,51 @@ _lock = threading.Lock()
 _routes = defaultdict(lambda: {"count": 0, "errors_5xx": 0, "errors_4xx": 0,
                                "sum_ms": 0.0, "lat": deque(maxlen=_WINDOW)})
 _counters = defaultdict(int)
+_step_stats = defaultdict(lambda: {"count": 0, "errors": 0, "lat": deque(maxlen=_WINDOW)})
+
+# Per-request scratchpad: which sub-steps (outside calls) ran and how long
+# each took. Created by the middleware, filled by @timed functions, which may
+# run in a worker thread (the context, and so this dict, is copied across).
+_request_steps = contextvars.ContextVar("request_steps", default=None)
+
+
+def note(key: str, value) -> None:
+    """Attach a label (e.g. intent) to the current request's log line."""
+    cur = _request_steps.get()
+    if cur is not None:
+        cur["labels"][key] = value
+
+
+def record_step(name: str, ms: float, ok: bool = True) -> None:
+    with _lock:
+        st = _step_stats[name]
+        st["count"] += 1
+        st["lat"].append(ms)
+        if not ok:
+            st["errors"] += 1
+    cur = _request_steps.get()
+    if cur is not None:
+        entry = cur["steps"].setdefault(name, {"ms": 0.0, "calls": 0})
+        entry["ms"] = round(entry["ms"] + ms, 1)
+        entry["calls"] += 1
+
+
+def timed(name: str):
+    """Decorator: time a function as a named step of the current request."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*a, **kw):
+            t0 = time.perf_counter()
+            ok = True
+            try:
+                return fn(*a, **kw)
+            except BaseException:
+                ok = False
+                raise
+            finally:
+                record_step(name, (time.perf_counter() - t0) * 1000, ok)
+        return wrapper
+    return deco
 
 
 def percentile(sorted_vals, p):
@@ -81,6 +128,13 @@ def snapshot() -> dict:
             total += r["count"]
             errs += r["errors_5xx"]
         counters = dict(_counters)
+        steps = {}
+        for name, st in _step_stats.items():
+            lat = sorted(st["lat"])
+            steps[name] = {"count": st["count"], "errors": st["errors"],
+                           "p50_ms": round(percentile(lat, 50), 2),
+                           "p95_ms": round(percentile(lat, 95), 2),
+                           "max_ms": round(lat[-1], 2) if lat else 0.0}
     return {
         **version.info(),
         "requests_total": total,
@@ -89,6 +143,7 @@ def snapshot() -> dict:
         "window_samples_per_route": _WINDOW,
         "routes": routes,
         "counters": counters,
+        "steps": steps,
     }
 
 
@@ -107,6 +162,10 @@ def prometheus() -> str:
         out.append(f'http_errors_total{{{lbl},class="4xx"}} {r["errors_4xx"]}')
         for q, f in (("0.5", "p50_ms"), ("0.95", "p95_ms"), ("0.99", "p99_ms")):
             out.append(f'http_request_duration_ms{{{lbl},quantile="{q}"}} {r[f]}')
+    for name, st in snap["steps"].items():
+        out.append(f'app_step_total{{step="{name}"}} {st["count"]}')
+        out.append(f'app_step_errors_total{{step="{name}"}} {st["errors"]}')
+        out.append(f'app_step_duration_ms{{step="{name}",quantile="0.95"}} {st["p95_ms"]}')
     for name, val in snap["counters"].items():
         out.append(f'app_counter{{name="{name}"}} {val}')
     return "\n".join(out) + "\n"
@@ -116,6 +175,7 @@ def reset() -> None:
     with _lock:
         _routes.clear()
         _counters.clear()
+        _step_stats.clear()
 
 
 class MetricsMiddleware:
@@ -129,6 +189,8 @@ class MetricsMiddleware:
         rid = next((v.decode() for k, v in scope["headers"] if k == b"x-request-id"), "") or uuid.uuid4().hex[:12]
         t0 = time.perf_counter()
         state = {"status": 500}
+        scratch = {"steps": {}, "labels": {}}
+        _request_steps.set(scratch)
 
         async def send_wrapper(message):
             if message["type"] == "http.response.start":
@@ -150,6 +212,7 @@ class MetricsMiddleware:
                 _log.log(logging.WARNING if (state["status"] >= 500 or ms > _SLOW_MS) else logging.INFO,
                          json.dumps({"rid": rid, "method": scope["method"], "route": route,
                                      "status": state["status"], "ms": round(ms, 1),
-                                     "slow": ms > _SLOW_MS}))
+                                     "slow": ms > _SLOW_MS, **scratch["labels"],
+                                     **({"steps": scratch["steps"]} if scratch["steps"] else {})}))
             except Exception:
                 pass

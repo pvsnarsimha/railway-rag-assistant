@@ -84,3 +84,39 @@ def test_chat_intents_are_counted(monkeypatch):
     observability.reset()
     client.post("/api/chat", json={"message": "help", "agent": False})
     assert observability.snapshot()["counters"].get("chat_intent.help") == 1
+
+
+def test_slow_step_breakdown_in_log_and_metrics(monkeypatch, caplog):
+    """A slow request's log line must say which outside call ate the time."""
+    import logging
+    import time
+    observability.reset()
+    monkeypatch.setattr(app_module.railway_agent, "is_available", lambda: False)
+
+    def slow_search(*a, **k):
+        time.sleep(0.05)
+        return []
+    monkeypatch.setattr(app_module.web_search, "search_web", observability.timed("web_search")(slow_search))
+
+    with caplog.at_level(logging.INFO, logger="access"):
+        client.post("/api/chat", json={"message": "who was the first railway minister of India", "agent": False})
+    lines = [r.getMessage() for r in caplog.records if r.name == "access" and "/api/chat" in r.getMessage()]
+    import json as _json
+    entry = _json.loads(lines[-1])
+    assert entry["intent"] == "general_faq"
+    assert "steps" in entry and entry["steps"]["rag_retrieve"]["calls"] >= 1
+    snap = observability.snapshot()
+    assert snap["steps"]["rag_retrieve"]["count"] >= 1
+
+
+def test_timed_records_errors():
+    observability.reset()
+
+    @observability.timed("boom")
+    def f():
+        raise ValueError("x")
+    try:
+        f()
+    except ValueError:
+        pass
+    assert observability.snapshot()["steps"]["boom"]["errors"] == 1

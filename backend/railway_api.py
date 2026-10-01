@@ -40,6 +40,7 @@ get_live_train_status, etc.) so app.py, gps_tracking.py, and
 trains_between.py don't need to change.
 """
 
+import observability
 import os
 import requests
 from datetime import datetime
@@ -60,6 +61,7 @@ class RailwayAPIError(Exception):
     pass
 
 
+@observability.timed("railkit")
 def _call(path: str, params: dict = None) -> dict:
     """GET the local railkit-service, unwrap {success, data}/{success, error}."""
     url = f"{SERVICE_URL}{path}"

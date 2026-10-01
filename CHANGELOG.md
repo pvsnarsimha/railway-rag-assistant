@@ -1,6 +1,11 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.0.1] - 2026-10-01
+### Added
+- Per-request step timings: the JSON access-log line for a slow request now names the intent and how long each outside call took (`railkit`, `rapidapi`, `railradar`, `web_search`, `gemini`, `claude`, `agent`, `rag_retrieve`). The same steps are aggregated (count, errors, p50/p95/max) in `/api/metrics` and `/metrics`.
+- Production chat requests were observed taking about 9 s; this makes the cause visible.
+
 ## [1.0.0] - 2026-10-01
 First versioned release. Baseline of everything on `main` plus release, monitoring and measurement tooling.
 

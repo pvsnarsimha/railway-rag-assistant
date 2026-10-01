@@ -38,6 +38,7 @@ Contract:
     search_web(query, max_results=3) -> List[WebSearchResult]
 """
 
+import observability
 import os
 import re
 import html
@@ -219,6 +220,7 @@ def _search_duckduckgo(query: str, max_results: int) -> List[WebSearchResult]:
 
 
 @cached(ttl_seconds=900, prefix="web_search")  # 15 min — news/live topics move, but not that fast
+@observability.timed("web_search")
 def search_web(query: str, max_results: int = 3) -> List[WebSearchResult]:
     """
     Runs a live web search and returns up to `max_results` (title, snippet,
