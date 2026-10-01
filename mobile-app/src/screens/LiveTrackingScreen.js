@@ -2001,7 +2001,21 @@ export default function LiveTrackingScreen({ navigation }) {
   // route.params.trainNumber auto-fetch, and MoreToolsScreen.js's
   // initialTab/trainNumber pre-fill for its Coach Layout tab) instead of
   // making the user re-type it.
-  const showBottomBar = !!payload && !ltJourneyLikelyComplete && !!payload.next_station;
+  // The "Track a train" page (no train yet, or the form re-opened with
+  // "Change") shows ONLY the form: no leftover Next bar, banners, tiles,
+  // GPS card or timeline from a train that is no longer on screen.
+  const onFormPage = !activeTrack || formOpen;
+  const showBottomBar = !onFormPage && !!payload && !ltJourneyLikelyComplete && !!payload.next_station;
+
+  // Leaflet can't measure itself inside a display:none parent; tell it to
+  // re-measure when the tracking view comes back after the form was open.
+  useEffect(() => {
+    if (IS_WEB && !onFormPage && typeof window !== "undefined") {
+      const id = setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
+      return () => clearTimeout(id);
+    }
+    return undefined;
+  }, [onFormPage]);
 
   // RailYatri-style status sentence for the status card.
   const ltStatus = (() => {
@@ -2049,6 +2063,64 @@ export default function LiveTrackingScreen({ navigation }) {
       + (nxt ? (km != null ? ` · ${km} km to ${toDisplayCase(nxt.name)}` : ` · next ${toDisplayCase(nxt.name)}`) : "");
     return { headline, sub };
   })();
+
+  // Hero header numbers (display only, all from real payload values):
+  // route ends with their times, journey progress by km when the provider
+  // reports distances (else by stops passed), and the departure line.
+  const lxHero = (() => {
+    const first = timeline[0] || null;
+    const last = timeline.length >= 2 ? timeline[timeline.length - 1] : null;
+    const totalKm = last && last.distance_km != null ? last.distance_km : null;
+    const coveredKm = ltTotalCoveredKm != null ? ltTotalCoveredKm : ltLastReportingDistanceKm;
+    const reached = timeline.filter((x) => x.status === "passed" || x.status === "current").length;
+    let frac = 0;
+    if (ltJourneyLikelyComplete) frac = 1;
+    else if (totalKm && coveredKm != null) frac = Math.max(0, Math.min(1, coveredKm / totalKm));
+    else if (timeline.length > 1) frac = Math.min(1, reached / (timeline.length - 1));
+    const pct = Math.round(frac * 100);
+    const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+    const dep = first && first.departure ? first.departure : null;
+    const departed = !!(dep && dep.actual && dep.actual_is_predicted !== true);
+    const depTime = dep ? hhmm(dep.actual || dep.expected || dep.scheduled) : null;
+    const depDelay = dep && dep.delay_minutes != null ? dep.delay_minutes : null;
+    let depLine = null;
+    if (depTime) {
+      if (!departed) depLine = `Departs ${depTime}`;
+      else depLine = depDelay > 0 ? `Departed ${depTime} (+${depDelay} min)` : `On time departure ${depTime}`;
+    }
+    const arr = last && last.arrival ? last.arrival : null;
+    const destEta = last ? hhmm(last.predicted_eta || (arr && (arr.actual || arr.expected || arr.scheduled))) : null;
+    const destDay = last ? dayNumberForEntry(last, journeyStartDate) : null;
+    return {
+      first, last, frac, pct,
+      coveredKm, leftKm: totalKm != null && coveredKm != null ? Math.max(0, Math.round((totalKm - coveredKm) * 10) / 10) : null,
+      reached, totalStops: timeline.length,
+      depLine, depSched: dep ? hhmm(dep.scheduled) : null, destEta, destDay,
+    };
+  })();
+  const lxSpeed = (() => {
+    const v = payload && (payload.recency_weighted_speed_kmph ?? payload.instant_speed_kmph ?? payload.display_speed_kmph);
+    return v != null && !Number.isNaN(Number(v)) ? Math.round(Number(v)) : null;
+  })();
+  const lxNextEta = payload ? (payload.next_station_live_eta || payload.next_station_expected_arrival || null) : null;
+  const lxHaltsLeft = timeline.filter((x) => x.kind !== "intermediate" && x.status !== "passed" && x.status !== "current").length;
+  const lxSourceLabel = gpsOn ? "GPS" : payload && payload.live_source === "railradar" ? "RailRadar"
+    : payload && payload.live_source === "railkit" ? "RailKit" : "Live data";
+
+  // "Jump to train": same scroll the first payload triggers, on demand.
+  const jumpToTrain = () => {
+    const target = currentStationRowRef.current || lastStationRowRef.current;
+    if (!target) return;
+    if (IS_WEB) {
+      target.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    } else if (scrollContentRef.current && scrollRef.current && target.measureLayout) {
+      target.measureLayout(
+        scrollContentRef.current,
+        (x, y) => scrollRef.current?.scrollTo({ y: Math.max(0, y - 220), animated: true }),
+        () => {},
+      );
+    }
+  };
 
   return (
     <View style={styles.flex}>
@@ -2116,36 +2188,16 @@ export default function LiveTrackingScreen({ navigation }) {
         </>
       ) : (
         <>
-        <View style={styles.ryHeader}>
-          <View style={styles.pxGlow} pointerEvents="none" />
-          {/* REDESIGN (RailYatri-style header): "12728 - Godavari Sf Express",
-              route, and a Today/Yesterday date switch — the form itself is
-              tucked away behind "Change" once a train is being tracked. */}
-          <View style={styles.ryHeaderTop}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.ryTrainTitle} numberOfLines={1}>
-                {activeTrack.trainNumber}{payload?.train_name ? ` - ${toDisplayCase(payload.train_name)}` : ""}
+        <View style={styles.lxHero}>
+          <View style={styles.lxGlow} pointerEvents="none" />
+          <View style={styles.lxTopRow}>
+            <TouchableOpacity onPress={refreshNow} activeOpacity={0.8} style={styles.lxLivePill}>
+              <View style={[styles.lxLiveDot, { backgroundColor: gpsOn ? "#FFB347" : payload ? "#4ADE80" : connection === "error" ? "#FF8A80" : "#CBD5E1" }]} />
+              <Text style={styles.lxLivePillText} numberOfLines={1}>
+                {gpsOn ? "GPS" : payload ? "LIVE" : connection === "error" ? "Can't reach server" : "Loading…"}
+                {payload?.status_updated_at ? ` · ${formatAsOfAgo(payload.status_updated_at)}` : ""}
               </Text>
-              {timeline.length >= 2 ? (
-                <Text style={styles.ryTrainSub} numberOfLines={1}>
-                  {(timeline[0].code || timeline[0].name)}-{(timeline[timeline.length - 1].code || timeline[timeline.length - 1].name)}
-                  {payload?.train_name ? "" : ` · ${toDisplayCase(timeline[0].name)} → ${toDisplayCase(timeline[timeline.length - 1].name)}`}
-                </Text>
-              ) : null}
-            </View>
-            <TouchableOpacity style={styles.ryDateBtn} onPress={() => { datePickForHeaderRef.current = true; setDayPickerVisible(true); }}>
-              <Text style={styles.ryDateBtnText}>{trackDateLabel(activeTrack.date)}</Text>
-              <Ionicons name="caret-down" size={12} color="#fff" />
             </TouchableOpacity>
-          </View>
-          <View style={styles.ryHeaderRow}>
-            <LiveBadge connection={connection} hasPayload={!!payload} gpsOn={gpsOn} />
-            {payload?.status_updated_at ? (
-              <TouchableOpacity onPress={refreshNow} style={styles.refreshRow}>
-                <Ionicons name="refresh" size={13} color="#C9B8FF" />
-                <Text style={styles.refreshText}>{gpsOn ? "GPS fix" : "Position"} {formatAsOfAgo(payload.status_updated_at)}</Text>
-              </TouchableOpacity>
-            ) : null}
             <View style={{ flex: 1 }} />
             <TouchableOpacity onPress={shareTrackingLink} style={styles.ryIconBtn} accessibilityLabel="Share link">
               <Ionicons name="share-social-outline" size={16} color="#fff" />
@@ -2153,10 +2205,61 @@ export default function LiveTrackingScreen({ navigation }) {
             <TouchableOpacity onPress={() => setFormOpen(true)} style={styles.ryIconBtn} accessibilityLabel="Change train">
               <Ionicons name="create-outline" size={16} color="#fff" />
             </TouchableOpacity>
-            <TouchableOpacity onPress={stopTracking} style={styles.ryStopBtn}>
+            <TouchableOpacity onPress={stopTracking} style={styles.ryStopBtn} accessibilityLabel="Stop tracking">
               <Text style={styles.ryStopBtnText}>Stop</Text>
             </TouchableOpacity>
           </View>
+
+          <View style={styles.lxTitleRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.lxTitle} numberOfLines={2}>
+                {activeTrack.trainNumber}{payload?.train_name ? ` \u00B7 ${toDisplayCase(payload.train_name)}` : ""}
+              </Text>
+              <Text style={styles.lxSubline} numberOfLines={2}>
+                {[timeline.length ? formatJourneyDayLabel(journeyStartDate, 1) : null, lxHero.depLine].filter(Boolean).join(" \u00B7 ") || "Getting the live position\u2026"}
+              </Text>
+            </View>
+            <TouchableOpacity style={styles.ryDateBtn} onPress={() => { datePickForHeaderRef.current = true; setDayPickerVisible(true); }}>
+              <Text style={styles.ryDateBtnText}>{trackDateLabel(activeTrack.date)}</Text>
+              <Ionicons name="caret-down" size={12} color="#fff" />
+            </TouchableOpacity>
+          </View>
+
+          {lxHero.first && lxHero.last ? (
+            <>
+              <View style={styles.lxRouteRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.lxCode}>{lxHero.first.code || ""}</Text>
+                  <Text style={styles.lxStationName} numberOfLines={1}>{toDisplayCase(lxHero.first.name)}</Text>
+                  {lxHero.depSched ? <Text style={styles.lxStationTime}>{lxHero.depSched}</Text> : null}
+                </View>
+                <View style={{ flex: 1, alignItems: "flex-end" }}>
+                  <Text style={styles.lxCode}>{lxHero.last.code || ""}</Text>
+                  <Text style={[styles.lxStationName, { textAlign: "right" }]} numberOfLines={1}>{toDisplayCase(lxHero.last.name)}</Text>
+                  {lxHero.destEta ? (
+                    <Text style={[styles.lxStationTime, { textAlign: "right" }]}>
+                      {`ETA ${lxHero.destEta}${lxHero.destDay && lxHero.destDay > 1 ? ` \u00B7 Day ${lxHero.destDay}` : ""}`}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+              <View style={styles.lxProgressWrap}>
+                <View style={styles.lxProgressTrack} />
+                <View style={[styles.lxProgressFill, { width: `${lxHero.pct}%` }]} />
+                <View style={[styles.lxProgressMarker, { left: `${lxHero.pct}%` }]}>
+                  <Ionicons name="train" size={13} color={colors.primary} />
+                </View>
+              </View>
+              <View style={styles.lxProgressFoot}>
+                <Text style={styles.lxProgressFootText}>
+                  {lxHero.coveredKm != null ? `${Math.round(lxHero.coveredKm)} km covered` : `${lxHero.reached} of ${lxHero.totalStops} stops reached`}
+                </Text>
+                <Text style={styles.lxProgressFootText}>
+                  {lxHero.leftKm != null ? `${lxHero.pct}% \u00B7 ${Math.round(lxHero.leftKm).toLocaleString()} km left` : `${lxHero.pct}%`}
+                </Text>
+              </View>
+            </>
+          ) : null}
 
           {/* Internet | GPS switch — GPS only after "Are you inside the train?" */}
           <View style={styles.modeSwitch}>
@@ -2164,18 +2267,63 @@ export default function LiveTrackingScreen({ navigation }) {
               style={[styles.modeBtn, !gpsOn && styles.modeBtnActive]}
               onPress={() => { if (gpsOn) stopGps(); }}
             >
-              <Ionicons name="globe-outline" size={14} color={!gpsOn ? "#2A0E5C" : "#E4DAFF"} />
+              <Ionicons name="globe-outline" size={14} color={!gpsOn ? colors.primary : "#DCE8FF"} />
               <Text style={[styles.modeBtnText, !gpsOn && styles.modeBtnTextActive]}>Internet</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.modeBtn, gpsOn && styles.modeBtnActive]}
               onPress={() => { if (!gpsOn) askGps("manual"); }}
             >
-              <Ionicons name="navigate-outline" size={14} color={gpsOn ? "#2A0E5C" : "#E4DAFF"} />
+              <Ionicons name="navigate-outline" size={14} color={gpsOn ? colors.primary : "#DCE8FF"} />
               <Text style={[styles.modeBtnText, gpsOn && styles.modeBtnTextActive]}>GPS · I'm on this train</Text>
             </TouchableOpacity>
           </View>
         </View>
+
+        {payload ? (
+          <View ref={quickBarRef} style={styles.lxNowCard}>
+            <View style={styles.lxNowRow}>
+              <View style={styles.lxNowIcon}>
+                <Ionicons name={gpsOn ? "navigate" : "location"} size={20} color="#E5484D" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.lxNowTitle} numberOfLines={2}>{ltStatus.headline}</Text>
+                {ltStatus.sub ? <Text style={styles.lxNowSub} numberOfLines={3}>{ltStatus.sub}</Text> : null}
+              </View>
+              <DelayPill minutes={ltEffectiveDelay} />
+            </View>
+            <View style={styles.lxTiles}>
+              <View style={styles.lxTile}>
+                <Text style={styles.lxTileValue}>{lxSpeed != null ? lxSpeed : "\u2014"}</Text>
+                <Text style={styles.lxTileLabel}>km/h now</Text>
+              </View>
+              <View style={styles.lxTile}>
+                <Text style={styles.lxTileValue}>{lxNextEta ? String(lxNextEta).slice(0, 5) : "\u2014"}</Text>
+                <Text style={styles.lxTileLabel}>Next halt ETA</Text>
+              </View>
+              <View style={styles.lxTile}>
+                <Text style={styles.lxTileValue}>{ltJourneyLikelyComplete ? 0 : lxHaltsLeft}</Text>
+                <Text style={styles.lxTileLabel}>Halts to go</Text>
+              </View>
+            </View>
+            <View style={styles.lxNowFoot}>
+              <Text style={styles.lxNowFootText} numberOfLines={1}>
+                {lxSourceLabel}{payload?.status_updated_at ? ` \u00B7 updated ${formatAsOfAgo(payload.status_updated_at)}` : ""}
+              </Text>
+              {!gpsOn ? (
+                <TouchableOpacity
+                  disabled={reportState !== "idle" || !payload?.status_response_id}
+                  onPress={() => reportInaccuracy(payload.status_response_id)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Text style={styles.lxReportText}>
+                    {reportState === "sending" ? "Reporting\u2026" : reportState === "sent" ? "Reported \u2014 thanks" : "Report inaccuracy"}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
 
         {/* Alerts & notification settings — same controls, own light card. */}
         <View style={styles.pxSettingsCard}>
@@ -2288,6 +2436,10 @@ export default function LiveTrackingScreen({ navigation }) {
         </>
       )}
 
+      {/* Everything below belongs to the train being tracked. It stays
+          mounted (GPS verification, map, timers keep their state) but is
+          hidden while the "Track a train" page is showing. */}
+      <View style={onFormPage ? styles.hiddenView : null}>
       {modeNotice ? (
         <View style={styles.ryRedBanner}>
           <Ionicons name="alert-circle-outline" size={18} color="#fff" />
@@ -2507,40 +2659,6 @@ export default function LiveTrackingScreen({ navigation }) {
               HH:MM · 2 km to Y", "Train has reached destination." — and the
               next halt's live ETA underneath. On GPS it's the phone's own
               position on the route. */}
-          <View ref={quickBarRef} style={styles.ryStatusCard}>
-            <View style={styles.pxLiveTopRow}>
-              <View style={[styles.pxLivePill, gpsOn && { backgroundColor: colors.accent }]}>
-                <Ionicons name={gpsOn ? "navigate" : "radio"} size={11} color="#111" />
-                <Text style={styles.pxLivePillText}>{gpsOn ? "GPS" : ltJourneyLikelyComplete ? t("COMPLETED") : t("LIVE NOW")}</Text>
-              </View>
-              <Text style={styles.pxLiveTrainNo}>{activeTrack?.trainNumber}</Text>
-            </View>
-            <Text style={styles.ryStatusText}>{ltStatus.headline}</Text>
-            {ltStatus.sub ? <Text style={styles.ryStatusSub}>{ltStatus.sub}</Text> : null}
-            {(() => {
-              // Display only: share of reported stops already passed.
-              const total = timeline.length;
-              const passed = timeline.filter((x) => x.status === "passed").length;
-              const frac = ltJourneyLikelyComplete ? 1 : total > 1 ? Math.min(1, passed / (total - 1)) : 0;
-              return (
-                <View style={styles.pxProgressWrap}>
-                  <View style={styles.pxProgressTrack} />
-                  <View style={[styles.pxProgressFill, { width: `${Math.round(frac * 100)}%` }]} />
-                  <View style={[styles.pxProgressDot, { left: `${Math.round(frac * 100)}%` }]} />
-                  {total >= 2 ? (
-                    <View style={styles.pxProgressEnds}>
-                      <Text style={styles.pxProgressEndText}>{timeline[0].code || ""}</Text>
-                      <Text style={styles.pxProgressEndText}>{timeline[total - 1].code || ""}</Text>
-                    </View>
-                  ) : null}
-                </View>
-              );
-            })()}
-            <View style={styles.pxLiveBottomRow}>
-              <DelayPill minutes={ltEffectiveDelay} />
-            </View>
-          </View>
-
           <TouchableOpacity onPress={() => setShowMoreStats((v) => !v)} style={styles.moreStatsToggle}>
             <Text style={styles.moreStatsToggleText}>{showMoreStats ? "▾ Hide more details" : "▸ More details"}</Text>
           </TouchableOpacity>
@@ -2594,6 +2712,12 @@ export default function LiveTrackingScreen({ navigation }) {
               boundary (RailKit's own per-stop day field), and consecutive
               non-halting stations collapsed into a tappable
               "+N No-Halt stations" row — same layout as the reference. */}
+          <View style={styles.lxTimelineHead}>
+            <Text style={styles.lxTimelineHeadText}>JOURNEY TIMELINE</Text>
+            <TouchableOpacity onPress={jumpToTrain} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={styles.lxJumpText}>Jump to train {"\u2193"}</Text>
+            </TouchableOpacity>
+          </View>
           <SectionCard title="Running status — every station" subtitle={`${timeline.length} stops reported`}>
             <View style={styles.tlColHeaderRow}>
               <Text style={styles.tlColHeaderSide}>Arrival</Text>
@@ -2731,6 +2855,7 @@ export default function LiveTrackingScreen({ navigation }) {
           {alarmStatus && <Text style={styles.webNoticeText}>{alarmStatus}</Text>}
         </SectionCard>
       )}
+      </View>
     </View>
     </ScrollView>
     {showBottomBar && (
@@ -3688,6 +3813,62 @@ const styles = StyleSheet.create({
   },
   ryStopBtn: { paddingVertical: 6, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: "#F2453D" },
   ryStopBtnText: { color: "#fff", fontWeight: "800", fontSize: 12 },
+  // REDESIGN (hero header + "Right now" card): blue gradient-style header
+  // with route ends and a journey progress bar, then a white card
+  // overlapping its lower edge with the live position and three tiles.
+  lxHero: {
+    backgroundColor: "#1D5FDB", borderRadius: 24, padding: spacing.lg, paddingBottom: 44,
+    overflow: "hidden", shadowColor: "#1D5FDB", shadowOpacity: 0.3, shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 }, elevation: 5,
+  },
+  lxGlow: {
+    position: "absolute", top: -100, right: -80, width: 260, height: 260, borderRadius: 130,
+    backgroundColor: "#4C8DF7", opacity: 0.45,
+  },
+  lxTopRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  lxLivePill: {
+    flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(255,255,255,0.18)",
+    borderRadius: radius.pill, paddingVertical: 5, paddingHorizontal: 12, maxWidth: "60%",
+  },
+  lxLiveDot: { width: 8, height: 8, borderRadius: 4 },
+  lxLivePillText: { color: "#fff", fontWeight: "800", fontSize: 12.5 },
+  lxTitleRow: { flexDirection: "row", alignItems: "flex-start", gap: 8, marginTop: spacing.md },
+  lxTitle: { fontSize: 22, fontWeight: "900", color: "#fff", lineHeight: 28 },
+  lxSubline: { fontSize: 13, color: "#DCE8FF", marginTop: 4, fontWeight: "600", lineHeight: 18 },
+  lxRouteRow: { flexDirection: "row", alignItems: "flex-start", gap: 12, marginTop: spacing.lg },
+  lxCode: { fontSize: 24, fontWeight: "900", color: "#fff" },
+  lxStationName: { fontSize: 12.5, color: "#DCE8FF", marginTop: 1 },
+  lxStationTime: { fontSize: 13, color: "#fff", fontWeight: "700", marginTop: 2 },
+  lxProgressWrap: { marginTop: spacing.md, height: 28, justifyContent: "center" },
+  lxProgressTrack: { position: "absolute", left: 0, right: 0, height: 5, borderRadius: 3, backgroundColor: "rgba(255,255,255,0.28)" },
+  lxProgressFill: { position: "absolute", left: 0, height: 5, borderRadius: 3, backgroundColor: "#fff" },
+  lxProgressMarker: {
+    position: "absolute", marginLeft: -14, width: 28, height: 28, borderRadius: 14, backgroundColor: "#fff",
+    alignItems: "center", justifyContent: "center", shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 }, elevation: 4,
+  },
+  lxProgressFoot: { flexDirection: "row", justifyContent: "space-between", marginTop: 4 },
+  lxProgressFootText: { fontSize: 12, color: "#DCE8FF", fontWeight: "700" },
+  lxNowCard: {
+    backgroundColor: "#fff", borderRadius: 22, padding: spacing.md, marginHorizontal: spacing.sm,
+    marginTop: -32, marginBottom: spacing.md, borderWidth: 1, borderColor: colors.border,
+    shadowColor: "#0B1F4D", shadowOpacity: 0.12, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 6,
+  },
+  lxNowRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  lxNowIcon: { width: 44, height: 44, borderRadius: 14, backgroundColor: "#EAF1FF", alignItems: "center", justifyContent: "center" },
+  lxNowTitle: { fontSize: 16.5, fontWeight: "800", color: colors.text, lineHeight: 22 },
+  lxNowSub: { fontSize: 12.5, color: colors.textMuted, marginTop: 2, lineHeight: 17 },
+  lxTiles: { flexDirection: "row", gap: 10, marginTop: spacing.md },
+  lxTile: { flex: 1, backgroundColor: "#F2F5FB", borderRadius: 14, paddingVertical: 12, alignItems: "center" },
+  lxTileValue: { fontSize: 22, fontWeight: "900", color: colors.text },
+  lxTileLabel: { fontSize: 11.5, color: colors.textMuted, marginTop: 2, fontWeight: "600" },
+  lxNowFoot: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: spacing.sm, gap: 8 },
+  lxNowFootText: { flex: 1, fontSize: 11.5, color: colors.textMuted },
+  lxReportText: { fontSize: 12, color: colors.primary, fontWeight: "700" },
+  lxTimelineHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: spacing.sm, marginBottom: spacing.sm, paddingHorizontal: 4 },
+  lxTimelineHeadText: { fontSize: 12.5, fontWeight: "900", color: colors.textMuted, letterSpacing: 0.8 },
+  lxJumpText: { fontSize: 13, fontWeight: "800", color: colors.primary },
+  hiddenView: { display: "none" },
   badgeRowInline: { flexDirection: "row", alignItems: "center", gap: 5 },
   modeSwitch: {
     flexDirection: "row", marginTop: spacing.md, borderRadius: radius.pill, padding: 3,
@@ -3695,8 +3876,8 @@ const styles = StyleSheet.create({
   },
   modeBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingVertical: 8, borderRadius: radius.pill },
   modeBtnActive: { backgroundColor: "#fff" },
-  modeBtnText: { fontSize: 12.5, fontWeight: "700", color: "#E4DAFF" },
-  modeBtnTextActive: { color: "#2A0E5C" },
+  modeBtnText: { fontSize: 12.5, fontWeight: "700", color: "#DCE8FF" },
+  modeBtnTextActive: { color: colors.primary },
   ryRedBanner: {
     flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#F2453D",
     borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: spacing.sm,
