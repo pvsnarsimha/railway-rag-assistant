@@ -46,6 +46,7 @@ with the same pattern (get_pnr_status, get_live_train_status, ...) if you
 want to move those off RailKit too.
 """
 
+import observability
 import os
 import requests
 
@@ -89,6 +90,7 @@ def _headers():
     }
 
 
+@observability.timed("rapidapi")
 def _get(path: str, params: dict) -> dict:
     url = f"{BASE_URL}{path}"
     try:

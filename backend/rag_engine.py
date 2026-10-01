@@ -18,6 +18,7 @@ what the adaptive controller decided - useful for debugging why an answer
 was or wasn't grounded.
 """
 
+import observability
 import json
 import os
 from dataclasses import dataclass, field
@@ -66,6 +67,7 @@ class AdvancedRAGEngine:
         self.graph = EntityGraph(self.docs)
         self.property_graph = PropertyGraph(self.docs, entity_graph=self.graph)
 
+    @observability.timed("rag_retrieve")
     def retrieve(self, query: str, top_k: int = 3, has_live_data: bool = False,
                  has_live_error: bool = False, use_graph_expansion: bool = True) -> RetrievalResult:
         # --- Step 4a: Self-RAG "should we even retrieve?" gate ---

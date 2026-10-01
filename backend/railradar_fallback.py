@@ -30,6 +30,7 @@ fallback, so a problem here must never break the primary RailKit-based
 response it's backing up.
 """
 
+import observability
 import os
 import re
 from datetime import date as date_cls, datetime, timedelta, timezone
@@ -89,6 +90,7 @@ def _api_key() -> Optional[str]:
 # (see quick_live.railradar_primary) — a 30s cache keeps the live position
 # fresh while still sharing one request per train across every viewer.
 @cached(ttl_seconds=30, prefix="railradar_fallback_live")
+@observability.timed("railradar")
 def _fetch_raw(train_number: str, date_iso: Optional[str] = None) -> dict:
     """GET RailRadar's live-status endpoint.
 
