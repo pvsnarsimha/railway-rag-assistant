@@ -299,3 +299,50 @@ def format_station_search(result: StationSearchResult) -> str:
     if result.note:
         lines.append(result.note)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Type-ahead suggestions (prefix based). `search_stations` above is a
+# whole-word / semantic search, so a half-typed "Vij" or "Hyd" finds nothing
+# there. This is the dropdown behind the From/To boxes: matches the START of
+# a station name, of any word in it, of the station code, or of a known city
+# alias, and ranks big/known stations (those with city aliases) first.
+# ---------------------------------------------------------------------------
+_MAJOR_CODES = {code for code in _CITY_ALIASES.values() if isinstance(code, str)}
+
+
+def suggest_stations(query: str, limit: int = 8) -> List[StationMatch]:
+    q = (query or "").strip().lower()
+    if len(q) < 1:
+        return []
+    upper = q.upper()
+    ranked = []
+    for code, info in _STATION_COORDS.items():
+        name = (info.get("name") or "").lower()
+        tier = None
+        if code == upper:
+            tier = 0
+        elif name.startswith(q):
+            tier = 1
+        elif any(w.startswith(q) for w in re.split(r"[^a-z0-9]+", name) if w):
+            tier = 2
+        elif code.startswith(upper):
+            tier = 3
+        if tier is None:
+            continue
+        ranked.append(({0: 1, 1: 1, 2: 1, 3: 2}[tier], 0 if code in _MAJOR_CODES else 1, tier, len(name), code))
+    for alias, code in _CITY_ALIASES.items():
+        if isinstance(alias, str) and isinstance(code, str) and alias.startswith(q) and code in _STATION_COORDS:
+            ranked.append((1, 0, 2, len(_STATION_COORDS[code].get("name", "")), code))
+    ranked.sort()
+    out, seen = [], set()
+    for tier, _major, _t, _len, code in ranked:
+        if code in seen:
+            continue
+        seen.add(code)
+        info = _STATION_COORDS[code]
+        out.append(StationMatch(code=code, name=info["name"], lat=info.get("lat"), lng=info.get("lng"),
+                                score=round(1.0 - tier * 0.15, 2), matched_on="prefix"))
+        if len(out) >= limit:
+            break
+    return out

@@ -3,7 +3,7 @@ import { View, TouchableOpacity, ActivityIndicator, StyleSheet } from "react-nat
 import { Text, TextInput } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
-import { searchStations } from "../api/railwayApi";
+import { searchStations, suggestStations } from "../api/railwayApi";
 
 const MIN_QUERY_LEN = 2;
 const DEBOUNCE_MS = 300;
@@ -51,7 +51,12 @@ export default function StationField({
     debounceRef.current = setTimeout(async () => {
       const myRequestId = ++requestIdRef.current;
       try {
-        const data = await searchStations(apiBaseUrl, { query, topK: 6 });
+        // Prefix type-ahead first ("vij" -> Vijayawada Jn); the whole-word /
+        // semantic search only as a fallback for misspelt or descriptive text.
+        let data = await suggestStations(apiBaseUrl, { query, limit: 8 });
+        if (!(data.matches || []).length && query.length >= 3) {
+          data = await searchStations(apiBaseUrl, { query, topK: 6 });
+        }
         if (myRequestId !== requestIdRef.current) return; // a newer keystroke already superseded this call
         setMatches(data.matches || []);
       } catch (e) {
@@ -129,8 +134,8 @@ export default function StationField({
           ) : matches.length > 0 ? (
             matches.map((m) => (
               <TouchableOpacity key={m.code} style={styles.dropdownRow} onPress={() => pickMatch(m)}>
-                <Text style={styles.dropdownCode}>{m.code}</Text>
                 <Text numberOfLines={1} style={styles.dropdownName}>{m.name}</Text>
+                <Text style={styles.dropdownCode}>{m.code}</Text>
               </TouchableOpacity>
             ))
           ) : (
@@ -205,7 +210,7 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
     gap: spacing.sm,
   },
-  dropdownCode: { fontSize: 13, fontWeight: "800", color: colors.orange, minWidth: 46 },
-  dropdownName: { fontSize: 13, color: colors.text, flexShrink: 1 },
+  dropdownCode: { fontSize: 12.5, fontWeight: "800", color: colors.orange, marginLeft: "auto" },
+  dropdownName: { fontSize: 14.5, fontWeight: "700", color: colors.text, flexShrink: 1 },
   dropdownMuted: { fontSize: 12, color: colors.textMuted, marginLeft: spacing.sm },
 });

@@ -32,7 +32,7 @@ const delayOf = (s) => {
   return d == null || Number.isNaN(Number(d)) ? null : Number(d);
 };
 
-export default function JourneyGlance({ timeline, complete, destCode, alarmCode, alarmTime, alarmArmed, speed, onAlarm, onRide, onJumpFull }) {
+export default function JourneyGlance({ timeline, complete, destCode, alarmCode, alarmTime, alarmArmed, speed, onAlarm, onRide, onJumpFull, fullOpen }) {
   const [openPassed, setOpenPassed] = useState(false);
   const [openMore, setOpenMore] = useState(false);
 
@@ -156,7 +156,7 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmCode,
       </View>
       {onJumpFull ? (
         <TouchableOpacity onPress={onJumpFull} style={{ paddingTop: spacing.sm }}>
-          <Text style={styles.fullLink}>All stations — full running status</Text>
+          <Text style={styles.fullLink}>{fullOpen ? "▾ Hide all stations — live running status" : "▸ Show all stations — live running status"}</Text>
         </TouchableOpacity>
       ) : null}
     </View>
