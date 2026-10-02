@@ -21,7 +21,6 @@ const payload={train_number:'12706',train_name:'Simhapuri Express',timeline,curr
  await p.waitForTimeout(1500);
  await p.screenshot({path:'0-initial.png'});
  await p.getByPlaceholder(/12709/).fill('12706').catch(e=>console.log('no train input'));
- await p.getByPlaceholder(/VSKP/).fill('VSKP').catch(()=>{});
  await p.waitForTimeout(500);
  await p.screenshot({path:'0b-initial-filled.png'});
  await p.getByText('Start tracking',{exact:true}).click().catch(e=>console.log('no start'));
@@ -29,15 +28,16 @@ const payload={train_number:'12706',train_name:'Simhapuri Express',timeline,curr
  await p.evaluate(()=>{document.querySelectorAll('*').forEach(e=>{if(e.scrollTop>0)e.scrollTop=0})});await p.waitForTimeout(600);await p.screenshot({path:'1-live-top.png'});
  await p.mouse.move(200,500);await p.mouse.wheel(0,520);await p.waitForTimeout(800);
  await p.screenshot({path:'2-live-journey.png'});
- await p.getByText(/^Alarm( on)?$/).last().click().catch(e=>console.log('no alarm btn'));
- await p.waitForTimeout(1500);
+ await p.getByLabel('Set alarm for Anakapalle').click().catch(e=>console.log('no bell'));
+ await p.waitForTimeout(1200);
  await p.screenshot({path:'3-smart-alarm.png'});
  await p.getByText('Set Smart Alarm',{exact:true}).click().catch(()=>console.log('no set'));
  await p.waitForTimeout(2500);
  await p.screenshot({path:'3b-smart-alarm-set.png'});
  await p.getByText('Back',{exact:true}).first().click().catch(()=>{});
  await p.waitForTimeout(800);
- await p.getByText('Ride',{exact:true}).last().click().catch(e=>console.log('no ride btn'));
+ await p.screenshot({path:'2b-journey-after.png'});
+ await p.getByLabel('Book a ride from Samalkot Jn').click().catch(e=>console.log('no car'));
  await p.waitForTimeout(1500);
  await p.screenshot({path:'4-ride.png'});
  await b.close();process.exit(0);

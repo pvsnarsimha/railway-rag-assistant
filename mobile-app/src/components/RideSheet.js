@@ -10,7 +10,7 @@ import { colors } from "../theme/colors";
  * BookRideCard (Ola / Uber / Rapido with pickup pre-set + "remind me to book").
  * No fares are shown — booking happens in the provider's own app.
  */
-export default function RideSheet({ visible, onClose, stationName, etaClock, timeline, dest, preferredCodes, trainNumber }) {
+export default function RideSheet({ visible, onClose, stationName, etaClock, timeline, dest, preferredCodes, trainNumber, stopCode }) {
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.root}>
@@ -27,7 +27,7 @@ export default function RideSheet({ visible, onClose, stationName, etaClock, tim
           <Text style={styles.eta}>{etaClock || "--:--"}</Text>
         </View>
         <ScrollView contentContainerStyle={{ padding: 14, paddingBottom: 40 }}>
-          <BookRideCard timeline={timeline} dest={dest} preferredCodes={preferredCodes} trainNumber={trainNumber} defaultOpen />
+          <BookRideCard timeline={timeline} dest={dest} preferredCodes={preferredCodes} trainNumber={trainNumber} defaultOpen initialStopCode={stopCode} key={stopCode || "default"} />
           <Text style={styles.foot}>Fares and wait times are shown in the ride app — they change by the minute.</Text>
         </ScrollView>
       </View>
