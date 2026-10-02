@@ -1,10 +1,12 @@
-import React from "react";
+import React, { useState } from "react";
 import { View, ScrollView, TouchableOpacity, StyleSheet } from "react-native";
 import { Text } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import { useT } from "../context/LanguageContext";
 import ScreenLanguageBar from "../components/ScreenLanguageBar";
+import StationField from "../components/StationField";
+import { useSettings } from "../context/SettingsContext";
 
 /**
  * RailYatri-style "Train Enquiry Center" home screen. REDESIGN NOTE (per
@@ -57,6 +59,17 @@ const QUICK_LAUNCH = [
 export default function HomeScreen({ navigation }) {
   const { t } = useT();
   const label = (l) => t(l.replace(/\n/g, " "));
+  const { apiBaseUrl } = useSettings();
+  const [fromText, setFromText] = useState("");
+  const [toText, setToText] = useState("");
+  const [fromName, setFromName] = useState(null);
+  const [toName, setToName] = useState(null);
+  function searchFromHome() {
+    const source = fromText.trim().toUpperCase();
+    const dest = toText.trim().toUpperCase();
+    if (!source || !dest) { navigation.navigate("TrainsBetween"); return; }
+    navigation.navigate("TrainsBetween", { source, dest, sourceName: fromName, destName: toName, nonce: Date.now() });
+  }
   function openTile(key) {
     if (key === "More") {
       // Jump to the existing "More Tools" tab rather than duplicating it
@@ -101,44 +114,56 @@ export default function HomeScreen({ navigation }) {
         <Text style={styles.heroSubtitle}>{t("Real-time status, schedules, availability and fares — no fabricated data, ever.")}</Text>
       </View>
 
-      {/* Search card — a shortcut into the existing Trains Between Stations
-          screen (the From/To/date/class form itself lives there). */}
-      <TouchableOpacity style={styles.searchCard} activeOpacity={0.9} onPress={() => openTile("TrainsBetween")}>
-        <View style={styles.searchRow}>
-          <View style={[styles.searchDot, { borderColor: colors.primary }]} />
-          <View style={styles.searchRowText}>
-            <Text style={styles.searchLabel}>{t("From")}</Text>
-            <Text style={styles.searchValue}>{t("Choose station")}</Text>
-          </View>
-        </View>
+      {/* Search card — real From / To boxes with a live station dropdown
+          (type "Vij" -> Vijayawada Jn, "Hyd" -> Hyderabad Deccan). "Search
+          Trains" opens Trains Between Stations with both already filled in
+          and the search already running. */}
+      <View style={styles.searchCard}>
+        <StationField
+          label={t("From")}
+          placeholder={t("Station name or code")}
+          value={fromText}
+          resolvedName={fromName}
+          onChangeText={(v) => { setFromText(v); setFromName(null); }}
+          onSelectStation={(m) => { setFromText(m.code); setFromName(m.name); }}
+          apiBaseUrl={apiBaseUrl}
+          icon="radio-button-off"
+        />
         <View style={styles.searchDividerRow}>
           <View style={styles.searchDivider} />
-          <View style={styles.swapCircle}>
+          <TouchableOpacity
+            style={styles.swapCircle}
+            onPress={() => { setFromText(toText); setToText(fromText); setFromName(toName); setToName(fromName); }}
+            accessibilityLabel="Swap stations"
+          >
             <Ionicons name="swap-vertical" size={16} color={colors.textInverse} />
-          </View>
+          </TouchableOpacity>
         </View>
-        <View style={styles.searchRow}>
-          <Ionicons name="location" size={16} color={colors.orange} style={styles.searchPin} />
-          <View style={styles.searchRowText}>
-            <Text style={styles.searchLabel}>{t("To")}</Text>
-            <Text style={styles.searchValue}>{t("Choose station")}</Text>
-          </View>
-        </View>
+        <StationField
+          label={t("To")}
+          placeholder={t("Station name or code")}
+          value={toText}
+          resolvedName={toName}
+          onChangeText={(v) => { setToText(v); setToName(null); }}
+          onSelectStation={(m) => { setToText(m.code); setToName(m.name); }}
+          apiBaseUrl={apiBaseUrl}
+          icon="location"
+        />
         <View style={styles.searchChipRow}>
-          <View style={styles.searchChipBlue}>
+          <TouchableOpacity style={styles.searchChipBlue} onPress={() => openTile("TrainsBetween")} activeOpacity={0.8}>
             <Ionicons name="calendar-outline" size={13} color={colors.primary} />
             <Text style={styles.searchChipBlueText}>{t("Any date")}</Text>
-          </View>
-          <View style={styles.searchChipGrey}>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.searchChipGrey} onPress={() => openTile("TrainsBetween")} activeOpacity={0.8}>
             <Text style={styles.searchChipGreyText}>{t("All Classes")}</Text>
             <Ionicons name="chevron-down" size={12} color={colors.text} />
-          </View>
+          </TouchableOpacity>
         </View>
-        <View style={styles.searchBtn}>
+        <TouchableOpacity style={styles.searchBtn} onPress={searchFromHome} activeOpacity={0.85}>
           <Text style={styles.searchBtnText}>{t("Search Trains")}</Text>
           <Ionicons name="arrow-forward" size={16} color={colors.textInverse} />
-        </View>
-      </TouchableOpacity>
+        </TouchableOpacity>
+      </View>
 
       <Text style={styles.sectionTitle}>{t("Quick Services")}</Text>
       <View style={styles.grid}>

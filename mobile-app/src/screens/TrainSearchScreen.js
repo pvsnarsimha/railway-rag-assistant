@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { View, StyleSheet, FlatList, TouchableOpacity, ScrollView, Linking, ActivityIndicator } from "react-native";
 import { Text, TextInput, Alert } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
@@ -99,7 +99,7 @@ function quotaLabel(code) {
   return opt ? `${opt.label} (${opt.key})` : code;
 }
 
-export default function TrainSearchScreen() {
+export default function TrainSearchScreen({ route }) {
   const { apiBaseUrl } = useSettings();
 
   // --- search form state ---
@@ -219,6 +219,16 @@ export default function TrainSearchScreen() {
     setSortBy(key);
     if (trains) setTrains((prev) => sortTrains(prev, key));
   }
+
+  // From / To typed on the Home screen: prefill them and search straight away.
+  const homeParams = route && route.params;
+  useEffect(() => {
+    if (!homeParams || !homeParams.source || !homeParams.dest) return;
+    setSource(homeParams.source); setDest(homeParams.dest);
+    setSourceName(homeParams.sourceName || null); setDestName(homeParams.destName || null);
+    runSearch(1, { source: homeParams.source, dest: homeParams.dest });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homeParams && homeParams.nonce]);
 
   function toggleTatkal() {
     const next = quota === "TQ" ? "GN" : "TQ";

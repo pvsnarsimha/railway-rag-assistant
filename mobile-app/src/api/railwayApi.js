@@ -43,6 +43,20 @@ export async function sendChatMessage(baseUrl, { message, imageBase64, imageMedi
   return data;
 }
 
+/** GET /api/stations/suggest — prefix type-ahead ("vij" -> Vijayawada Jn). */
+export async function suggestStations(baseUrl, { query, limit = 8 }) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.get("/api/stations/suggest", { params: { q: query, limit } });
+  return data;
+}
+
+/** GET /api/trains/suggest — train-number type-ahead ("17" -> every 17xxx train). */
+export async function suggestTrains(baseUrl, q) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.get("/api/trains/suggest", { params: { q } });
+  return data;
+}
+
 export async function searchStations(baseUrl, { query, topK = 5 }) {
   const client = makeClient(baseUrl);
   const { data } = await client.post("/api/stations/search", { query, top_k: topK });

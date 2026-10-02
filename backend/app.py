@@ -3564,6 +3564,69 @@ def api_station_search(req: StationSearchRequest):
     }
 
 
+@app.get("/api/stations/suggest")
+def api_station_suggest(q: str = "", limit: int = 8):
+    """Type-ahead for station boxes: "vij" -> Vijayawada Jn, "hyd" ->
+    Hyderabad Deccan, "sc" -> Secunderabad Jn. Prefix match on name / code /
+    city alias, big stations first (see station_search.suggest_stations)."""
+    matches = station_search.suggest_stations(q, limit=max(1, min(limit, 15)))
+    return {"query": q, "matches": [{"code": m.code, "name": m.name} for m in matches]}
+
+
+_TRAIN_INDEX_PATH = os.path.join(os.path.dirname(__file__), "data", "train_index.json")
+try:
+    with open(_TRAIN_INDEX_PATH, "r", encoding="utf-8") as _f:
+        _TRAIN_INDEX = json.load(_f)  # [{n, name, from, to}] sorted by number
+except Exception:
+    _TRAIN_INDEX = []
+_LIVE_TRAIN_NAME_CACHE: dict = {}
+
+
+def _live_train_name(number: str):
+    """Current name of a fully typed train number from the live provider
+    (the bundled index is an older public dataset, so it can lag renamed
+    trains). None if the provider doesn't know the number."""
+    if number in _LIVE_TRAIN_NAME_CACHE:
+        return _LIVE_TRAIN_NAME_CACHE[number]
+    name = None
+    try:
+        info = railway_api.get_train_info(number)
+        payload = info.get("data", info) if isinstance(info, dict) else {}
+        if isinstance(payload, dict):
+            name = payload.get("trainName") or payload.get("train_name") or payload.get("name")
+    except Exception:
+        name = None
+    if name:
+        _LIVE_TRAIN_NAME_CACHE[number] = name
+    return name
+
+
+@app.get("/api/trains/suggest")
+def api_train_suggest(q: str = "", limit: int = 8):
+    """Type-ahead for the train-number box. Digits only: "1" / "17" / "172"
+    list trains whose number starts with that; a full 5-digit number returns
+    just that one train (name confirmed live when the provider knows it) or
+    an empty list ("not found")."""
+    digits = re.sub(r"\D", "", q or "")
+    if not digits:
+        return {"query": q, "matches": [], "not_found": False}
+    limit = max(1, min(limit, 15))
+    if len(digits) >= 5:
+        number = digits[:5]
+        row = next((r for r in _TRAIN_INDEX if r["n"] == number), None)
+        live = _live_train_name(number)
+        if live or row:
+            return {"query": q, "not_found": False, "matches": [{
+                "number": number, "name": live or row["name"],
+                "from": row["from"] if row else "", "to": row["to"] if row else "",
+                "source": "live" if live else "index",
+            }]}
+        return {"query": q, "matches": [], "not_found": True}
+    matches = [r for r in _TRAIN_INDEX if r["n"].startswith(digits)][:limit]
+    return {"query": q, "not_found": not matches, "matches": [
+        {"number": r["n"], "name": r["name"], "from": r["from"], "to": r["to"], "source": "index"} for r in matches]}
+
+
 # =============================================================================
 # FEATURE: Train Search (real-time filter by source/dest/date/time, paged)
 # -----------------------------------------------------------------------

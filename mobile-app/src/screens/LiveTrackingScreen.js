@@ -23,6 +23,7 @@ import { formatDelayDuration } from "../utils/formatDelay";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 import OfflineTrackingCard from "../components/OfflineTrackingCard";
 import RideSheet from "../components/RideSheet";
+import TrainNumberField from "../components/TrainNumberField";
 import SmartAlarmSheet from "../components/SmartAlarmSheet";
 import JourneyGlance, { stopEtaClock, minusMinutes } from "../components/JourneyGlance";
 import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
@@ -2254,7 +2255,7 @@ export default function LiveTrackingScreen({ navigation }) {
         </View>
         <View style={styles.pxFormCard}>
           <Text style={styles.pxFormTitle}>{t("Track a train")}</Text>
-          <LabeledInput label="Train number" placeholder="e.g. 12709" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" />
+          <TrainNumberField label="Train number" placeholder="Type a number, e.g. 1, 17, 12709" value={trainNumber} onChangeText={setTrainNumber} apiBaseUrl={apiBaseUrl} />
           <Text style={styles.fieldLabel}>{t("Journey date")}</Text>
           <View style={styles.dateChipRow}>
             {[["Yesterday", -1], ["Today", 0], ["Tomorrow", 1]].map(([label, off]) => {
@@ -2472,6 +2473,7 @@ export default function LiveTrackingScreen({ navigation }) {
             speed={lxSpeed}
             onAlarm={(stop) => { if (stop && !alarmArmed) setAlarmStation(String(stop.code).toUpperCase()); setAlarmOpen(true); }}
             onRide={(stop) => { setRideStopCode(stop ? String(stop.code).toUpperCase() : null); setRideOpen(true); }}
+            fullOpen={showFullTimeline}
             onJumpFull={() => setShowFullTimeline((v) => !v)}
           />
           </>
