@@ -32,7 +32,7 @@ const delayOf = (s) => {
   return d == null || Number.isNaN(Number(d)) ? null : Number(d);
 };
 
-export default function JourneyGlance({ timeline, complete, destCode, alarmTime, alarmArmed, speed, onAlarm, onRide, onJumpFull }) {
+export default function JourneyGlance({ timeline, complete, destCode, alarmCode, alarmTime, alarmArmed, speed, onAlarm, onRide, onJumpFull }) {
   const [openPassed, setOpenPassed] = useState(false);
   const [openMore, setOpenMore] = useState(false);
 
@@ -63,8 +63,9 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmTime,
   const lastPassed = passed.length ? passed[passed.length - 1] : null;
   const olderPassed = passed.length > 1 ? passed.slice(0, -1) : [];
 
-  const Row = ({ stop, dim, last }) => {
+  const Row = ({ stop, dim, last, actions }) => {
     const d = delayOf(stop);
+    const isAlarm = alarmArmed && String(stop.code).toUpperCase() === String(alarmCode || "").toUpperCase();
     return (
       <View style={styles.row}>
         <Text style={[styles.time, dim && styles.dim]}>{stopEtaClock(stop) || "—"}</Text>
@@ -77,6 +78,16 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmTime,
           <Text style={styles.sub}>{`${stop.code}${stop.distance_km != null ? ` · ${stop.distance_km} km` : ""}`}</Text>
         </View>
         {d != null && d !== 0 ? <Text style={[styles.delay, d > 0 ? styles.late : styles.early]}>{d > 0 ? `+${d}` : d}</Text> : null}
+        {actions ? (
+          <View style={styles.rowActions}>
+            <TouchableOpacity onPress={() => onAlarm(stop)} style={[styles.mini, isAlarm && styles.miniOn]} hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }} accessibilityLabel={`Set alarm for ${stop.name || stop.code}`}>
+              <Ionicons name={isAlarm ? "alarm" : "alarm-outline"} size={16} color={isAlarm ? "#fff" : colors.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => onRide(stop)} style={styles.mini} hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }} accessibilityLabel={`Book a ride from ${stop.name || stop.code}`}>
+              <Ionicons name="car-outline" size={16} color={colors.primary} />
+            </TouchableOpacity>
+          </View>
+        ) : null}
       </View>
     );
   };
@@ -89,6 +100,7 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmTime,
   );
 
   const destDelay = delayOf(dest);
+  const destAlarmOn = alarmArmed && String(alarmCode || "").toUpperCase() === String(dest.code).toUpperCase();
   return (
     <View style={styles.card}>
       {lastPassed ? <Row stop={lastPassed} dim /> : null}
@@ -114,7 +126,7 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmTime,
         </View>
       ) : null}
 
-      {shownMids.map((s) => <Row key={s.code} stop={s} />)}
+      {shownMids.map((s) => <Row key={s.code} stop={s} actions={!complete} />)}
       {hiddenMids > 0 ? (
         <FoldRow label={openMore ? "Show fewer halts" : `${hiddenMids} more halt${hiddenMids > 1 ? "s" : ""}`} open={openMore} onPress={() => setOpenMore((v) => !v)} />
       ) : null}
@@ -131,11 +143,11 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmTime,
         </View>
         {!complete ? (
           <View style={styles.chipRow}>
-            <TouchableOpacity onPress={onAlarm} style={[styles.chip, alarmArmed && styles.chipOn]} activeOpacity={0.8}>
-              <Ionicons name="alarm" size={14} color={alarmArmed ? "#fff" : "#B45309"} />
-              <Text style={[styles.chipText, alarmArmed && { color: "#fff" }]}>{alarmArmed && alarmTime ? `Alarm ${alarmTime}` : "Set alarm"}</Text>
+            <TouchableOpacity onPress={() => onAlarm(dest)} style={[styles.chip, destAlarmOn && styles.chipOn]} activeOpacity={0.8}>
+              <Ionicons name="alarm" size={14} color={destAlarmOn ? "#fff" : "#B45309"} />
+              <Text style={[styles.chipText, destAlarmOn && { color: "#fff" }]}>{destAlarmOn && alarmTime ? `Alarm ${alarmTime}` : "Set alarm"}</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={onRide} style={styles.chip} activeOpacity={0.8}>
+            <TouchableOpacity onPress={() => onRide(dest)} style={styles.chip} activeOpacity={0.8}>
               <Ionicons name="car" size={14} color="#B45309" />
               <Text style={styles.chipText}>Ride</Text>
             </TouchableOpacity>
@@ -183,5 +195,8 @@ const styles = StyleSheet.create({
   chip: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#fff", borderWidth: 1, borderColor: "#F2B968", borderRadius: 16, paddingHorizontal: 12, paddingVertical: 7 },
   chipOn: { backgroundColor: "#2E7D32", borderColor: "#2E7D32" },
   chipText: { fontSize: 12.5, fontWeight: "800", color: "#B45309" },
+  rowActions: { flexDirection: "row", gap: 6, marginLeft: 8 },
+  mini: { width: 32, height: 32, borderRadius: 16, backgroundColor: "#EAF0FB", alignItems: "center", justifyContent: "center" },
+  miniOn: { backgroundColor: "#2E7D32" },
   fullLink: { textAlign: "center", fontSize: 12.5, fontWeight: "700", color: colors.primary },
 });

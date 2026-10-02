@@ -910,6 +910,7 @@ export default function LiveTrackingScreen({ navigation }) {
   const autoArmRef = useRef(false);
   const [alarmOpen, setAlarmOpen] = useState(false);
   const [rideOpen, setRideOpen] = useState(false);
+  const [rideStopCode, setRideStopCode] = useState(null);
   const [showFullTimeline, setShowFullTimeline] = useState(false);
   const alarmNotificationIdRef = useRef(null);
 
@@ -2166,23 +2167,34 @@ export default function LiveTrackingScreen({ navigation }) {
   const lxHaltsLeft = timeline.filter((x) => x.kind !== "intermediate" && x.status !== "passed" && x.status !== "current").length;
   // "Your stop": the typed destination / alarm station, else the last halt.
   const lxHaltRows = timeline.filter((x) => x && x.code && x.kind !== "intermediate");
-  const lxDestCode = (alarmStation || dest || "").trim().toUpperCase();
+  // "Your stop" = the typed destination, else the last halt. The alarm and the
+  // ride can be for ANY station on the route (lxAlarmStop / rideStopCode).
+  const lxDestCode = (dest || "").trim().toUpperCase();
   const lxDestStop = lxHaltRows.find((x) => String(x.code).toUpperCase() === lxDestCode) || lxHaltRows[lxHaltRows.length - 1] || null;
+  const lxAlarmCode = (alarmStation || "").trim().toUpperCase() || (lxDestStop ? String(lxDestStop.code).toUpperCase() : "");
+  const lxAlarmStop = lxHaltRows.find((x) => String(x.code).toUpperCase() === lxAlarmCode) || lxDestStop;
   const lxDestEta = lxDestStop ? stopEtaClock(lxDestStop) : null;
+  const lxAlarmEta = lxAlarmStop ? stopEtaClock(lxAlarmStop) : null;
+  const lxRideStop = lxHaltRows.find((x) => String(x.code).toUpperCase() === String(rideStopCode || "").toUpperCase()) || lxDestStop;
+  const lxUpcomingStops = (() => {
+    let reached = -1;
+    lxHaltRows.forEach((x, i) => { if (x.status === "passed" || x.status === "current") reached = i; });
+    return lxHaltRows.slice(reached + 1).map((x) => ({ code: x.code, name: toDisplayCase(x.name || x.code), eta: stopEtaClock(x) }));
+  })();
   const lxDestMinutes = (() => {
-    if (!lxDestStop) return null;
-    if (lxDestStop.minutes_away != null && Number.isFinite(Number(lxDestStop.minutes_away))) return Number(lxDestStop.minutes_away);
-    const m = lxDestEta && /^(\d{2}):(\d{2})$/.exec(lxDestEta);
+    if (!lxAlarmStop) return null;
+    if (lxAlarmStop.minutes_away != null && Number.isFinite(Number(lxAlarmStop.minutes_away))) return Number(lxAlarmStop.minutes_away);
+    const m = lxAlarmEta && /^(\d{2}):(\d{2})$/.exec(lxAlarmEta);
     if (!m) return null;
     const now = new Date(); const t = new Date(now); t.setHours(+m[1], +m[2], 0, 0);
     let diff = (t - now) / 60000; if (diff < -360) diff += 1440;
     return Math.round(diff);
   })();
   const lxAlarmLead = alarmCustomOpen ? parseLeadMinutesInput(alarmCustomText) : parseInt(alarmLeadMinutes, 10);
-  const lxRingsAt = lxDestEta && lxAlarmLead ? minusMinutes(lxDestEta, lxAlarmLead) : null;
+  const lxRingsAt = lxAlarmEta && lxAlarmLead ? minusMinutes(lxAlarmEta, lxAlarmLead) : null;
   const lxDestKmAway = (() => {
     const cur = [...lxHaltRows].reverse().find((x) => x.status === "passed" || x.status === "current");
-    return cur && lxDestStop && cur.distance_km != null && lxDestStop.distance_km != null ? Math.round(lxDestStop.distance_km - cur.distance_km) : null;
+    return cur && lxAlarmStop && cur.distance_km != null && lxAlarmStop.distance_km != null ? Math.round(lxAlarmStop.distance_km - cur.distance_km) : null;
   })();
   const lxSourceLabel = gpsOn ? "GPS" : payload && payload.live_source === "railradar" ? "RailRadar"
     : payload && payload.live_source === "railkit" ? "RailKit" : "Live data";
@@ -2454,11 +2466,12 @@ export default function LiveTrackingScreen({ navigation }) {
             timeline={timeline}
             complete={ltJourneyLikelyComplete}
             destCode={lxDestCode}
+            alarmCode={lxAlarmCode}
             alarmTime={lxRingsAt}
             alarmArmed={alarmArmed}
             speed={lxSpeed}
-            onAlarm={() => setAlarmOpen(true)}
-            onRide={() => setRideOpen(true)}
+            onAlarm={(stop) => { if (stop && !alarmArmed) setAlarmStation(String(stop.code).toUpperCase()); setAlarmOpen(true); }}
+            onRide={(stop) => { setRideStopCode(stop ? String(stop.code).toUpperCase() : null); setRideOpen(true); }}
             onJumpFull={() => setShowFullTimeline((v) => !v)}
           />
           </>
@@ -2967,7 +2980,7 @@ export default function LiveTrackingScreen({ navigation }) {
             <Ionicons name="alarm-outline" size={13} color="#fff" />
             <Text style={styles.bottomBarBtnText}>{alarmArmed ? t("Alarm on") : t("Alarm")}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.bottomBarBtn} onPress={() => setRideOpen(true)}>
+          <TouchableOpacity style={styles.bottomBarBtn} onPress={() => { setRideStopCode(null); setRideOpen(true); }}>
             <Ionicons name="car-outline" size={13} color="#fff" />
             <Text style={styles.bottomBarBtnText}>{t("Ride")}</Text>
           </TouchableOpacity>
@@ -2979,8 +2992,9 @@ export default function LiveTrackingScreen({ navigation }) {
       onClose={() => setAlarmOpen(false)}
       stationCode={alarmStation}
       onStationChange={setAlarmStation}
-      stationName={lxDestStop ? toDisplayCase(lxDestStop.name || lxDestStop.code) : ""}
-      etaClock={lxDestEta}
+      stationName={lxAlarmStop ? toDisplayCase(lxAlarmStop.name || lxAlarmStop.code) : ""}
+      etaClock={lxAlarmEta}
+      stops={lxUpcomingStops}
       kmAway={lxDestKmAway}
       minutesToArrival={lxDestMinutes}
       leadMinutes={alarmLeadMinutes}
@@ -3000,8 +3014,9 @@ export default function LiveTrackingScreen({ navigation }) {
     <RideSheet
       visible={rideOpen}
       onClose={() => setRideOpen(false)}
-      stationName={lxDestStop ? toDisplayCase(lxDestStop.name || lxDestStop.code) : ""}
-      etaClock={lxDestEta}
+      stationName={lxRideStop ? toDisplayCase(lxRideStop.name || lxRideStop.code) : ""}
+      etaClock={lxRideStop ? stopEtaClock(lxRideStop) : null}
+      stopCode={lxRideStop ? String(lxRideStop.code).toUpperCase() : null}
       timeline={timeline}
       dest={dest}
       preferredCodes={Object.keys(stationWatches)}

@@ -18,7 +18,7 @@ const C = 2 * Math.PI * R;
 export default function SmartAlarmSheet({
   visible, onClose, stationCode, onStationChange, stationName, etaClock, kmAway, minutesToArrival,
   leadMinutes, onLeadChange, customOpen, onCustomOpen, customText, onCustomText, leadValue,
-  ringsAt, armed, busy, status, onSet, onCancel,
+  ringsAt, armed, busy, status, onSet, onCancel, stops,
 }) {
   const minsToRing = minutesToArrival != null && leadValue ? Math.max(0, minutesToArrival - leadValue) : null;
   // Ring fills as the alarm time approaches (full = about to ring).
@@ -53,7 +53,7 @@ export default function SmartAlarmSheet({
         </View>
 
         <ScrollView style={styles.sheet} contentContainerStyle={{ padding: 16, paddingBottom: 30 }}>
-          <Text style={styles.kicker}>GETTING OFF AT</Text>
+          <Text style={styles.kicker}>ALARM FOR</Text>
           <View style={styles.stationCard}>
             <Ionicons name="flag" size={22} color={colors.primary} />
             <View style={{ flex: 1, marginHorizontal: 10 }}>
@@ -65,6 +65,23 @@ export default function SmartAlarmSheet({
               autoCapitalize="characters" maxLength={6} style={styles.codeInput} placeholder="CODE"
             />
           </View>
+
+          {stops && stops.length ? (
+            <>
+              <Text style={styles.kicker}>OR PICK ANY STATION ON THE ROUTE</Text>
+              <View style={styles.chips}>
+                {stops.map((st) => {
+                  const on = String(st.code).toUpperCase() === String(stationCode || "").toUpperCase();
+                  return (
+                    <TouchableOpacity key={st.code} disabled={armed} onPress={() => onStationChange(String(st.code).toUpperCase())} style={[styles.chip, on && styles.chipOn]}>
+                      <Text style={[styles.chipText, on && styles.chipTextOn]}>{`${st.name}${st.eta ? ` · ${st.eta}` : ""}`}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              {armed ? <Text style={styles.status}>Remove the alarm below to choose a different station.</Text> : null}
+            </>
+          ) : null}
 
           <Text style={styles.kicker}>WAKE ME BEFORE ARRIVAL</Text>
           <View style={styles.chips}>

@@ -127,15 +127,16 @@ export async function openRide(provider, stop) {
  * arrival, predicted_eta}); dest: the "Dest" station code the rider typed
  * (optional); preferredCodes: stations with an armed alert bell.
  */
-export default function BookRideCard({ timeline, dest, preferredCodes, trainNumber, defaultOpen }) {
+export default function BookRideCard({ timeline, dest, preferredCodes, trainNumber, defaultOpen, initialStopCode }) {
   const [open, setOpen] = useState(!!defaultOpen);
+  const initialStopRef = useRef(initialStopCode ? String(initialStopCode).toUpperCase() : null);
   const [remindOn, setRemindOn] = useState(false);
   const [lead, setLead] = useState(30);
   const [remindNote, setRemindNote] = useState(null);
   const reminderRef = useRef({ id: null, fireAt: null, key: null });
   const [picked, setPicked] = useState(null);
   const [chooseStop, setChooseStop] = useState(false);
-  const [stopCode, setStopCode] = useState(null);
+  const [stopCode, setStopCode] = useState(initialStopCode ? String(initialStopCode).toUpperCase() : null);
   const [customOpen, setCustomOpen] = useState(false);
   const [customText, setCustomText] = useState("");
   const [customErr, setCustomErr] = useState(null);
@@ -152,7 +153,7 @@ export default function BookRideCard({ timeline, dest, preferredCodes, trainNumb
         const v = JSON.parse(raw || "null");
         if (v) {
           if (v.lead > 0) setLead(v.lead);
-          if (v.stopCode) setStopCode(v.stopCode);
+          if (v.stopCode && !initialStopRef.current) setStopCode(v.stopCode);
           if (v.id) Object.assign(reminderRef.current, { id: v.id, fireAt: v.fireAt, key: v.key });
           setRemindOn(!!v.remindOn);
         }
