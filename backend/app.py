@@ -3580,6 +3580,81 @@ try:
 except Exception:
     _TRAIN_INDEX = []
 _LIVE_TRAIN_NAME_CACHE: dict = {}
+# Trains the live provider has told us about that the bundled (older) index
+# doesn't have, remembered for the life of the process: number -> row.
+_LEARNED_TRAINS: dict = {}
+# Provider prefix search results, so one prefix costs at most one API call
+# per TRAIN_SUGGEST_TTL_SECONDS: prefix -> (fetched_at, rows).
+_PROVIDER_SUGGEST_CACHE: dict = {}
+TRAIN_SUGGEST_TTL_SECONDS = 24 * 3600
+_NUM_KEYS = ("train_number", "trainNumber", "train_no", "trainNo", "train_num", "number", "trainnumber")
+_NAME_KEYS = ("train_name", "trainName", "name", "trainname")
+_FROM_KEYS = ("from_station_code", "fromStationCode", "from", "source", "train_src", "src")
+_TO_KEYS = ("to_station_code", "toStationCode", "to", "destination", "train_dstn", "dstn")
+
+
+def _parse_provider_trains(data) -> list:
+    """Pulls [{number, name, from, to}] out of a provider search response,
+    tolerant of the different shapes listings use ({"data": [...]}, a bare
+    list, "12706 - NAME" strings). Anything unrecognisable is skipped, never
+    guessed."""
+    items = data
+    if isinstance(data, dict):
+        items = data.get("data")
+        if isinstance(items, dict):
+            items = items.get("trains") or items.get("results") or list(items.values())
+    if not isinstance(items, list):
+        return []
+    rows = []
+    for it in items:
+        number = name = frm = to = None
+        if isinstance(it, dict):
+            number = next((str(it[k]) for k in _NUM_KEYS if it.get(k)), None)
+            name = next((str(it[k]) for k in _NAME_KEYS if it.get(k)), None)
+            frm = next((str(it[k]) for k in _FROM_KEYS if it.get(k)), "")
+            to = next((str(it[k]) for k in _TO_KEYS if it.get(k)), "")
+        elif isinstance(it, str):
+            m = re.match(r"\s*(\d{5})\s*[-:–]?\s*(.*)$", it)
+            if m:
+                number, name = m.group(1), m.group(2).strip()
+        number = re.sub(r"\D", "", number or "")
+        if len(number) == 5 and name:
+            rows.append({"n": number, "name": name.strip().title(), "from": frm or "", "to": to or ""})
+    return rows
+
+
+def _provider_train_suggestions(digits: str) -> list:
+    """Live provider search for a number prefix (cached, silent on any
+    failure — the bundled index still answers). Needs RAPIDAPI_KEY."""
+    now = time.time()
+    hit = _PROVIDER_SUGGEST_CACHE.get(digits)
+    if hit and now - hit[0] < TRAIN_SUGGEST_TTL_SECONDS:
+        return hit[1]
+    rows = []
+    try:
+        import rapidapi_provider
+        if getattr(rapidapi_provider, "RAPIDAPI_KEY", None):
+            rows = [r for r in _parse_provider_trains(rapidapi_provider.search_train(digits)) if r["n"].startswith(digits)]
+    except Exception:
+        rows = []
+    if rows:  # don't cache failures/empties for a day — a quota blip shouldn't stick
+        _PROVIDER_SUGGEST_CACHE[digits] = (now, rows)
+        for r in rows:
+            _LEARNED_TRAINS[r["n"]] = r
+    return rows
+
+
+def _merged_train_matches(digits: str, limit: int) -> list:
+    """Bundled index + trains learned from the provider, provider names
+    winning (they're current), sorted by number."""
+    by_number = {r["n"]: r for r in _TRAIN_INDEX if r["n"].startswith(digits)}
+    for r in _LEARNED_TRAINS.values():
+        if r["n"].startswith(digits):
+            by_number[r["n"]] = {**by_number.get(r["n"], {}), **r}
+    if len(digits) >= 2:
+        for r in _provider_train_suggestions(digits):
+            by_number[r["n"]] = {**by_number.get(r["n"], {}), **r}
+    return [by_number[k] for k in sorted(by_number)][:limit]
 
 
 def _live_train_name(number: str):
@@ -3598,6 +3673,7 @@ def _live_train_name(number: str):
         name = None
     if name:
         _LIVE_TRAIN_NAME_CACHE[number] = name
+        _LEARNED_TRAINS[number] = {**_LEARNED_TRAINS.get(number, {"from": "", "to": ""}), "n": number, "name": str(name).strip().title()}
     return name
 
 
@@ -3613,7 +3689,7 @@ def api_train_suggest(q: str = "", limit: int = 8):
     limit = max(1, min(limit, 15))
     if len(digits) >= 5:
         number = digits[:5]
-        row = next((r for r in _TRAIN_INDEX if r["n"] == number), None)
+        row = next((r for r in _TRAIN_INDEX if r["n"] == number), None) or _LEARNED_TRAINS.get(number)
         live = _live_train_name(number)
         if live or row:
             return {"query": q, "not_found": False, "matches": [{
@@ -3622,9 +3698,9 @@ def api_train_suggest(q: str = "", limit: int = 8):
                 "source": "live" if live else "index",
             }]}
         return {"query": q, "matches": [], "not_found": True}
-    matches = [r for r in _TRAIN_INDEX if r["n"].startswith(digits)][:limit]
+    matches = _merged_train_matches(digits, limit)
     return {"query": q, "not_found": not matches, "matches": [
-        {"number": r["n"], "name": r["name"], "from": r["from"], "to": r["to"], "source": "index"} for r in matches]}
+        {"number": r["n"], "name": r["name"], "from": r["from"], "to": r["to"], "source": "live" if r["n"] in _LEARNED_TRAINS else "index"} for r in matches]}
 
 
 # =============================================================================
