@@ -149,6 +149,14 @@ def search_trains_between_stations(source_code: str, dest_code: str, date_ddmmyy
     return _get("/api/v3/trainBetweenStations", params)
 
 
+def search_train(query: str) -> dict:
+    """Train lookup by number or name fragment via RapidAPI's
+    /api/v1/searchTrain (the listing's "Search Train" endpoint). Returns the
+    raw response; callers parse it defensively since field names differ
+    between listings."""
+    return _get("/api/v1/searchTrain", {"query": query})
+
+
 def get_seat_availability(train_number: str, source_code: str, dest_code: str,
                            date_ddmmyyyy: str, travel_class: str, quota: str = "GN") -> dict:
     """Real-time seat/berth availability for a specific train/route/date/class,
