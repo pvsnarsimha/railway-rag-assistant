@@ -127,8 +127,8 @@ export async function openRide(provider, stop) {
  * arrival, predicted_eta}); dest: the "Dest" station code the rider typed
  * (optional); preferredCodes: stations with an armed alert bell.
  */
-export default function BookRideCard({ timeline, dest, preferredCodes, trainNumber }) {
-  const [open, setOpen] = useState(false);
+export default function BookRideCard({ timeline, dest, preferredCodes, trainNumber, defaultOpen }) {
+  const [open, setOpen] = useState(!!defaultOpen);
   const [remindOn, setRemindOn] = useState(false);
   const [lead, setLead] = useState(30);
   const [remindNote, setRemindNote] = useState(null);

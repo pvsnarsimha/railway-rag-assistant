@@ -22,7 +22,9 @@ import { registerForPushNotifications, refreshWebPushToken, scheduleLocalAlarm, 
 import { formatDelayDuration } from "../utils/formatDelay";
 import { fromDdMmYyyy, formatLongLabel } from "../utils/dateFormat";
 import OfflineTrackingCard from "../components/OfflineTrackingCard";
-import BookRideCard from "../components/BookRideCard";
+import RideSheet from "../components/RideSheet";
+import SmartAlarmSheet from "../components/SmartAlarmSheet";
+import JourneyGlance, { stopEtaClock, minusMinutes } from "../components/JourneyGlance";
 import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
 import { isSpeechSupported, loadReadAloud, loadReadAloudAsync, saveReadAloud, speak, stopSpeaking, onTrainPush, shouldSpeakPush } from "../utils/speakNotifications";
 import { getLanguage, hasChosenLanguage, languageInfo, loadLanguage, SAMPLE } from "../utils/notifyLanguage";
@@ -906,6 +908,9 @@ export default function LiveTrackingScreen({ navigation }) {
   const [sourceOpen, setSourceOpen] = useState(false);
   const [recentTrains, setRecentTrains] = useState([]);
   const autoArmRef = useRef(false);
+  const [alarmOpen, setAlarmOpen] = useState(false);
+  const [rideOpen, setRideOpen] = useState(false);
+  const [showFullTimeline, setShowFullTimeline] = useState(false);
   const alarmNotificationIdRef = useRef(null);
 
   // Reflects already-armed station alerts for the TRACKED train+date back
@@ -2159,6 +2164,26 @@ export default function LiveTrackingScreen({ navigation }) {
   })();
   const lxNextEta = payload ? (payload.next_station_live_eta || payload.next_station_expected_arrival || null) : null;
   const lxHaltsLeft = timeline.filter((x) => x.kind !== "intermediate" && x.status !== "passed" && x.status !== "current").length;
+  // "Your stop": the typed destination / alarm station, else the last halt.
+  const lxHaltRows = timeline.filter((x) => x && x.code && x.kind !== "intermediate");
+  const lxDestCode = (alarmStation || dest || "").trim().toUpperCase();
+  const lxDestStop = lxHaltRows.find((x) => String(x.code).toUpperCase() === lxDestCode) || lxHaltRows[lxHaltRows.length - 1] || null;
+  const lxDestEta = lxDestStop ? stopEtaClock(lxDestStop) : null;
+  const lxDestMinutes = (() => {
+    if (!lxDestStop) return null;
+    if (lxDestStop.minutes_away != null && Number.isFinite(Number(lxDestStop.minutes_away))) return Number(lxDestStop.minutes_away);
+    const m = lxDestEta && /^(\d{2}):(\d{2})$/.exec(lxDestEta);
+    if (!m) return null;
+    const now = new Date(); const t = new Date(now); t.setHours(+m[1], +m[2], 0, 0);
+    let diff = (t - now) / 60000; if (diff < -360) diff += 1440;
+    return Math.round(diff);
+  })();
+  const lxAlarmLead = alarmCustomOpen ? parseLeadMinutesInput(alarmCustomText) : parseInt(alarmLeadMinutes, 10);
+  const lxRingsAt = lxDestEta && lxAlarmLead ? minusMinutes(lxDestEta, lxAlarmLead) : null;
+  const lxDestKmAway = (() => {
+    const cur = [...lxHaltRows].reverse().find((x) => x.status === "passed" || x.status === "current");
+    return cur && lxDestStop && cur.distance_km != null && lxDestStop.distance_km != null ? Math.round(lxDestStop.distance_km - cur.distance_km) : null;
+  })();
   const lxSourceLabel = gpsOn ? "GPS" : payload && payload.live_source === "railradar" ? "RailRadar"
     : payload && payload.live_source === "railkit" ? "RailKit" : "Live data";
 
@@ -2395,8 +2420,8 @@ export default function LiveTrackingScreen({ navigation }) {
                 <Text style={styles.lxTileLabel}>Next halt ETA</Text>
               </View>
               <View style={styles.lxTile}>
-                <Text style={styles.lxTileValue}>{ltJourneyLikelyComplete ? 0 : lxHaltsLeft}</Text>
-                <Text style={styles.lxTileLabel}>Halts to go</Text>
+                <Text style={styles.lxTileValue}>{lxDestEta || (ltJourneyLikelyComplete ? 0 : lxHaltsLeft)}</Text>
+                <Text style={styles.lxTileLabel}>{lxDestEta ? "Your arrival" : "Halts to go"}</Text>
               </View>
             </View>
             <View style={styles.lxNowFoot}>
@@ -2418,61 +2443,25 @@ export default function LiveTrackingScreen({ navigation }) {
           </View>
         ) : null}
 
-        {/* REDESIGN: "Your arrival" — Smart Alarm + Book a ride together,
-            right under the Right-now card, because both are about getting
-            off at your station (they used to sit far below the timeline). */}
-        {payload && !ltJourneyLikelyComplete ? (
-          <View style={styles.arrivalWrap}>
-            <Text style={styles.arrivalKicker}>{"YOUR ARRIVAL"}</Text>
-      {/* FEATURE: Smart Alarm, right on Live Tracking (moved off the
-          separate More Tools menu — see the top-of-file comment). Only
-          shows once a train is actually being tracked; arming an alarm
-          before that point doesn't mean anything. */}
-      {(
-        <SectionCard title="⏰ Smart Alarm" subtitle="Rings before this train reaches your station — even if you close the app.">
-          <LabeledInput label="Getting off at (station code)" value={alarmStation} onChangeText={setAlarmStation} autoCapitalize="characters" editable={!alarmArmed} />
-          <Text style={styles.fieldLabel}>Alert me before arrival</Text>
-          <View style={styles.chipRow}>
-            {["15", "20", "30", "40", "45"].map((m) => (
-              <TouchableOpacity
-                key={m}
-                disabled={alarmArmed}
-                onPress={() => { setAlarmLeadMinutes(m); setAlarmCustomOpen(false); }}
-                style={[styles.alarmChip, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipActive]}
-              >
-                <Text style={[styles.alarmChipText, !alarmCustomOpen && alarmLeadMinutes === m && styles.alarmChipTextActive]}>{m} min</Text>
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity disabled={alarmArmed} onPress={() => setAlarmCustomOpen(true)} style={[styles.alarmChip, alarmCustomOpen && styles.alarmChipActive]}>
-              <Text style={[styles.alarmChipText, alarmCustomOpen && styles.alarmChipTextActive]}>Custom</Text>
-            </TouchableOpacity>
+        {payload && timeline.length ? (
+          <>
+        {/* REDESIGN: condensed journey — last halt, NOW, next halts and your
+              stop with Alarm / Ride shortcuts; the full table is one tap away. */}
+          <View style={styles.lxTimelineHead}>
+            <Text style={styles.lxTimelineHeadText}>JOURNEY</Text>
           </View>
-          {alarmCustomOpen && (
-            <LabeledInput
-              label="Custom — minutes, or H:MM for 1hr+ (e.g. 1:30 = 1hr 30min)"
-              value={alarmCustomText} onChangeText={setAlarmCustomText}
-              keyboardType="numbers-and-punctuation" editable={!alarmArmed}
-            />
-          )}
-          <PrimaryButton
-            title={alarmArmed ? "Armed" : "Set Alarm"} onPress={setSmartAlarm} loading={alarmBusy}
-            disabled={alarmArmed} style={{ marginTop: spacing.sm }}
+          <JourneyGlance
+            timeline={timeline}
+            complete={ltJourneyLikelyComplete}
+            destCode={lxDestCode}
+            alarmTime={lxRingsAt}
+            alarmArmed={alarmArmed}
+            speed={lxSpeed}
+            onAlarm={() => setAlarmOpen(true)}
+            onRide={() => setRideOpen(true)}
+            onJumpFull={() => setShowFullTimeline((v) => !v)}
           />
-          {alarmArmed && (
-            <TouchableOpacity onPress={cancelSmartAlarm} style={{ marginTop: spacing.sm }}>
-              <Text style={styles.removeAlarmText}>Remove alarm for this station</Text>
-            </TouchableOpacity>
-          )}
-          {alarmStatus && <Text style={styles.webNoticeText}>{alarmStatus}</Text>}
-        </SectionCard>
-      )}
-
-          {/* Book a ride home from the station you get off at (Ola / Uber /
-              Rapido, pickup pre-set) — hidden once the journey is over. */}
-          {bellsEnabledForPayload && !ltJourneyLikelyComplete && timeline.length ? (
-            <BookRideCard timeline={timeline} dest={dest} preferredCodes={Object.keys(stationWatches)} trainNumber={activeTrack.trainNumber} />
-          ) : null}
-          </View>
+          </>
         ) : null}
 
         {/* Alerts & notification settings — same controls, own light card. */}
@@ -2853,6 +2842,8 @@ export default function LiveTrackingScreen({ navigation }) {
               boundary (RailKit's own per-stop day field), and consecutive
               non-halting stations collapsed into a tappable
               "+N No-Halt stations" row — same layout as the reference. */}
+          {showFullTimeline ? (
+          <>
           <View style={styles.lxTimelineHead}>
             <Text style={styles.lxTimelineHeadText}>JOURNEY TIMELINE</Text>
             <TouchableOpacity onPress={jumpToTrain} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
@@ -2939,6 +2930,8 @@ export default function LiveTrackingScreen({ navigation }) {
               });
             })()}
           </SectionCard>
+          </>
+          ) : null}
         </>
       )}
 
@@ -2968,18 +2961,52 @@ export default function LiveTrackingScreen({ navigation }) {
             onPress={() => navigation?.navigate?.("More", { initialTab: "coach", trainNumber: trainNumber.trim() })}
           >
             <Ionicons name="grid-outline" size={13} color="#fff" />
-            <Text style={styles.bottomBarBtnText}>{t("Coach layout")}</Text>
+            <Text style={styles.bottomBarBtnText}>{t("Coach")}</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.bottomBarBtn}
-            onPress={() => navigation?.navigate?.("Home", { screen: "TrainSchedule", params: { trainNumber: trainNumber.trim() } })}
-          >
-            <Ionicons name="time-outline" size={13} color="#fff" />
-            <Text style={styles.bottomBarBtnText}>{t("Time Table")}</Text>
+          <TouchableOpacity style={styles.bottomBarBtn} onPress={() => setAlarmOpen(true)}>
+            <Ionicons name="alarm-outline" size={13} color="#fff" />
+            <Text style={styles.bottomBarBtnText}>{alarmArmed ? t("Alarm on") : t("Alarm")}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.bottomBarBtn} onPress={() => setRideOpen(true)}>
+            <Ionicons name="car-outline" size={13} color="#fff" />
+            <Text style={styles.bottomBarBtnText}>{t("Ride")}</Text>
           </TouchableOpacity>
         </View>
       </View>
     )}
+    <SmartAlarmSheet
+      visible={alarmOpen}
+      onClose={() => setAlarmOpen(false)}
+      stationCode={alarmStation}
+      onStationChange={setAlarmStation}
+      stationName={lxDestStop ? toDisplayCase(lxDestStop.name || lxDestStop.code) : ""}
+      etaClock={lxDestEta}
+      kmAway={lxDestKmAway}
+      minutesToArrival={lxDestMinutes}
+      leadMinutes={alarmLeadMinutes}
+      onLeadChange={(m) => { setAlarmLeadMinutes(m); setAlarmCustomOpen(false); }}
+      customOpen={alarmCustomOpen}
+      onCustomOpen={() => setAlarmCustomOpen(true)}
+      customText={alarmCustomText}
+      onCustomText={setAlarmCustomText}
+      leadValue={lxAlarmLead}
+      ringsAt={lxRingsAt}
+      armed={alarmArmed}
+      busy={alarmBusy}
+      status={alarmStatus}
+      onSet={setSmartAlarm}
+      onCancel={cancelSmartAlarm}
+    />
+    <RideSheet
+      visible={rideOpen}
+      onClose={() => setRideOpen(false)}
+      stationName={lxDestStop ? toDisplayCase(lxDestStop.name || lxDestStop.code) : ""}
+      etaClock={lxDestEta}
+      timeline={timeline}
+      dest={dest}
+      preferredCodes={Object.keys(stationWatches)}
+      trainNumber={activeTrack ? activeTrack.trainNumber : trainNumber}
+    />
     <DayPickerModal
       visible={dayPickerVisible}
       selected={trackDate}
