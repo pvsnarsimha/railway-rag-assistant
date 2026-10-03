@@ -746,6 +746,11 @@ def run_platform_check_once(locate_fn: Callable[[str, str, Optional[str]], dict]
     A pattern estimate never triggers (or resets) an alert — only a platform
     from a live source, passenger reports or history does."""
     import platform_intel
+    try:
+        import station_tools
+        platform_intel.harvest_boards(station_tools.fetch_station_board)
+    except Exception as e:  # noqa: BLE001 - history building must never break alerts
+        logger.warning("platform harvest failed: %s", e)
     refreshed = platform_intel.poll_due(locate_fn)
     pushed = 0
     if not refreshed:

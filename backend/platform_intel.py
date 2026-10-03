@@ -416,6 +416,47 @@ def _interval_seconds(minutes_to_arrival: Optional[float]) -> int:
     return 60
 
 
+HARVEST_EVERY_SECONDS = 20 * 60
+HARVEST_MAX_PER_TICK = 2
+_harvest_due: Dict[str, float] = {}
+
+
+def harvest_boards(fetch_board_fn: Callable[[str, int], dict]) -> int:
+    """Builds the all-trains platform history. One station-board call returns
+    EVERY train at that station with its platform, so each call records many
+    trains at once — not just the ones somebody is watching. Stations: those
+    being watched/viewed plus PLATFORM_HARVEST_STATIONS (comma list, e.g.
+    "BZA,SC,HWH,NDLS"). Each is refreshed every 20 min, at most 2 per tick,
+    to stay inside the data provider's rate limits. Returns rows recorded."""
+    now = time.time()
+    stations = [s.strip().upper() for s in (os.environ.get("PLATFORM_HARVEST_STATIONS") or "").split(",") if s.strip()]
+    for w in push_store.list_all_platform_watches():
+        stations.append(str(w["station"]).upper())
+    with _state_lock:
+        stations += [k[1] for k in _touched]
+    todo = []
+    for st in dict.fromkeys(stations):
+        if _harvest_due.get(st, 0) <= now:
+            todo.append(st)
+    recorded = 0
+    for st in todo[:HARVEST_MAX_PER_TICK]:
+        _harvest_due[st] = now + HARVEST_EVERY_SECONDS
+        try:
+            rows = (fetch_board_fn(st, 4) or {}).get("rows") or []
+        except Exception as e:  # noqa: BLE001
+            logger.warning("harvest %s failed: %s", st, e)
+            continue
+        for r in rows:
+            pl = str(r.get("platform") or "").strip()
+            if pl and r.get("train_number"):
+                try:
+                    record_observation(str(r["train_number"]), st, pl, "station_board_harvest")
+                    recorded += 1
+                except Exception:  # noqa: BLE001
+                    pass
+    return recorded
+
+
 def poll_due(locate_fn: Callable[[str, str, Optional[str]], dict]) -> Dict[Tuple[str, str], dict]:
     """One poller tick. Refreshes every watched / recently-viewed pair that is
     due, and returns {(train, station): result} for the ones refreshed."""
