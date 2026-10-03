@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, TouchableOpacity, ActivityIndicator, StyleSheet } from "react-native";
+import { View, TouchableOpacity, ActivityIndicator, StyleSheet, Platform } from "react-native";
 import { Text, TextInput } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
@@ -133,7 +133,16 @@ export default function StationField({
             </View>
           ) : matches.length > 0 ? (
             matches.map((m) => (
-              <TouchableOpacity key={m.code} style={styles.dropdownRow} onPress={() => pickMatch(m)}>
+              // On web the input's blur fires on mouse-down and the 150ms
+              // blur timer unmounts this list before the click's mouse-up
+              // can fire onPress — so the tap was lost. Select on press-in
+              // there; native keeps the normal onPress (safe while scrolling).
+              <TouchableOpacity
+                key={m.code}
+                style={styles.dropdownRow}
+                onPressIn={Platform.OS === "web" ? () => pickMatch(m) : undefined}
+                onPress={() => pickMatch(m)}
+              >
                 <Text numberOfLines={1} style={styles.dropdownName}>{m.name}</Text>
                 <Text style={styles.dropdownCode}>{m.code}</Text>
               </TouchableOpacity>

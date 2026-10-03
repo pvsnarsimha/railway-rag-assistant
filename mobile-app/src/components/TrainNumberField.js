@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, TouchableOpacity, ActivityIndicator, StyleSheet } from "react-native";
+import { View, TouchableOpacity, ActivityIndicator, StyleSheet, Platform } from "react-native";
 import { Text, TextInput } from "../i18n/Localized";
 import { colors, spacing, radius } from "../theme/colors";
 import { suggestTrains } from "../api/railwayApi";
@@ -74,7 +74,14 @@ export default function TrainNumberField({ label, placeholder, value, onChangeTe
             <View style={styles.row}><ActivityIndicator size="small" color={colors.primary} /><Text style={styles.muted}>Searching trains…</Text></View>
           ) : matches.length ? (
             matches.map((m) => (
-              <TouchableOpacity key={m.number} style={styles.row} onPress={() => pick(m)} activeOpacity={0.7}>
+              <TouchableOpacity
+                key={m.number}
+                style={styles.row}
+                // Web: blur's 150ms timer hides the list before click's mouse-up, so select on press-in.
+                onPressIn={Platform.OS === "web" ? () => pick(m) : undefined}
+                onPress={() => pick(m)}
+                activeOpacity={0.7}
+              >
                 <Text style={styles.number}>{m.number}</Text>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.name} numberOfLines={1}>{m.name}</Text>
