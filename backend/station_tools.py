@@ -459,6 +459,7 @@ def locate_platform(train_number: str, station_code: str, date_ddmmyyyy: Optiona
         comp_platform = str(comp["station"]["platform"])
 
     predicted = None
+    platform_candidates, platform_busy = [], {}
     if board_row and board_row.get("platform"):
         platform, source = board_row["platform"], f"station_board_{board_source}"
     elif rr and rr.get("platform"):
@@ -468,6 +469,21 @@ def locate_platform(train_number: str, station_code: str, date_ddmmyyyy: Optiona
     else:
         predicted = advanced_features.predict_platform(train_number, station_code)
         platform, source = str(predicted["predicted_platform"]), "estimate"
+        # The hash above is only a last resort. Prefer a ranked guess from real
+        # history + what the live board says is already occupied.
+        try:
+            import platform_intel
+            cands, busy = platform_intel.rank_candidates(
+                train_number, station_code, fetched["rows"],
+                ((board_row or {}).get("expected_arrival") or (board_row or {}).get("scheduled_arrival") or (rr or {}).get("scheduled_arrival")),
+                ((board_row or {}).get("expected_departure") or (board_row or {}).get("scheduled_departure") or (rr or {}).get("scheduled_departure")),
+                predicted.get("station_platform_count"))
+        except Exception:  # noqa: BLE001
+            cands, busy = [], {}
+        if cands:
+            platform = cands[0]["platform"]
+            predicted["alternate_platform"] = cands[1]["platform"] if len(cands) > 1 else None
+        platform_candidates, platform_busy = cands, busy
 
     # Timings: the board first (station-reported), RailRadar next.
     sched_arr = (board_row or {}).get("scheduled_arrival") or (rr or {}).get("scheduled_arrival")
@@ -494,6 +510,8 @@ def locate_platform(train_number: str, station_code: str, date_ddmmyyyy: Optiona
         "platform_source": source,
         "platform_confirmed": source.startswith("station_board"),
         "alternate_platform": (predicted or {}).get("alternate_platform"),
+        "platform_candidates": platform_candidates,
+        "platform_busy": platform_busy,
         "scheduled_arrival": sched_arr,
         "expected_arrival": expected_arr,
         "scheduled_departure": sched_dep,

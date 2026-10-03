@@ -196,6 +196,91 @@ def recent_reports(train: str, station: str) -> dict:
     return {"count": len(rows), "platform": plat, "agree": n}
 
 
+# ------------------------------------------------------ candidate ranking
+def _hhmm(v) -> Optional[int]:
+    try:
+        h, m = str(v).strip()[:5].split(":")
+        return int(h) * 60 + int(m)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _overlaps(a0: int, a1: int, b0: int, b1: int, margin: int = 5) -> bool:
+    """Do two [arrive, depart] windows (minutes of day, wrap-aware) overlap,
+    with a few minutes of margin either side?"""
+    for d in (0, 1440, -1440):
+        if a0 - margin < b1 + d and b0 + d < a1 + margin:
+            return True
+    return False
+
+
+def rank_candidates(train: str, station: str, board_rows: List[dict], arrive: Optional[str],
+                    depart: Optional[str], n_platforms: Optional[int] = None) -> Tuple[List[dict], Dict[str, str]]:
+    """Best-guess platforms when nothing live has the allocation yet. NOT a
+    confirmed platform — it only narrows the choice, using real signals:
+      + this train's own past platforms here, and its return-pair train
+        (17215 <-> 17216 usually share platforms)
+      + how often each platform is used by any train at this station
+      - platforms another train is already booked on (live board) during
+        this train's stay — a platform can't hold two trains at once.
+    Returns ([{platform, score, why[]}] best first, {busy platform: other train})."""
+    scores: Dict[str, float] = {}
+    why: Dict[str, List[str]] = {}
+
+    def add(pl, pts, reason):
+        pl = str(pl).strip()
+        if not pl:
+            return
+        scores[pl] = scores.get(pl, 0.0) + pts
+        if reason not in why.setdefault(pl, []):
+            why[pl].append(reason)
+
+    sibling = None
+    try:
+        sibling = str(int(train) + (1 if int(train) % 2 else -1))
+    except ValueError:
+        pass
+    try:
+        with push_store._connect() as conn:
+            last = conn.execute(
+                """SELECT train_number, day, platform FROM platform_obs WHERE station=? AND source<>'estimate'
+                   AND id IN (SELECT MAX(id) FROM platform_obs WHERE station=? GROUP BY train_number, day)
+                   AND day>=date('now','-60 day')""", (station, station)).fetchall()
+    except Exception:  # noqa: BLE001
+        last = []
+    for r in last:
+        if r["train_number"] == train:
+            add(r["platform"], 5.0, "this train's earlier platform here")
+        elif sibling and r["train_number"] == sibling:
+            add(r["platform"], 2.0, "its return-pair train's platform")
+        else:
+            add(r["platform"], 0.3, "often used at this station")
+
+    # Platforms the live board already gives to another train in the same window.
+    a0 = _hhmm(arrive)
+    a1 = _hhmm(depart) if _hhmm(depart) is not None else (a0 + 10 if a0 is not None else None)
+    busy: Dict[str, str] = {}
+    if a0 is not None and a1 is not None:
+        for r in board_rows or []:
+            if str(r.get("train_number")) == train or not r.get("platform"):
+                continue
+            b0 = _hhmm(r.get("expected_arrival") or r.get("scheduled_arrival"))
+            b1 = _hhmm(r.get("expected_departure") or r.get("scheduled_departure"))
+            if b0 is None:
+                continue
+            if b1 is None:
+                b1 = b0 + 10
+            if _overlaps(a0, a1, b0, b1):
+                busy[str(r["platform"])] = str(r.get("train_number"))
+    for pl in busy:
+        scores.pop(pl, None)
+    out = [{"platform": pl, "score": round(sc, 2), "why": why.get(pl, [])}
+           for pl, sc in sorted(scores.items(), key=lambda kv: -kv[1])[:3]]
+    if n_platforms and out:
+        out = [c for c in out if not c["platform"].isdigit() or int(c["platform"]) <= n_platforms] or out
+    return out, busy
+
+
 # ----------------------------------------------------------------- assessing
 def assess(res: dict) -> dict:
     """Compares the live platform with history, the pattern/ML estimate and

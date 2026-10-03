@@ -284,8 +284,15 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
       ) : null}
       {conf?.reasons?.map((r) => <Text key={r} style={styles.heroIn}>{r}</Text>)}
       {conf?.warnings?.map((w) => <Text key={w} style={[styles.heroIn, { color: "#FCD34D" }]}>⚠️ {w}</Text>)}
-      {data.platform_source === "estimate" && data.alternate_platform ? (
-        <Text style={styles.heroIn}>No live platform yet — could also be PF {data.alternate_platform}</Text>
+      {data.platform_source === "estimate" ? (
+        <Text style={styles.heroIn}>
+          {`Not allocated yet — likely PF ${(data.platform_candidates?.length ? data.platform_candidates.map((c) => c.platform) : [data.platform, data.alternate_platform].filter(Boolean)).join(" or PF ")}. Updates automatically.`}
+        </Text>
+      ) : null}
+      {data.platform_source === "estimate" && data.platform_busy && Object.keys(data.platform_busy).length ? (
+        <Text style={styles.heroIn}>
+          {`Not ${Object.entries(data.platform_busy).map(([pf, tr]) => `PF ${pf} (train ${tr} is there)`).join(", ")}.`}
+        </Text>
       ) : null}
     </View>
   );
