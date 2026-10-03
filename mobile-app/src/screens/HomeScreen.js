@@ -93,7 +93,7 @@ export default function HomeScreen({ navigation }) {
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
   return (
-    <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={styles.flex} contentContainerStyle={styles.content}>
       <ScreenLanguageBar
         style={styles.langBar}
         getSpeech={() => [

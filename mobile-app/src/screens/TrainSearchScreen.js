@@ -301,6 +301,7 @@ export default function TrainSearchScreen({ route }) {
 
       <FlatList
         style={styles.flex}
+        keyboardShouldPersistTaps="handled"
         // Gated on formCollapsed (not just "do we have trains") so a
         // result set that's already in state can never render underneath
         // the still-open search form — the two must only ever be visible

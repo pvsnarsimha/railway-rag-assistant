@@ -2217,7 +2217,7 @@ export default function LiveTrackingScreen({ navigation }) {
 
   return (
     <View style={styles.flex}>
-    <ScrollView ref={scrollRef} style={styles.flex} contentContainerStyle={[styles.content, showBottomBar && styles.contentWithBar]}>
+    <ScrollView keyboardShouldPersistTaps="handled" ref={scrollRef} style={styles.flex} contentContainerStyle={[styles.content, showBottomBar && styles.contentWithBar]}>
     <View ref={scrollContentRef} collapsable={false}>
       {/* FEATURE: 🌐 screen language + 🔊 "Speak screen" (reads the train's
           current status only when tapped, in the chosen language). */}
