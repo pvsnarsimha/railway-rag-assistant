@@ -289,6 +289,11 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
           {`Not allocated yet — likely PF ${(data.platform_candidates?.length ? data.platform_candidates.map((c) => c.platform) : [data.platform, data.alternate_platform].filter(Boolean)).join(" or PF ")}. Updates automatically.`}
         </Text>
       ) : null}
+      {data.platform_source !== "station_board" && !data.platform_confirmed && data.early_guess_accuracy ? (
+        <Text style={styles.heroIn}>
+          {`Our early guesses matched the final platform ${data.early_guess_accuracy.correct} of ${data.early_guess_accuracy.checked} times (${data.early_guess_accuracy.percent}%).`}
+        </Text>
+      ) : null}
       {data.platform_source === "estimate" && data.platform_busy && Object.keys(data.platform_busy).length ? (
         <Text style={styles.heroIn}>
           {`Not ${Object.entries(data.platform_busy).map(([pf, tr]) => `PF ${pf} (train ${tr} is there)`).join(", ")}.`}

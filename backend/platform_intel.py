@@ -124,6 +124,13 @@ def init_db() -> None:
                 day TEXT NOT NULL, platform TEXT NOT NULL, source TEXT, observed_at REAL NOT NULL)"""
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_obs ON platform_obs(train_number, station, day)")
+        # What we SHOWED before a live source had the platform, and what it turned out to be:
+        # the only honest way to know (and later claim) how accurate the early guess is.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS platform_pred (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, train_number TEXT NOT NULL, station TEXT NOT NULL,
+                day TEXT NOT NULL, predicted TEXT NOT NULL, actual TEXT, predicted_at REAL NOT NULL,
+                UNIQUE(train_number, station, day))""")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS platform_reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, train_number TEXT NOT NULL, station TEXT NOT NULL,
@@ -146,6 +153,9 @@ def record_observation(train: str, station: str, platform: str, source: str) -> 
         last = conn.execute(
             "SELECT platform FROM platform_obs WHERE train_number=? AND station=? AND day=? ORDER BY id DESC LIMIT 1",
             (train, station, day)).fetchone()
+        # The latest live platform is the answer to today's early guess.
+        conn.execute("UPDATE platform_pred SET actual=? WHERE train_number=? AND station=? AND day=?",
+                     (platform, train, station, day))
         if last and last["platform"] == platform:
             return False
         conn.execute(
@@ -165,7 +175,34 @@ def history_usual(train: str, station: str) -> Optional[dict]:
     if len(rows) < MIN_HISTORY_DAYS:
         return None
     plat, n = Counter(r["platform"] for r in rows).most_common(1)[0]
-    return {"platform": plat, "days": len(rows), "agree": n}
+    return {"platform": plat, "days": len(rows), "agree": n, "share": round(n / len(rows), 2)}
+
+
+def log_prediction(train: str, station: str, platform: str) -> None:
+    """Remember the first pre-allocation guess shown today (not overwritten
+    later, so a guess can't be quietly corrected after the fact)."""
+    if not platform:
+        return
+    with push_store._connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO platform_pred (train_number, station, day, predicted, predicted_at) VALUES (?,?,?,?,?)",
+            (train, station, _today(), str(platform), time.time()))
+
+
+def accuracy_stats(station: Optional[str] = None, days: int = 60) -> Optional[dict]:
+    """Measured hit rate of the early guess vs the final live platform.
+    Scoped to a station when given. None until 10 resolved guesses exist."""
+    q = "SELECT predicted, actual FROM platform_pred WHERE actual IS NOT NULL AND day>=date('now', ?)"
+    args: list = [f"-{int(days)} day"]
+    if station:
+        q += " AND station=?"
+        args.append(station)
+    with push_store._connect() as conn:
+        rows = conn.execute(q, args).fetchall()
+    if len(rows) < 10:
+        return None
+    hits = sum(1 for r in rows if r["predicted"] == r["actual"])
+    return {"checked": len(rows), "correct": hits, "percent": round(100.0 * hits / len(rows))}
 
 
 def change_log(train: str, station: str, limit: int = 10) -> List[dict]:
@@ -312,9 +349,9 @@ def assess(res: dict) -> dict:
     elif rep_plat:
         platform, level = rep_plat, "reported"
         reasons.append(f"{reports['agree']} passengers report PF {rep_plat}; no live source yet.")
-    elif usual and usual["agree"] >= 2:
+    elif usual and usual["agree"] >= 2 and usual["share"] >= 0.8:
         platform, level = usual["platform"], "history"
-        reasons.append(f"Usually PF {usual['platform']} ({usual['agree']} of {usual['days']} recent days); no live source yet.")
+        reasons.append(f"Usually PF {usual['platform']} ({usual['agree']} of {usual['days']} recent days, {round(usual['share'] * 100)}%); no live source yet.")
     else:
         reasons.append("No live source yet — pattern estimate only.")
 
@@ -348,6 +385,9 @@ def process(res: dict) -> dict:
             res["platform"] = conf["platform"]
             res["platform_source"] = "history" if conf["level"] == "history" else "passenger_reports"
         res["confidence"] = conf
+        if (res.get("platform_source") or "") in ("estimate", "history", "passenger_reports"):
+            log_prediction(train, station, str(res.get("platform") or ""))
+        res["early_guess_accuracy"] = accuracy_stats(station) or accuracy_stats()
         res["platform_changed_today"] = changed
         res["platform_changes"] = change_log(train, station, 5)
         snap = {k: res.get(k) for k in (
