@@ -27,8 +27,32 @@ export function minusMinutes(hhmm, mins) {
   if (t < 0) t += 1440;
   return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
 }
-export function stopEtdClock(s) {
-  return clock(s?.predicted_etd) || clock(s?.departure?.expected) || clock(s?.departure?.scheduled) || stopEtaClock(s);
+export function plusMinutes(hhmm, mins) {
+  return minusMinutes(hhmm, -mins);
+}
+const toMin = (hhmm) => {
+  const m = /^(\d{2}):(\d{2})$/.exec(hhmm || "");
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+/**
+ * One place that works out a stop's times: scheduled arr/dep, ETA, ETD and
+ * halt minutes. ETD is always ETA + halt when the train is still running
+ * behind (so it can never sit before the ETA), and real recorded times win
+ * once they exist.
+ */
+export function stopTimes(s) {
+  const schedArr = clock(s?.arrival?.scheduled);
+  const schedDep = clock(s?.departure?.scheduled);
+  const eta = clock(s?.arrival?.actual) || clock(s?.predicted_eta) || clock(s?.arrival?.expected) || schedArr;
+  let halt = s?.halt_minutes === "" ? null : s?.halt_minutes;
+  halt = halt == null || Number.isNaN(Number(halt)) ? null : Number(halt);
+  if (halt == null) {
+    const a = toMin(schedArr), d = toMin(schedDep);
+    if (a != null && d != null) halt = (d - a + 1440) % 1440;
+  }
+  const viaHalt = eta && halt != null ? plusMinutes(eta, halt) : null;
+  const etd = clock(s?.departure?.actual) || (s?.predicted_eta ? viaHalt : null) || clock(s?.departure?.expected) || viaHalt || schedDep || eta;
+  return { schedArr, schedDep, eta, etd, halt };
 }
 const delayOf = (s) => {
   const d = s?.arrival?.delay_minutes ?? s?.departure?.delay_minutes;
@@ -68,25 +92,27 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmCode,
 
   const Row = ({ stop, dim, last, actions }) => {
     const d = delayOf(stop);
+    const T = stopTimes(stop);
     const isAlarm = alarmArmed && String(stop.code).toUpperCase() === String(alarmCode || "").toUpperCase();
     return (
       <View style={styles.row}>
-        <Text style={[styles.time, dim && styles.dim]}>{stopEtaClock(stop) || "—"}</Text>
+        <View style={styles.timeCol}>
+          <Text style={styles.schedT}>{`Sch ${T.schedArr || "—"}`}</Text>
+          <Text style={[styles.time, dim && styles.dim]}>{`ETA ${T.eta || "—"}`}</Text>
+        </View>
         <View style={styles.rail}>
           <View style={[styles.line, !last && styles.lineOn]} />
           <View style={[styles.dot, dim ? styles.dotDone : styles.dotNext]} />
         </View>
         <View style={styles.body}>
           <Text style={[styles.name, dim && styles.dim]} numberOfLines={1}>{titleCase(stop.name || stop.code)}</Text>
-          <Text style={styles.sub}>{`${stop.code}${stop.distance_km != null ? ` · ${stop.distance_km} km` : ""}`}</Text>
+          <Text style={styles.sub}>{`${stop.code}${stop.distance_km != null ? ` · ${stop.distance_km} km` : ""}${T.halt != null ? ` · Halt ${T.halt} min` : ""}`}</Text>
+        </View>
+        <View style={styles.timeColRight}>
+          <Text style={[styles.schedT, styles.right]}>{`Sch ${T.schedDep || "—"}`}</Text>
+          <Text style={[styles.time, styles.right, dim && styles.dim]}>{`ETD ${T.etd || "—"}`}</Text>
         </View>
         {d != null && d !== 0 ? <Text style={[styles.delay, d > 0 ? styles.late : styles.early]}>{d > 0 ? `+${d}` : d}</Text> : null}
-        {actions ? (
-          <View style={styles.etaBox}>
-            <Text style={styles.etaLine}>{`ETA ${stopEtaClock(stop) || "—"}`}</Text>
-            <Text style={styles.etaLine}>{`ETD ${stopEtdClock(stop) || "—"}`}</Text>
-          </View>
-        ) : null}
         {actions ? (
           <View style={styles.rowActions}>
             <TouchableOpacity onPress={() => onAlarm(stop)} style={[styles.mini, isAlarm && styles.miniOn]} hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }} accessibilityLabel={`Set alarm for ${stop.name || stop.code}`}>
@@ -109,6 +135,7 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmCode,
   );
 
   const destDelay = delayOf(dest);
+  const destT = stopTimes(dest);
   const destAlarmOn = alarmArmed && String(alarmCode || "").toUpperCase() === String(dest.code).toUpperCase();
   return (
     <View style={styles.card}>
@@ -142,20 +169,23 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmCode,
 
       <View style={styles.dest}>
         <View style={styles.destTop}>
-          <Text style={[styles.time, { color: "#B45309" }]}>{stopEtaClock(dest) || "—"}</Text>
+          <View style={styles.timeCol}>
+            <Text style={styles.schedT}>{`Sch ${destT.schedArr || "—"}`}</Text>
+            <Text style={[styles.time, { color: "#B45309" }]}>{`ETA ${destT.eta || "—"}`}</Text>
+          </View>
           <View style={styles.rail}><View style={[styles.dot, styles.dotDest]} /></View>
           <View style={styles.body}>
             <Text style={styles.name} numberOfLines={1}>{titleCase(dest.name || dest.code)}</Text>
             <Text style={styles.sub}>{`${dest.code}${dest.distance_km != null ? ` · ${dest.distance_km} km` : ""}${destDelay ? ` · ${destDelay > 0 ? "+" : ""}${destDelay} min` : ""}`}</Text>
           </View>
+          <View style={styles.timeColRight}>
+            <Text style={[styles.schedT, styles.right]}>{`Sch ${destT.schedDep || destT.schedArr || "—"}`}</Text>
+            <Text style={[styles.time, styles.right, { color: "#B45309" }]}>{`ETD ${destT.etd || "—"}`}</Text>
+          </View>
           <Text style={styles.endTag}>{complete ? "Arrived" : "Your stop"}</Text>
         </View>
         {!complete ? (
           <View style={styles.chipRow}>
-            <View style={styles.etaBox}>
-              <Text style={styles.etaLine}>{`ETA ${stopEtaClock(dest) || "—"}`}</Text>
-              <Text style={styles.etaLine}>{`ETD ${stopEtdClock(dest) || "—"}`}</Text>
-            </View>
             <TouchableOpacity onPress={() => onAlarm(dest)} style={[styles.chip, destAlarmOn && styles.chipOn]} activeOpacity={0.8}>
               <Ionicons name="alarm" size={14} color={destAlarmOn ? "#fff" : "#B45309"} />
               <Text style={[styles.chipText, destAlarmOn && { color: "#fff" }]}>{destAlarmOn && alarmTime ? `Alarm ${alarmTime}` : "Set alarm"}</Text>
@@ -179,7 +209,11 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmCode,
 const styles = StyleSheet.create({
   card: { backgroundColor: "#fff", borderRadius: 20, padding: 14, marginBottom: spacing.md, shadowColor: "#0B3D91", shadowOpacity: 0.07, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
   row: { flexDirection: "row", alignItems: "center", minHeight: 52 },
-  time: { width: 46, fontSize: 12.5, fontWeight: "700", color: colors.text },
+  time: { fontSize: 12.5, fontWeight: "700", color: colors.text },
+  timeCol: { width: 70 },
+  timeColRight: { marginLeft: 6, minWidth: 66 },
+  schedT: { fontSize: 10, color: colors.textMuted },
+  right: { textAlign: "right" },
   dim: { color: colors.textMuted },
   rail: { width: 26, alignItems: "center", justifyContent: "center", alignSelf: "stretch" },
   line: { position: "absolute", top: 0, bottom: 0, width: 2, backgroundColor: "transparent" },
@@ -194,7 +228,7 @@ const styles = StyleSheet.create({
   delay: { fontSize: 12.5, fontWeight: "800", marginLeft: 6 },
   late: { color: "#C62828" },
   early: { color: "#2E7D32" },
-  fold: { flexDirection: "row", alignItems: "center", minHeight: 34, paddingLeft: 46 },
+  fold: { flexDirection: "row", alignItems: "center", minHeight: 34, paddingLeft: 70 },
   foldText: { fontSize: 12.5, fontWeight: "700", color: colors.primary, paddingLeft: 6 },
   now: { flexDirection: "row", alignItems: "center", backgroundColor: "#E8F0FE", borderRadius: 14, padding: 10, marginVertical: 6 },
   nowTag: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center", marginRight: 10 },
@@ -204,12 +238,10 @@ const styles = StyleSheet.create({
   dest: { backgroundColor: "#FFF4E5", borderWidth: 1, borderColor: "#F8CE95", borderRadius: 14, padding: 10, marginTop: 6 },
   destTop: { flexDirection: "row", alignItems: "center" },
   endTag: { fontSize: 11, fontWeight: "800", color: "#B45309" },
-  chipRow: { flexDirection: "row", gap: 8, marginTop: 10, paddingLeft: 46 },
+  chipRow: { flexDirection: "row", gap: 8, marginTop: 10, paddingLeft: 70 },
   chip: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#fff", borderWidth: 1, borderColor: "#F2B968", borderRadius: 16, paddingHorizontal: 12, paddingVertical: 7 },
   chipOn: { backgroundColor: "#2E7D32", borderColor: "#2E7D32" },
   chipText: { fontSize: 12.5, fontWeight: "800", color: "#B45309" },
-  etaBox: { marginLeft: 6, alignItems: "flex-start", justifyContent: "center" },
-  etaLine: { fontSize: 10.5, fontWeight: "700", color: colors.textMuted, lineHeight: 14 },
   rowActions: { flexDirection: "row", gap: 6, marginLeft: 8 },
   mini: { width: 32, height: 32, borderRadius: 16, backgroundColor: "#EAF0FB", alignItems: "center", justifyContent: "center" },
   miniOn: { backgroundColor: "#2E7D32" },

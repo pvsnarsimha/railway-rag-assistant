@@ -25,7 +25,7 @@ import OfflineTrackingCard from "../components/OfflineTrackingCard";
 import RideSheet from "../components/RideSheet";
 import TrainNumberField from "../components/TrainNumberField";
 import SmartAlarmSheet from "../components/SmartAlarmSheet";
-import JourneyGlance, { stopEtaClock, minusMinutes } from "../components/JourneyGlance";
+import JourneyGlance, { stopEtaClock, minusMinutes, stopTimes } from "../components/JourneyGlance";
 import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
 import { isSpeechSupported, loadReadAloud, loadReadAloudAsync, saveReadAloud, speak, stopSpeaking, onTrainPush, shouldSpeakPush } from "../utils/speakNotifications";
 import { getLanguage, hasChosenLanguage, languageInfo, loadLanguage, SAMPLE } from "../utils/notifyLanguage";
@@ -3319,15 +3319,22 @@ function IntermediateEtaLine({ stop }) {
 
 // Plain-language "why is this running late" built ONLY from the real
 // signals the backend attached to the stop — never an invented cause.
+function stopDelayMinutes(stop) {
+  const v = stop.predicted_delay_minutes ?? stop.arrival?.delay_minutes ?? stop.departure?.delay_minutes;
+  return v == null || Number.isNaN(Number(v)) ? null : Number(v);
+}
 function delayReasonLines(stop, fromStation) {
-  const d = stop.predicted_delay_minutes;
+  const d = stopDelayMinutes(stop);
   const lines = [];
-  if (d == null) return ["No live prediction is available for this point yet."];
+  if (d == null) return ["No live delay figure is available for this station yet."];
+  const recorded = stop.status === "passed" || stop.status === "current";
   lines.push(d > 0
-    ? `The train is expected to reach here about ${d} min behind schedule.`
-    : "The train is expected to reach here on time.");
-  if (stop.predicted_eta_source === "gps") lines.push("Based on the train's live GPS position and speed.");
-  else lines.push(`Based on the delay carried forward from ${fromStation || "the last reporting station"} and the remaining distance.`);
+    ? `The train ${recorded ? "reached here" : "is expected to reach here"} about ${d} min behind schedule.`
+    : `The train ${recorded ? "reached here" : "is expected to reach here"} on time.`);
+  if (!recorded) {
+    if (stop.predicted_eta_source === "gps") lines.push("Based on the train's live GPS position and speed.");
+    else lines.push(`Based on the delay carried forward from ${fromStation || "the last reporting station"} and the remaining distance.`);
+  }
   if (stop.predicted_delay_historical_basis) lines.push(`History: ${stop.predicted_delay_historical_basis}`);
   if (stop.provider_disagreement_minutes != null && stop.provider_disagreement_minutes > 2) {
     lines.push(`Data providers differ by ~${stop.provider_disagreement_minutes} min, so this may shift.`);
@@ -3336,39 +3343,53 @@ function delayReasonLines(stop, fromStation) {
   return lines;
 }
 
-// ⓘ button: 1st tap → why the train is delayed, 2nd tap → full info box
-// (halt, scheduled/predicted arrival & departure, confidence), 3rd closes.
-function DelayInfoButton({ stop, fromStation }) {
-  const [step, setStep] = useState(0);
-  const arr = stop.predicted_eta || null;
-  const d = stop.predicted_delay_minutes;
+// ⓘ toggle: tap 1 → why the train is delayed, tap 2 → full info box, tap 3 closes.
+function InfoToggle({ step, onPress }) {
   return (
-    <View>
-      <TouchableOpacity
-        onPress={() => setStep((v) => (v + 1) % 3)}
-        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        style={styles.nhInfoBtn}
-        accessibilityLabel="Why is this train delayed"
-      >
-        <Ionicons name="information-circle-outline" size={16} color={colors.primary} />
-      </TouchableOpacity>
-      {step >= 1 && (
-        <View style={styles.nhInfoBox}>
-          {delayReasonLines(stop, fromStation).map((l, i) => <Text key={i} style={styles.nhInfoText}>{l}</Text>)}
-          {step === 1 && <Text style={styles.nhInfoHint}>Tap ⓘ again for details</Text>}
-        </View>
-      )}
+    <TouchableOpacity
+      onPress={onPress}
+      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      style={[styles.nhInfoBtn, step > 0 && styles.nhInfoBtnOn]}
+      accessibilityLabel="Why is this train delayed"
+    >
+      <Ionicons name={step > 0 ? "information-circle" : "information-circle-outline"} size={17} color={colors.primary} />
+    </TouchableOpacity>
+  );
+}
+
+function InfoPanel({ stop, step, fromStation }) {
+  if (step < 1) return null;
+  const T = stopTimes(stop);
+  const d = stopDelayMinutes(stop);
+  return (
+    <>
+      <View style={styles.nhInfoBox}>
+        {delayReasonLines(stop, fromStation).map((l, i) => <Text key={i} style={styles.nhInfoText}>{l}</Text>)}
+        {step === 1 && <Text style={styles.nhInfoHint}>Tap ⓘ again for details</Text>}
+      </View>
       {step === 2 && (
         <View style={[styles.nhInfoBox, styles.nhInfoDetail]}>
           <Text style={styles.nhInfoTitle}>{`${toDisplayCase(stop.name)} (${stop.code})`}</Text>
-          <Text style={styles.nhInfoText}>{"Halt: 0 min (non-stop, train passes through)"}</Text>
-          <Text style={styles.nhInfoText}>{`Predicted arrival: ${arr || "—"}`}</Text>
-          <Text style={styles.nhInfoText}>{`Predicted departure: ${arr || "—"}`}</Text>
+          <Text style={styles.nhInfoText}>{`Halt: ${T.halt != null ? `${T.halt} min` : "—"}`}</Text>
+          <Text style={styles.nhInfoText}>{`Scheduled arrival: ${T.schedArr || "—"}  ·  departure: ${T.schedDep || "—"}`}</Text>
+          <Text style={styles.nhInfoText}>{`ETA: ${T.eta || "—"}  ·  ETD: ${T.etd || "—"}`}</Text>
           <Text style={styles.nhInfoText}>{`Delay: ${d == null ? "—" : d > 0 ? `${d} min` : "On time"}${stop.predicted_delay_confidence ? ` · confidence ${stop.predicted_delay_confidence}` : ""}`}</Text>
           {stop.distance_ahead_km != null && <Text style={styles.nhInfoText}>{`Distance ahead: ${stop.distance_ahead_km} km`}</Text>}
           <Text style={styles.nhInfoHint}>Tap ⓘ again to close</Text>
         </View>
       )}
+    </>
+  );
+}
+
+// Non-halting (passing) stations: halt is 0, so arrival and departure match.
+function DelayInfoButton({ stop, fromStation }) {
+  const [step, setStep] = useState(0);
+  const pass = { ...stop, halt_minutes: 0, arrival: stop.arrival || {}, departure: stop.departure || {} };
+  return (
+    <View>
+      <InfoToggle step={step} onPress={() => setStep((v) => (v + 1) % 3)} />
+      <InfoPanel stop={pass} step={step} fromStation={fromStation} />
     </View>
   );
 }
@@ -3568,9 +3589,17 @@ function NoHaltGroupRow({
 // PREDICTED "actual" time can be actively wrong rather than a fair
 // estimate, so it's hidden rather than shown as if it were confirmed —
 // same reasoning the web frontend's timingRow() uses.
-function TimeStack({ timing, staleUnconfirmed, placeholder, align }) {
+function TimeStack({ timing, staleUnconfirmed, placeholder, align, label, fallback, eta }) {
   const textAlign = { textAlign: align === "right" ? "right" : "left" };
   const hasData = timing && (timing.scheduled || timing.expected || timing.actual);
+  if (!hasData && fallback) {
+    return (
+      <View style={styles.tlTimeCol}>
+        <Text style={[styles.tlTimeAct, textAlign]}>{fallback}</Text>
+        {!!label && <Text style={[styles.tlTimeLbl, textAlign]}>{label}</Text>}
+      </View>
+    );
+  }
   if (!hasData) {
     return (
       <View style={styles.tlTimeCol}>
@@ -3589,9 +3618,13 @@ function TimeStack({ timing, staleUnconfirmed, placeholder, align }) {
       {!hideActual && !!timing.actual && (
         <Text style={[styles.tlTimeAct, { color: actColor }, textAlign]}>{String(timing.actual).slice(0, 5)}</Text>
       )}
-      {!hideActual && !timing.actual && timing.expected && timing.expected !== timing.scheduled ? (
+      {!hideActual && !timing.actual && !!eta ? (
+        <Text style={[styles.tlTimeAct, { color: actColor }, textAlign]}>{eta}</Text>
+      ) : null}
+      {!hideActual && !timing.actual && !eta && timing.expected && timing.expected !== timing.scheduled ? (
         <Text style={[styles.tlTimeAct, { color: actColor }, textAlign]}>{String(timing.expected).slice(0, 5)}</Text>
       ) : null}
+      {!!label && <Text style={[styles.tlTimeLbl, textAlign]}>{label}</Text>}
     </View>
   );
 }
@@ -3639,16 +3672,20 @@ function TimelineStopRow({
   const isPassed = stop.status === "passed" || journeyLikelyComplete;
   const dotColor = isPassed ? colors.success : isCurrent ? colors.danger : colors.border;
   const metaBits = [];
-  if (stop.halt_minutes != null && stop.halt_minutes !== "") metaBits.push(`Halt: ${stop.halt_minutes} min`);
+  const T = stopTimes(stop);
+  if (T.halt != null) metaBits.push(`Halt: ${T.halt} min`);
   if (stop.distance_km != null) metaBits.push(`${stop.distance_km} km`);
   const effectiveDelay = stopEffectiveDelay(stop, staleUnconfirmed);
   // A status pill only means something once the stop has a real recorded
   // arrival/departure (passed or current) — an "upcoming" stop gets the
   // separate predicted-delay line below instead, never a confident pill.
   const showStatusPill = (isPassed || isCurrent) && effectiveDelay != null;
+  const [infoStep, setInfoStep] = useState(0);
+  const isHalt = stop.kind !== "intermediate" && !!stop.code;
+  const showEta = isHalt && !isPassed && !staleUnconfirmed;
   return (
     <View ref={rowRef} collapsable={false} style={styles.tlRow}>
-      <TimeStack timing={stop.arrival} staleUnconfirmed={staleUnconfirmed} placeholder={isFirst ? "Src" : null} />
+      <TimeStack timing={stop.arrival} staleUnconfirmed={staleUnconfirmed} placeholder={isFirst ? "Src" : null} eta={showEta ? T.eta : null} label={isHalt ? (showEta ? "ETA" : "Actual") : null} />
       <View style={styles.tlRail}>
         {/* BUGFIX ("after visiting every station it should be green"): the
             rail segment leading INTO an already-passed stop, and the one
@@ -3681,7 +3718,9 @@ function TimelineStopRow({
               <Ionicons name={alertArmed ? "notifications" : "notifications-outline"} size={16} color={alertArmed ? "#fff" : colors.primary} />
             </TouchableOpacity>
           ) : null}
+          {isHalt ? <InfoToggle step={infoStep} onPress={() => setInfoStep((v) => (v + 1) % 3)} /> : null}
         </View>
+        {isHalt ? <InfoPanel stop={stop} step={infoStep} fromStation={null} /> : null}
         {metaBits.length > 0 && <Text style={styles.tlMeta}>{metaBits.join(" | ")}</Text>}
         {showStatusPill && <DelayPill minutes={effectiveDelay} />}
         {isCurrent && calloutOpen && (
@@ -3706,7 +3745,7 @@ function TimelineStopRow({
             train has genuinely reached it). */}
         {!staleUnconfirmed && stop.status === "upcoming" && <PredictedDelayLine stop={stop} />}
       </View>
-      <TimeStack timing={stop.departure} staleUnconfirmed={staleUnconfirmed} placeholder={isLast && journeyLikelyComplete ? "Dest" : null} align="right" />
+      <TimeStack timing={stop.departure} staleUnconfirmed={staleUnconfirmed} placeholder={isLast && journeyLikelyComplete ? "Dest" : null} align="right" eta={showEta ? T.etd : null} label={isHalt ? (showEta ? "ETD" : "Actual") : null} />
     </View>
   );
 }
@@ -3773,6 +3812,7 @@ const styles = StyleSheet.create({
   tlColHeaderRight: { textAlign: "right" },
   tlTimeCol: { width: 56 },
   tlTimeExp: { fontSize: 11, color: colors.textMuted },
+  tlTimeLbl: { fontSize: 9.5, color: colors.textMuted, fontWeight: "700", marginTop: 1 },
   tlTimeAct: { fontSize: 13, fontWeight: "700", color: colors.text, marginTop: 1 },
   dayPillRow: { alignItems: "center", marginVertical: spacing.sm },
   dayPill: {
@@ -4179,6 +4219,7 @@ const styles = StyleSheet.create({
   pxTileSub: { color: "rgba(255,255,255,0.8)", fontSize: 11, fontWeight: "600", marginTop: 2 },
   tlGpsBadge: { borderColor: colors.accent, backgroundColor: "#FFF4E5" },
   nhInfoBtn: { padding: 2 },
+  nhInfoBtnOn: { backgroundColor: "#EAF0FB", borderRadius: 10 },
   nhInfoBox: { backgroundColor: "#EAF0FB", borderRadius: 8, padding: 8, marginTop: 4, maxWidth: 220 },
   nhInfoDetail: { backgroundColor: "#FFF4E5" },
   nhInfoTitle: { fontSize: 12, fontWeight: "800", color: colors.text, marginBottom: 2 },

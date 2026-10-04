@@ -1,6 +1,12 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.2.2] - 2026-10-04
+### Changed
+- **Live Tracking Journey:** each row shows scheduled arrival + ETA on the left and scheduled departure + ETD on the right, plus the halt time. ETD is now ETA + halt, so it can no longer fall before the ETA.
+- **Running status timeline:** every reporting station shows its halt time, ETA (left), ETD (right) and an ⓘ button (why delayed, then details).
+- Rebuilt `mobile_web/`.
+
 ## [1.2.1] - 2026-10-04
 ### Added
 - **Live Tracking:** ETA / ETD beside the alarm and ride icons on Journey rows; halt time and predicted arrival/departure in the "+N No-Halt stations" list, with an ⓘ button (why delayed, then details).
