@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { ScrollView, View, StyleSheet, TouchableOpacity } from "react-native";
 import { Text } from "../i18n/Localized";
+import TrainNumberField from "../components/TrainNumberField";
+import { openIrctc } from "../utils/irctc";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import SectionCard from "../components/SectionCard";
@@ -57,6 +59,8 @@ export default function SeatAvailabilityScreen() {
   const [checkedAt, setCheckedAt] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [pickedName, setPickedName] = useState("");
+  const [bookNote, setBookNote] = useState(null);
 
   async function check() {
     const tn = trainNumber.trim();
@@ -71,6 +75,7 @@ export default function SeatAvailabilityScreen() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setBookNote(null);
     try {
       const data = await checkSeatAvailability(apiBaseUrl, {
         trainNumber: tn, source: source.trim(), dest: dest.trim(),
@@ -92,10 +97,23 @@ export default function SeatAvailabilityScreen() {
   const statusIsPositive = result?.status_text && /AVBL|AVAILABLE|RAC/i.test(result.status_text);
   const statusIsWaitlist = result?.status_text && /WL|WAITLIST/i.test(result.status_text);
 
+  // Book Now is only enabled when seats are available (AVBL/RAC) or there's a waitlist.
+  const canBook = !!(statusIsPositive || statusIsWaitlist);
+  async function bookNow() {
+    await openIrctc({
+      trainNumber: result.train_number, trainName: pickedName, source: source.trim(), dest: dest.trim(),
+      date: result.date, travelClass: result.travel_class, quota: result.quota,
+    });
+    setBookNote("Trip details copied — paste them into IRCTC's search.");
+  }
+
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
       <SectionCard title="Seat Availability" subtitle="Real-time berth availability for a specific train, route, date and class.">
-        <LabeledInput label="Train Number" placeholder="e.g. 12201" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" maxLength={5} />
+        <TrainNumberField
+          label="Train Number" placeholder="Type a number, e.g. 1, 17, 12201" value={trainNumber} onChangeText={setTrainNumber} apiBaseUrl={apiBaseUrl}
+          onSelectTrain={(m) => { setPickedName(m.name || ""); if (!source.trim() && m.from) setSource(m.from); if (!dest.trim() && m.to) setDest(m.to); }}
+        />
         <View style={styles.row}>
           <LabeledInput label="From" placeholder="e.g. LTT or Mumbai" value={source} onChangeText={setSource} style={styles.half} />
           <LabeledInput label="To" placeholder="e.g. KCVL or Kochuveli" value={dest} onChangeText={setDest} style={styles.half} />
@@ -154,6 +172,12 @@ export default function SeatAvailabilityScreen() {
             </View>
           ) : null}
 
+          <TouchableOpacity onPress={bookNow} disabled={!canBook} activeOpacity={0.8} style={[styles.bookNow, !canBook && styles.bookNowOff]}>
+            <Ionicons name="ticket-outline" size={16} color="#fff" />
+            <Text style={styles.bookNowText}>{canBook ? "Book Now on IRCTC" : "Booking unavailable for this status"}</Text>
+          </TouchableOpacity>
+          {bookNote ? <Text style={styles.freshness}>{bookNote}</Text> : null}
+
           {checkedAt ? (
             <Text style={styles.freshness}>Checked at {checkedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</Text>
           ) : null}
@@ -194,5 +218,8 @@ const styles = StyleSheet.create({
   predictionBox: { marginTop: spacing.md },
   predictionTitle: { fontSize: 11, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", marginBottom: 4 },
   predictionText: { fontSize: 13, color: colors.text, marginTop: 2 },
+  bookNow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.orange || "#E4570F", borderRadius: radius.md, paddingVertical: 12, marginTop: spacing.md },
+  bookNowOff: { backgroundColor: "#B8C0CC" },
+  bookNowText: { color: "#fff", fontSize: 14, fontWeight: "800" },
   freshness: { fontSize: 10, color: colors.textMuted, textAlign: "right", marginTop: spacing.sm },
 });

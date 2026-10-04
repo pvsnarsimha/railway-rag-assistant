@@ -1,6 +1,12 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.2.3] - 2026-10-04
+### Changed
+- **Seat Availability:** the train number box now has the same suggestion dropdown as Live Tracking (and fills From/To when empty). The result card has a "Book Now on IRCTC" button, enabled only when seats are available/RAC or waitlisted.
+- **Booking hand-off:** "Book Now" and "Book on IRCTC" (Search Trains) open the IRCTC app directly on Android (falling back to the website), and the site on web/iOS. The trip summary is copied to the clipboard first, since IRCTC can't be prefilled from a link. The old pop-up that never showed on web is gone.
+- Rebuilt `mobile_web/`.
+
 ## [1.2.2] - 2026-10-04
 ### Changed
 - **Live Tracking Journey:** each row shows scheduled arrival + ETA on the left and scheduled departure + ETD on the right, plus the halt time. ETD is now ETA + halt, so it can no longer fall before the ETA.
