@@ -1,6 +1,15 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.3.1] - 2026-10-04
+### Changed
+- **Seat Availability:** after a train number is entered, the From and To boxes list that train's reporting (halting) stations as soon as they are tapped, and filter while typing; other stations can still be searched. The date is picked from a calendar instead of typed.
+
+## [1.3.0] - 2026-10-04
+### Added
+- **Native Android build ready:** default API address now points at the deployed backend (`wss://` for the live socket), the Google Maps key is injected from the `GOOGLE_MAPS_API_KEY` build environment variable via `mobile-app/app.config.js` (no key in the repo), and the README documents `eas build -p android --profile preview`.
+- **Book on IRCTC (native app):** launches the installed IRCTC Rail Connect app by package name (`expo-intent-launcher`), with its Play Store page as the fallback when it isn't installed. The web version is unchanged.
+
 ## [1.2.5] - 2026-10-04
 ### Fixed
 - **Book on IRCTC:** phone detection now also works when Chrome is in "Desktop site" mode, so Android phones always launch the Rail Connect app. On a computer (where an Android app can't open) it now asks before opening the IRCTC website instead of silently opening it.

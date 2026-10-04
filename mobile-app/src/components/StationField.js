@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, TouchableOpacity, ActivityIndicator, StyleSheet, Platform } from "react-native";
+import { View, TouchableOpacity, ActivityIndicator, StyleSheet, Platform, ScrollView } from "react-native";
 import { Text, TextInput } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
@@ -31,6 +31,7 @@ export default function StationField({
   apiBaseUrl,
   style,
   icon = "location-outline",
+  defaultOptions,
 }) {
   const [focused, setFocused] = useState(false);
   const [matches, setMatches] = useState([]);
@@ -42,6 +43,17 @@ export default function StationField({
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const query = (value || "").trim();
+    // A known list (e.g. the reporting stations of the chosen train) is shown
+    // as soon as the box is focused and filtered locally while typing.
+    if (defaultOptions && defaultOptions.length) {
+      const q = query.toLowerCase();
+      const local = !q ? defaultOptions : defaultOptions.filter((o) => String(o.code).toLowerCase().includes(q) || String(o.name).toLowerCase().includes(q));
+      if (!q || local.length) {
+        setMatches(focused ? local : []);
+        setLoading(false);
+        return;
+      }
+    }
     if (!focused || query.length < MIN_QUERY_LEN) {
       setMatches([]);
       setLoading(false);
@@ -67,7 +79,7 @@ export default function StationField({
     }, DEBOUNCE_MS);
     return () => clearTimeout(debounceRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, focused, apiBaseUrl]);
+  }, [value, focused, apiBaseUrl, defaultOptions]);
 
   useEffect(() => () => clearTimeout(blurTimeoutRef.current), []);
 
@@ -89,7 +101,7 @@ export default function StationField({
     onSelectStation(match);
   }
 
-  const showDropdown = focused && (loading || matches.length > 0 || (value || "").trim().length >= MIN_QUERY_LEN);
+  const showDropdown = focused && ((defaultOptions && defaultOptions.length > 0 && !(value || "").trim()) || loading || matches.length > 0 || (value || "").trim().length >= MIN_QUERY_LEN);
 
   return (
     <View style={[styles.wrap, style]}>
@@ -132,7 +144,8 @@ export default function StationField({
               <Text style={styles.dropdownMuted}>Searching stations…</Text>
             </View>
           ) : matches.length > 0 ? (
-            matches.map((m) => (
+            <ScrollView style={styles.dropdownScroll} nestedScrollEnabled keyboardShouldPersistTaps="handled">
+            {matches.map((m) => (
               // On web the input's blur fires on mouse-down and the 150ms
               // blur timer unmounts this list before the click's mouse-up
               // can fire onPress — so the tap was lost. Select on press-in
@@ -146,7 +159,8 @@ export default function StationField({
                 <Text numberOfLines={1} style={styles.dropdownName}>{m.name}</Text>
                 <Text style={styles.dropdownCode}>{m.code}</Text>
               </TouchableOpacity>
-            ))
+            ))}
+            </ScrollView>
           ) : (
             <View style={styles.dropdownRow}>
               <Text style={styles.dropdownMuted}>No matching stations</Text>
@@ -210,6 +224,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
     elevation: 3,
   },
+  dropdownScroll: { maxHeight: 280 },
   dropdownRow: {
     flexDirection: "row",
     alignItems: "center",

@@ -18,11 +18,13 @@ export function buildBookingSummary({ trainNumber, trainName, source, dest, date
   ].filter(Boolean).join(" · ");
 }
 
-// Launches the installed IRCTC Rail Connect app itself (a plain app launch —
-// the app doesn't have to handle irctc.co.in links). If it isn't installed,
-// falls back to its Play Store page rather than the desktop website.
+// Web only: Chrome blocks web pages from plain-launching apps (they just fall
+// through to the fallback URL — the Play Store). So the web build targets the
+// Rail Connect package with IRCTC's own https link as a browsable VIEW intent:
+// if the installed app handles that link it opens directly, else the Play
+// Store listing. The native app (below) launches the app by package name.
 const PLAY_STORE_URL = `https://play.google.com/store/apps/details?id=${IRCTC_ANDROID_PACKAGE}`;
-const ANDROID_INTENT = `intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=${IRCTC_ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(PLAY_STORE_URL)};end`;
+const ANDROID_INTENT = `intent://www.irctc.co.in/nget/train-search#Intent;scheme=https;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;package=${IRCTC_ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(PLAY_STORE_URL)};end`;
 
 /** Copies the trip summary, then opens the IRCTC app (or its site if the app isn't installed). Returns the summary. */
 export async function openIrctc(details) {
@@ -48,7 +50,21 @@ export async function openIrctc(details) {
   }
   try { await Clipboard.setStringAsync(summary); } catch (e) { /* hand-off still proceeds */ }
   if (Platform.OS === "android") {
-    try { await Linking.openURL(ANDROID_INTENT); return summary; } catch (e) { /* fall through */ }
+    // Installed Android app: start Rail Connect's launcher activity by package
+    // name. (Only a native app can do this; Chrome blocks it for web pages.)
+    try {
+      const IntentLauncher = require("expo-intent-launcher");
+      await IntentLauncher.startActivityAsync("android.intent.action.MAIN", {
+        category: "android.intent.category.LAUNCHER",
+        packageName: IRCTC_ANDROID_PACKAGE,
+        flags: 0x10000000, // FLAG_ACTIVITY_NEW_TASK
+      });
+      return summary;
+    } catch (e) {
+      // Not installed (ActivityNotFound): send the user to its Play Store page.
+      try { await Linking.openURL(`market://details?id=${IRCTC_ANDROID_PACKAGE}`); return summary; } catch (e2) { /* fall through */ }
+      try { await Linking.openURL(PLAY_STORE_URL); return summary; } catch (e3) { /* fall through */ }
+    }
   }
   try { await Linking.openURL(IRCTC_BOOKING_URL); } catch (e) { /* nothing more to try */ }
   return summary;

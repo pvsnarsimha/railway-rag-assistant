@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ScrollView, View, StyleSheet, TouchableOpacity } from "react-native";
 import { Text } from "../i18n/Localized";
 import TrainNumberField from "../components/TrainNumberField";
@@ -10,7 +10,9 @@ import LabeledInput from "../components/LabeledInput";
 import PrimaryButton from "../components/PrimaryButton";
 import ChipRow from "../components/ChipRow";
 import { useSettings } from "../context/SettingsContext";
-import { checkSeatAvailability } from "../api/railwayApi";
+import { checkSeatAvailability, getTrainSchedule } from "../api/railwayApi";
+import StationField from "../components/StationField";
+import MonthCalendarModal from "../components/MonthCalendarModal";
 import { describeApiError } from "../api/client";
 
 const CLASS_OPTIONS = ["1A", "2A", "3A", "3E", "CC", "EC", "SL", "2S"];
@@ -60,6 +62,34 @@ export default function SeatAvailabilityScreen() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pickedName, setPickedName] = useState("");
+  const [routeStops, setRouteStops] = useState([]);
+  const [fromName, setFromName] = useState("");
+  const [toName, setToName] = useState("");
+  const [calendarVisible, setCalendarVisible] = useState(false);
+
+  // As soon as a full train number is entered, load its stations so the
+  // From / To boxes can list that train's reporting (halting) stops.
+  useEffect(() => {
+    const tn = trainNumber.trim();
+    if (!/^\d{5}$/.test(tn)) { setRouteStops([]); return undefined; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await getTrainSchedule(apiBaseUrl, tn);
+        if (cancelled) return;
+        const all = (data.stations || []).filter((st) => st.code && st.code !== "?");
+        // Reporting stops = where the train actually halts (plus origin and terminus).
+        const halts = all.filter((st, i) => i === 0 || i === all.length - 1 || Number(st.halt_minutes) > 0
+          || (st.scheduled_arrival && st.scheduled_departure && st.scheduled_arrival !== st.scheduled_departure));
+        const list = (halts.length >= 2 ? halts : all).map((st) => ({ code: st.code, name: st.name || st.code }));
+        setRouteStops(list);
+        if (data.train_name) setPickedName(data.train_name);
+      } catch (e) {
+        if (!cancelled) setRouteStops([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [trainNumber, apiBaseUrl]);
   const [bookNote, setBookNote] = useState(null);
 
   async function check() {
@@ -112,13 +142,25 @@ export default function SeatAvailabilityScreen() {
       <SectionCard title="Seat Availability" subtitle="Real-time berth availability for a specific train, route, date and class.">
         <TrainNumberField
           label="Train Number" placeholder="Type a number, e.g. 1, 17, 12201" value={trainNumber} onChangeText={setTrainNumber} apiBaseUrl={apiBaseUrl}
-          onSelectTrain={(m) => { setPickedName(m.name || ""); if (!source.trim() && m.from) setSource(m.from); if (!dest.trim() && m.to) setDest(m.to); }}
+          onSelectTrain={(m) => { setPickedName(m.name || ""); setSource(""); setDest(""); setFromName(""); setToName(""); }}
         />
-        <View style={styles.row}>
-          <LabeledInput label="From" placeholder="e.g. LTT or Mumbai" value={source} onChangeText={setSource} style={styles.half} />
-          <LabeledInput label="To" placeholder="e.g. KCVL or Kochuveli" value={dest} onChangeText={setDest} style={styles.half} />
-        </View>
-        <LabeledInput label="Date (dd-mm-yyyy)" placeholder="15-09-2026" value={date} onChangeText={setDate} autoCapitalize="none" />
+        <StationField
+          label="From" placeholder="Pick or type a station" value={source} resolvedName={fromName}
+          onChangeText={(v) => { setSource(v); setFromName(""); }}
+          onSelectStation={(m) => { setSource(m.code); setFromName(m.name); }}
+          apiBaseUrl={apiBaseUrl} defaultOptions={routeStops}
+        />
+        <StationField
+          label="To" placeholder="Pick or type a station" value={dest} resolvedName={toName} icon="location"
+          onChangeText={(v) => { setDest(v); setToName(""); }}
+          onSelectStation={(m) => { setDest(m.code); setToName(m.name); }}
+          apiBaseUrl={apiBaseUrl} defaultOptions={routeStops}
+        />
+        <Text style={styles.chipLabel}>Date</Text>
+        <TouchableOpacity onPress={() => setCalendarVisible(true)} activeOpacity={0.8} style={styles.dateBtn}>
+          <Ionicons name="calendar-outline" size={18} color={colors.primary} />
+          <Text style={[styles.dateBtnText, !date && { color: colors.textMuted }]}>{date || "Select travel date"}</Text>
+        </TouchableOpacity>
         <Text style={styles.chipLabel}>Class</Text>
         <ChipRow options={CLASS_OPTIONS} value={travelClass} onSelect={setTravelClass} getKey={(c) => c} getLabel={(c) => c} />
         <Text style={styles.chipLabel}>Quota</Text>
@@ -183,6 +225,7 @@ export default function SeatAvailabilityScreen() {
           ) : null}
         </View>
       ) : null}
+      <MonthCalendarModal visible={calendarVisible} selected={date} onSelect={(d) => { setDate(d); setCalendarVisible(false); }} onClose={() => setCalendarVisible(false)} />
     </ScrollView>
   );
 }
@@ -194,6 +237,8 @@ const styles = StyleSheet.create({
   half: { flex: 1 },
   error: { color: colors.danger, fontSize: 12, marginTop: spacing.sm },
   note: { color: colors.textMuted, fontSize: 12 },
+  dateBtn: { flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm + 4, backgroundColor: colors.bg, marginBottom: spacing.sm },
+  dateBtnText: { fontSize: 15, fontWeight: "600", color: colors.text },
   chipLabel: { fontSize: 11, fontWeight: "700", color: colors.textMuted, marginTop: spacing.sm, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.3 },
   resultCard: {
     backgroundColor: colors.card, borderRadius: radius.lg, padding: spacing.lg,

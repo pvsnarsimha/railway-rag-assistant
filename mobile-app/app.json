@@ -9,7 +9,9 @@
     "splash": {
       "backgroundColor": "#0B3D91"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "experiments": {
       "baseUrl": "/mobile-app"
     },
@@ -23,17 +25,21 @@
       }
     },
     "android": {
-         "package": "com.railwayrag.mobile",
-   "googleServicesFile": "./google-services.json",
+      "package": "com.railwayrag.mobile",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#0B3D91"
       },
-      "permissions": ["CAMERA", "READ_EXTERNAL_STORAGE", "POST_NOTIFICATIONS", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "SCHEDULE_EXACT_ALARM", "USE_EXACT_ALARM", "RECEIVE_BOOT_COMPLETED"],
-      "config": {
-        "googleMaps": {
-          "apiKey": "YOUR_ANDROID_GOOGLE_MAPS_API_KEY"
-        }
-      }
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "POST_NOTIFICATIONS",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "SCHEDULE_EXACT_ALARM",
+        "USE_EXACT_ALARM",
+        "RECEIVE_BOOT_COMPLETED"
+      ]
     },
     "plugins": [
       [
@@ -57,8 +63,8 @@
       ]
     ],
     "extra": {
-      "defaultApiBaseUrl": "http://localhost:8000",
-      "defaultWsBaseUrl": "ws://localhost:8000",
+      "defaultApiBaseUrl": "https://railway-rag-backend-h2d4.onrender.com",
+      "defaultWsBaseUrl": "wss://railway-rag-backend-h2d4.onrender.com",
       "eas": {
         "projectId": "e2324d97-ebfd-42b8-9798-5ae330fae615"
       }
