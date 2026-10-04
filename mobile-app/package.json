@@ -20,6 +20,7 @@
     "expo-clipboard": "~8.0.0",
     "expo-constants": "~18.0.0",
     "expo-image-picker": "~17.0.0",
+    "expo-intent-launcher": "~13.0.8",
     "expo-location": "~18.0.0",
     "expo-notifications": "~0.32.17",
     "expo-speech": "~14.0.8",

@@ -48,7 +48,21 @@ export async function openIrctc(details) {
   }
   try { await Clipboard.setStringAsync(summary); } catch (e) { /* hand-off still proceeds */ }
   if (Platform.OS === "android") {
-    try { await Linking.openURL(ANDROID_INTENT); return summary; } catch (e) { /* fall through */ }
+    // Installed Android app: start Rail Connect's launcher activity by package
+    // name. (Only a native app can do this; Chrome blocks it for web pages.)
+    try {
+      const IntentLauncher = require("expo-intent-launcher");
+      await IntentLauncher.startActivityAsync("android.intent.action.MAIN", {
+        category: "android.intent.category.LAUNCHER",
+        packageName: IRCTC_ANDROID_PACKAGE,
+        flags: 0x10000000, // FLAG_ACTIVITY_NEW_TASK
+      });
+      return summary;
+    } catch (e) {
+      // Not installed (ActivityNotFound): send the user to its Play Store page.
+      try { await Linking.openURL(`market://details?id=${IRCTC_ANDROID_PACKAGE}`); return summary; } catch (e2) { /* fall through */ }
+      try { await Linking.openURL(PLAY_STORE_URL); return summary; } catch (e3) { /* fall through */ }
+    }
   }
   try { await Linking.openURL(IRCTC_BOOKING_URL); } catch (e) { /* nothing more to try */ }
   return summary;

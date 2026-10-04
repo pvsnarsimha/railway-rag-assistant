@@ -168,3 +168,20 @@ npx eas-cli build -p android --profile preview   # installable .apk
 ```
 
 Then set the backend URL in the app's Settings tab.
+
+
+## Building the native Android app
+
+```bash
+cd mobile-app
+npm install
+npm install -g eas-cli && eas login
+# Google Maps key (Android) — never commit it:
+eas secret:create --scope project --name GOOGLE_MAPS_API_KEY --value <your key>
+eas build -p android --profile preview      # installable .apk
+```
+
+The app talks to the deployed backend by default (`extra.defaultApiBaseUrl` in
+`app.json`); change it in the app's Settings screen for a local server.
+"Book on IRCTC" opens the installed IRCTC Rail Connect app by package name
+(`cris.org.in.prs.ima`) and falls back to its Play Store page.
