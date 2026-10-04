@@ -27,6 +27,9 @@ export function minusMinutes(hhmm, mins) {
   if (t < 0) t += 1440;
   return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
 }
+export function stopEtdClock(s) {
+  return clock(s?.predicted_etd) || clock(s?.departure?.expected) || clock(s?.departure?.scheduled) || stopEtaClock(s);
+}
 const delayOf = (s) => {
   const d = s?.arrival?.delay_minutes ?? s?.departure?.delay_minutes;
   return d == null || Number.isNaN(Number(d)) ? null : Number(d);
@@ -78,6 +81,12 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmCode,
           <Text style={styles.sub}>{`${stop.code}${stop.distance_km != null ? ` · ${stop.distance_km} km` : ""}`}</Text>
         </View>
         {d != null && d !== 0 ? <Text style={[styles.delay, d > 0 ? styles.late : styles.early]}>{d > 0 ? `+${d}` : d}</Text> : null}
+        {actions ? (
+          <View style={styles.etaBox}>
+            <Text style={styles.etaLine}>{`ETA ${stopEtaClock(stop) || "—"}`}</Text>
+            <Text style={styles.etaLine}>{`ETD ${stopEtdClock(stop) || "—"}`}</Text>
+          </View>
+        ) : null}
         {actions ? (
           <View style={styles.rowActions}>
             <TouchableOpacity onPress={() => onAlarm(stop)} style={[styles.mini, isAlarm && styles.miniOn]} hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }} accessibilityLabel={`Set alarm for ${stop.name || stop.code}`}>
@@ -143,6 +152,10 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmCode,
         </View>
         {!complete ? (
           <View style={styles.chipRow}>
+            <View style={styles.etaBox}>
+              <Text style={styles.etaLine}>{`ETA ${stopEtaClock(dest) || "—"}`}</Text>
+              <Text style={styles.etaLine}>{`ETD ${stopEtdClock(dest) || "—"}`}</Text>
+            </View>
             <TouchableOpacity onPress={() => onAlarm(dest)} style={[styles.chip, destAlarmOn && styles.chipOn]} activeOpacity={0.8}>
               <Ionicons name="alarm" size={14} color={destAlarmOn ? "#fff" : "#B45309"} />
               <Text style={[styles.chipText, destAlarmOn && { color: "#fff" }]}>{destAlarmOn && alarmTime ? `Alarm ${alarmTime}` : "Set alarm"}</Text>
@@ -195,6 +208,8 @@ const styles = StyleSheet.create({
   chip: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#fff", borderWidth: 1, borderColor: "#F2B968", borderRadius: 16, paddingHorizontal: 12, paddingVertical: 7 },
   chipOn: { backgroundColor: "#2E7D32", borderColor: "#2E7D32" },
   chipText: { fontSize: 12.5, fontWeight: "800", color: "#B45309" },
+  etaBox: { marginLeft: 6, alignItems: "flex-start", justifyContent: "center" },
+  etaLine: { fontSize: 10.5, fontWeight: "700", color: colors.textMuted, lineHeight: 14 },
   rowActions: { flexDirection: "row", gap: 6, marginLeft: 8 },
   mini: { width: 32, height: 32, borderRadius: 16, backgroundColor: "#EAF0FB", alignItems: "center", justifyContent: "center" },
   miniOn: { backgroundColor: "#2E7D32" },

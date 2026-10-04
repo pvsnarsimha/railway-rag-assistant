@@ -3317,6 +3317,62 @@ function IntermediateEtaLine({ stop }) {
   );
 }
 
+// Plain-language "why is this running late" built ONLY from the real
+// signals the backend attached to the stop — never an invented cause.
+function delayReasonLines(stop, fromStation) {
+  const d = stop.predicted_delay_minutes;
+  const lines = [];
+  if (d == null) return ["No live prediction is available for this point yet."];
+  lines.push(d > 0
+    ? `The train is expected to reach here about ${d} min behind schedule.`
+    : "The train is expected to reach here on time.");
+  if (stop.predicted_eta_source === "gps") lines.push("Based on the train's live GPS position and speed.");
+  else lines.push(`Based on the delay carried forward from ${fromStation || "the last reporting station"} and the remaining distance.`);
+  if (stop.predicted_delay_historical_basis) lines.push(`History: ${stop.predicted_delay_historical_basis}`);
+  if (stop.provider_disagreement_minutes != null && stop.provider_disagreement_minutes > 2) {
+    lines.push(`Data providers differ by ~${stop.provider_disagreement_minutes} min, so this may shift.`);
+  }
+  if (d > 0) lines.push("The live feed does not state an official cause (traffic, signals, track work) — only the running delay.");
+  return lines;
+}
+
+// ⓘ button: 1st tap → why the train is delayed, 2nd tap → full info box
+// (halt, scheduled/predicted arrival & departure, confidence), 3rd closes.
+function DelayInfoButton({ stop, fromStation }) {
+  const [step, setStep] = useState(0);
+  const arr = stop.predicted_eta || null;
+  const d = stop.predicted_delay_minutes;
+  return (
+    <View>
+      <TouchableOpacity
+        onPress={() => setStep((v) => (v + 1) % 3)}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        style={styles.nhInfoBtn}
+        accessibilityLabel="Why is this train delayed"
+      >
+        <Ionicons name="information-circle-outline" size={16} color={colors.primary} />
+      </TouchableOpacity>
+      {step >= 1 && (
+        <View style={styles.nhInfoBox}>
+          {delayReasonLines(stop, fromStation).map((l, i) => <Text key={i} style={styles.nhInfoText}>{l}</Text>)}
+          {step === 1 && <Text style={styles.nhInfoHint}>Tap ⓘ again for details</Text>}
+        </View>
+      )}
+      {step === 2 && (
+        <View style={[styles.nhInfoBox, styles.nhInfoDetail]}>
+          <Text style={styles.nhInfoTitle}>{`${toDisplayCase(stop.name)} (${stop.code})`}</Text>
+          <Text style={styles.nhInfoText}>{"Halt: 0 min (non-stop, train passes through)"}</Text>
+          <Text style={styles.nhInfoText}>{`Predicted arrival: ${arr || "—"}`}</Text>
+          <Text style={styles.nhInfoText}>{`Predicted departure: ${arr || "—"}`}</Text>
+          <Text style={styles.nhInfoText}>{`Delay: ${d == null ? "—" : d > 0 ? `${d} min` : "On time"}${stop.predicted_delay_confidence ? ` · confidence ${stop.predicted_delay_confidence}` : ""}`}</Text>
+          {stop.distance_ahead_km != null && <Text style={styles.nhInfoText}>{`Distance ahead: ${stop.distance_ahead_km} km`}</Text>}
+          <Text style={styles.nhInfoHint}>Tap ⓘ again to close</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
 function PredictedDelayLine({ stop }) {
   const { t, tf } = useT();
   const delayText = useDelayText();
@@ -3484,7 +3540,12 @@ function NoHaltGroupRow({
                   gpsMode={gpsMode}
                 />
               )}
+              {!passed && <Text style={styles.tlMeta}>Halt: 0 min (non-stop)</Text>}
               {!current && !passed && <IntermediateEtaLine stop={s} />}
+              {!current && !passed && s.predicted_eta ? (
+                <Text style={styles.tlPredictedMuted}>{`Pred. Arr ${s.predicted_eta} · Dep ${s.predicted_eta}`}</Text>
+              ) : null}
+              {!passed ? <DelayInfoButton stop={s} fromStation={group.from_station} /> : null}
             </View>
             <View style={styles.tlTimeCol} />
           </View>
@@ -4117,6 +4178,12 @@ const styles = StyleSheet.create({
   recentGo: { color: colors.primary, fontWeight: "800", fontSize: 12.5 },
   pxTileSub: { color: "rgba(255,255,255,0.8)", fontSize: 11, fontWeight: "600", marginTop: 2 },
   tlGpsBadge: { borderColor: colors.accent, backgroundColor: "#FFF4E5" },
+  nhInfoBtn: { padding: 2 },
+  nhInfoBox: { backgroundColor: "#EAF0FB", borderRadius: 8, padding: 8, marginTop: 4, maxWidth: 220 },
+  nhInfoDetail: { backgroundColor: "#FFF4E5" },
+  nhInfoTitle: { fontSize: 12, fontWeight: "800", color: colors.text, marginBottom: 2 },
+  nhInfoText: { fontSize: 11, color: colors.text, marginTop: 1 },
+  nhInfoHint: { fontSize: 10, color: colors.textMuted, marginTop: 3, fontStyle: "italic" },
   tlPredictedMuted: { fontSize: 10.5, color: colors.textMuted, marginTop: 2 },
   askBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center", padding: 24 },
   askCard: { width: "100%", maxWidth: 340, backgroundColor: "#fff", borderRadius: 14, padding: 20, alignItems: "center" },
