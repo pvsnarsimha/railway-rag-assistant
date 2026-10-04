@@ -18,11 +18,13 @@ export function buildBookingSummary({ trainNumber, trainName, source, dest, date
   ].filter(Boolean).join(" · ");
 }
 
-// Launches the installed IRCTC Rail Connect app itself (a plain app launch —
-// the app doesn't have to handle irctc.co.in links). If it isn't installed,
-// falls back to its Play Store page rather than the desktop website.
+// Web only: Chrome blocks web pages from plain-launching apps (they just fall
+// through to the fallback URL — the Play Store). So the web build targets the
+// Rail Connect package with IRCTC's own https link as a browsable VIEW intent:
+// if the installed app handles that link it opens directly, else the Play
+// Store listing. The native app (below) launches the app by package name.
 const PLAY_STORE_URL = `https://play.google.com/store/apps/details?id=${IRCTC_ANDROID_PACKAGE}`;
-const ANDROID_INTENT = `intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=${IRCTC_ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(PLAY_STORE_URL)};end`;
+const ANDROID_INTENT = `intent://www.irctc.co.in/nget/train-search#Intent;scheme=https;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;package=${IRCTC_ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(PLAY_STORE_URL)};end`;
 
 /** Copies the trip summary, then opens the IRCTC app (or its site if the app isn't installed). Returns the summary. */
 export async function openIrctc(details) {
