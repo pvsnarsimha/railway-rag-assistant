@@ -1,6 +1,11 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.2.1] - 2026-10-04
+### Added
+- **Live Tracking:** ETA / ETD beside the alarm and ride icons on Journey rows; halt time and predicted arrival/departure in the "+N No-Halt stations" list, with an ⓘ button (why delayed, then details).
+- Rebuilt `mobile_web/` with these changes.
+
 ## [1.2.0] - 2026-10-01
 ### Changed
 - **Live Tracking redesign:** blue hero header (train number and name, route ends with times, journey progress bar with km covered/left), a "Right now" card (position, delay chip, speed / next-halt ETA / halts-to-go tiles, source and Report inaccuracy) and a "Journey timeline" heading with "Jump to train".
