@@ -3,7 +3,7 @@ Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](htt
 
 ## [1.2.4] - 2026-10-04
 ### Fixed
-- **Book on IRCTC / Book Now** now opens the installed IRCTC app when used from a phone browser: on Android Chrome it uses an app intent (website fallback if the app isn't installed); on iOS it uses the IRCTC link. Previously the web build only opened a new browser tab.
+- **Book on IRCTC / Book Now** now launches the installed IRCTC Rail Connect app on Android (a plain app launch, with the Play Store page as fallback if it isn't installed — never the desktop site); on iOS it uses the IRCTC link. Previously the web build only opened a new browser tab.
 
 ## [1.2.3] - 2026-10-04
 ### Changed

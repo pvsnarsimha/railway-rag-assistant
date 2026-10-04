@@ -18,7 +18,11 @@ export function buildBookingSummary({ trainNumber, trainName, source, dest, date
   ].filter(Boolean).join(" · ");
 }
 
-const ANDROID_INTENT = `intent://www.irctc.co.in/nget/train-search#Intent;scheme=https;package=${IRCTC_ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(IRCTC_BOOKING_URL)};end`;
+// Launches the installed IRCTC Rail Connect app itself (a plain app launch —
+// the app doesn't have to handle irctc.co.in links). If it isn't installed,
+// falls back to its Play Store page rather than the desktop website.
+const PLAY_STORE_URL = `https://play.google.com/store/apps/details?id=${IRCTC_ANDROID_PACKAGE}`;
+const ANDROID_INTENT = `intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=${IRCTC_ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(PLAY_STORE_URL)};end`;
 
 /** Copies the trip summary, then opens the IRCTC app (or its site if the app isn't installed). Returns the summary. */
 export async function openIrctc(details) {
