@@ -15,51 +15,15 @@ import ClassAvailabilityChip from "../components/ClassAvailabilityChip";
 import { useSettings } from "../context/SettingsContext";
 import { searchTrains } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
+import { openIrctc } from "../utils/irctc";
 import { fromDdMmYyyy, formatLongLabel, hhmmToMinutes, addDays, monthShort } from "../utils/dateFormat";
 
 const MIN_LIMIT = 1;
 const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
 
-// Real official IRCTC booking portal — this app shows real train info but
-// can't book tickets itself (no IRCTC booking API access), so booking is
-// always a genuine handoff to IRCTC's own site, never a fabricated deep
-// link with train/date params IRCTC doesn't officially support prefilling.
-const IRCTC_BOOKING_URL = "https://www.irctc.co.in/nget/train-search";
-
-// CROWD-POSITION FOLLOW-UP: since IRCTC's search page genuinely has no
-// supported URL params to prefill (see the comment above — this was
-// checked, not assumed), the honest next-best thing is a pre-booking
-// summary that's copied to the clipboard right before IRCTC opens, so
-// the user can paste the train/date/class straight into IRCTC's own
-// search box instead of retyping it from memory. This is still a real
-// hand-off, never a fabricated "seamless" in-app booking.
-function buildBookingSummary({ trainNumber, trainName, source, dest, date, travelClass, quota }) {
-  const parts = [
-    `Train ${trainNumber}${trainName ? ` (${trainName})` : ""}`,
-    source && dest ? `${source} → ${dest}` : null,
-    date ? `Date: ${date}` : null,
-    travelClass && travelClass !== "Any" ? `Class: ${travelClass}` : null,
-    quota ? `Quota: ${quota}` : null,
-  ].filter(Boolean);
-  return parts.join(" · ");
-}
-
-async function bookOnIrctc(details) {
-  const summary = buildBookingSummary(details);
-  try {
-    await Clipboard.setStringAsync(summary);
-    Alert.alert(
-      "Trip details copied",
-      `${summary}\n\nIRCTC doesn't support pre-filling its search from a link, so these details were copied to your clipboard — paste them into IRCTC's search after it opens.`,
-      [{ text: "Open IRCTC", onPress: () => Linking.openURL(IRCTC_BOOKING_URL) }, { text: "Cancel", style: "cancel" }],
-    );
-  } catch (e) {
-    // Clipboard failed for some reason — still let the hand-off through,
-    // just without the copy-assist.
-    Linking.openURL(IRCTC_BOOKING_URL);
-  }
-}
+// Booking is a real hand-off to the IRCTC app/site — see utils/irctc.js.
+const bookOnIrctc = openIrctc;
 
 // Full IRCTC-style names for the Class picker sheet — same codes the
 // backend's travel_class filter has always accepted (see app.py's
