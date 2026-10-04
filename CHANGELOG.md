@@ -1,6 +1,10 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.3.1] - 2026-10-04
+### Changed
+- **Seat Availability:** after a train number is entered, the From and To boxes list that train's reporting (halting) stations as soon as they are tapped, and filter while typing; other stations can still be searched. The date is picked from a calendar instead of typed.
+
 ## [1.3.0] - 2026-10-04
 ### Added
 - **Native Android build ready:** default API address now points at the deployed backend (`wss://` for the live socket), the Google Maps key is injected from the `GOOGLE_MAPS_API_KEY` build environment variable via `mobile-app/app.config.js` (no key in the repo), and the README documents `eas build -p android --profile preview`.
