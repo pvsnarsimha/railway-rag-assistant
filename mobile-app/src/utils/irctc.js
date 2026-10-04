@@ -31,13 +31,18 @@ export async function openIrctc(details) {
     // Browsers only allow navigation straight from the tap, so copy without
     // awaiting and navigate synchronously.
     try { navigator.clipboard?.writeText(summary).catch(() => {}); } catch (e) { /* ignore */ }
-    const ua = (navigator.userAgent || "");
-    if (/Android/i.test(ua)) {
-      // Chrome on Android: the intent opens the installed IRCTC app, else the website.
+    const ua = navigator.userAgent || "";
+    const touch = (navigator.maxTouchPoints || 0) > 1;
+    // Also catches Chrome's "Desktop site" mode, which hides "Android" from the UA.
+    const isAndroid = /Android/i.test(ua) || navigator.userAgentData?.platform === "Android" || (touch && /Linux/i.test(ua) && !/CrOS/i.test(ua));
+    const isIos = /iPhone|iPad|iPod/i.test(ua) || (touch && /Macintosh/i.test(ua));
+    if (isAndroid) {
+      // Launches the installed Rail Connect app (Play Store page if it isn't installed).
       window.location.href = ANDROID_INTENT;
-    } else {
-      // iOS / desktop: the https link opens the IRCTC app when it handles the link, else the site.
+    } else if (isIos) {
       window.location.href = IRCTC_BOOKING_URL;
+    } else if (window.confirm("IRCTC Rail Connect is a phone app, so it can't be opened from a computer.\n\nOpen the IRCTC website instead?")) {
+      window.open(IRCTC_BOOKING_URL, "_blank", "noopener");
     }
     return summary;
   }

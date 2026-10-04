@@ -1,6 +1,10 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.2.5] - 2026-10-04
+### Fixed
+- **Book on IRCTC:** phone detection now also works when Chrome is in "Desktop site" mode, so Android phones always launch the Rail Connect app. On a computer (where an Android app can't open) it now asks before opening the IRCTC website instead of silently opening it.
+
 ## [1.2.4] - 2026-10-04
 ### Fixed
 - **Book on IRCTC / Book Now** now launches the installed IRCTC Rail Connect app on Android (a plain app launch, with the Play Store page as fallback if it isn't installed — never the desktop site); on iOS it uses the IRCTC link. Previously the web build only opened a new browser tab.
