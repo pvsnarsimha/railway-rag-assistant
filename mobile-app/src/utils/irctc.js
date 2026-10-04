@@ -18,20 +18,29 @@ export function buildBookingSummary({ trainNumber, trainName, source, dest, date
   ].filter(Boolean).join(" · ");
 }
 
+const ANDROID_INTENT = `intent://www.irctc.co.in/nget/train-search#Intent;scheme=https;package=${IRCTC_ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(IRCTC_BOOKING_URL)};end`;
+
 /** Copies the trip summary, then opens the IRCTC app (or its site if the app isn't installed). Returns the summary. */
 export async function openIrctc(details) {
   const summary = buildBookingSummary(details || {});
-  try { await Clipboard.setStringAsync(summary); } catch (e) { /* hand-off still proceeds */ }
-  if (Platform.OS === "web") {
-    if (typeof window !== "undefined") window.open(IRCTC_BOOKING_URL, "_blank", "noopener");
+  if (Platform.OS === "web" && typeof window !== "undefined") {
+    // Browsers only allow navigation straight from the tap, so copy without
+    // awaiting and navigate synchronously.
+    try { navigator.clipboard?.writeText(summary).catch(() => {}); } catch (e) { /* ignore */ }
+    const ua = (navigator.userAgent || "");
+    if (/Android/i.test(ua)) {
+      // Chrome on Android: the intent opens the installed IRCTC app, else the website.
+      window.location.href = ANDROID_INTENT;
+    } else {
+      // iOS / desktop: the https link opens the IRCTC app when it handles the link, else the site.
+      window.location.href = IRCTC_BOOKING_URL;
+    }
     return summary;
   }
+  try { await Clipboard.setStringAsync(summary); } catch (e) { /* hand-off still proceeds */ }
   if (Platform.OS === "android") {
-    // Opens the IRCTC app directly; falls back to the website if it isn't installed.
-    const intent = `intent://www.irctc.co.in/nget/train-search#Intent;scheme=https;package=${IRCTC_ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(IRCTC_BOOKING_URL)};end`;
-    try { await Linking.openURL(intent); return summary; } catch (e) { /* fall through */ }
+    try { await Linking.openURL(ANDROID_INTENT); return summary; } catch (e) { /* fall through */ }
   }
-  // iOS: the https link opens the IRCTC app when it handles the link, else Safari.
   try { await Linking.openURL(IRCTC_BOOKING_URL); } catch (e) { /* nothing more to try */ }
   return summary;
 }

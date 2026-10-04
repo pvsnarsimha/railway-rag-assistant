@@ -1,6 +1,10 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.2.4] - 2026-10-04
+### Fixed
+- **Book on IRCTC / Book Now** now opens the installed IRCTC app when used from a phone browser: on Android Chrome it uses an app intent (website fallback if the app isn't installed); on iOS it uses the IRCTC link. Previously the web build only opened a new browser tab.
+
 ## [1.2.3] - 2026-10-04
 ### Changed
 - **Seat Availability:** the train number box now has the same suggestion dropdown as Live Tracking (and fills From/To when empty). The result card has a "Book Now on IRCTC" button, enabled only when seats are available/RAC or waitlisted.
