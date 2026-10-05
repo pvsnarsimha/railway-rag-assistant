@@ -44,14 +44,18 @@ export function stopTimes(s) {
   const schedArr = clock(s?.arrival?.scheduled);
   const schedDep = clock(s?.departure?.scheduled);
   const eta = clock(s?.arrival?.actual) || clock(s?.predicted_eta) || clock(s?.arrival?.expected) || schedArr;
-  let halt = s?.halt_minutes === "" ? null : s?.halt_minutes;
-  halt = halt == null || Number.isNaN(Number(halt)) ? null : Number(halt);
+  const hm = /(\d+(?:\.\d+)?)/.exec(String(s?.halt_minutes ?? ""));
+  let halt = hm ? Math.round(Number(hm[1])) : null;
   if (halt == null) {
     const a = toMin(schedArr), d = toMin(schedDep);
     if (a != null && d != null) halt = (d - a + 1440) % 1440;
   }
   const viaHalt = eta && halt != null ? plusMinutes(eta, halt) : null;
-  const etd = clock(s?.departure?.actual) || (s?.predicted_eta ? viaHalt : null) || clock(s?.departure?.expected) || viaHalt || schedDep || eta;
+  // ETD = ETA + halt for every stop the train hasn't left yet (e.g. ETA 19:00
+  // with a 5 min halt -> ETD 19:05); only a stop already passed keeps the real
+  // recorded departure.
+  const left = s?.status === "passed";
+  const etd = (left ? clock(s?.departure?.actual) : null) || viaHalt || clock(s?.departure?.actual) || clock(s?.departure?.expected) || schedDep || eta;
   return { schedArr, schedDep, eta, etd, halt };
 }
 const delayOf = (s) => {
