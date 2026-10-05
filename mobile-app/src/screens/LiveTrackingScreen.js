@@ -399,6 +399,32 @@ function dayNumberForEntry(entry, journeyStartDate) {
   }
   return journeyDayNumber(entry);
 }
+// BUGFIX ("VSKP ETA 23:30 but it showed Day2 — Day 2 should start only after
+// 23:59"): the day pill came from RailKit's own per-stop day/date fields,
+// which can say Day 2 for a stop whose time is still on day 1. Scheduled
+// times only ever increase along a route until they cross midnight, so the
+// day number is derived from that: a stop whose scheduled arrival is EARLIER
+// than the previous stop's departure has wrapped past 23:59 -> next day.
+function scheduleDayNumbers(timelineArr) {
+  const toMin = (raw) => {
+    const m = /(\d{1,2}):(\d{2})/.exec(String(raw || ""));
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  };
+  const byCode = new Map();
+  let day = 1;
+  let prev = null;
+  for (const s of Array.isArray(timelineArr) ? timelineArr : []) {
+    if (!s || !s.code) continue;
+    const arr = toMin(s.arrival?.scheduled ?? s.arrival?.expected);
+    const dep = toMin(s.departure?.scheduled ?? s.departure?.expected);
+    if (arr != null && prev != null && arr < prev) day += 1;
+    byCode.set(s.code, day);
+    if (dep != null && arr != null && dep < arr) day += 1; // halt crosses midnight
+    const out = dep ?? arr;
+    if (out != null) prev = out;
+  }
+  return byCode;
+}
 function formatJourneyDayLabel(startDate, dayNumber) {
   const d = new Date(startDate);
   d.setDate(d.getDate() + (dayNumber - 1));
@@ -2152,7 +2178,7 @@ export default function LiveTrackingScreen({ navigation }) {
     }
     const arr = last && last.arrival ? last.arrival : null;
     const destEta = last ? hhmm(last.predicted_eta || (arr && (arr.actual || arr.expected || arr.scheduled))) : null;
-    const destDay = last ? dayNumberForEntry(last, journeyStartDate) : null;
+    const destDay = last ? (scheduleDayNumbers(timeline).get(last.code) ?? dayNumberForEntry(last, journeyStartDate)) : null;
     return {
       first, last, frac, pct,
       coveredKm, leftKm: totalKm != null && coveredKm != null ? Math.max(0, Math.round((totalKm - coveredKm) * 10) / 10) : null,
@@ -2873,6 +2899,7 @@ export default function LiveTrackingScreen({ navigation }) {
             </View>
             {(() => {
               let lastDay = null;
+              const dayByCode = scheduleDayNumbers(timeline);
               return timelineGrouped.map((entry, idx) => {
                 if (entry.display_type === "no_halt_group") {
                   return (
@@ -2896,7 +2923,7 @@ export default function LiveTrackingScreen({ navigation }) {
                     />
                   );
                 }
-                const dayNum = dayNumberForEntry(entry, journeyStartDate);
+                const dayNum = dayByCode.get(entry.code) ?? dayNumberForEntry(entry, journeyStartDate);
                 const showDayPill = lastDay !== dayNum;
                 lastDay = dayNum;
                 return (
@@ -3615,10 +3642,10 @@ function TimeStack({ timing, staleUnconfirmed, placeholder, align, label, fallba
   return (
     <View style={styles.tlTimeCol}>
       <Text style={[styles.tlTimeExp, textAlign]}>{String(timing.scheduled || timing.expected || "—").slice(0, 5)}</Text>
-      {!hideActual && !!timing.actual && (
+      {!hideActual && !!timing.actual && !eta && (
         <Text style={[styles.tlTimeAct, { color: actColor }, textAlign]}>{String(timing.actual).slice(0, 5)}</Text>
       )}
-      {!hideActual && !timing.actual && !!eta ? (
+      {!hideActual && !!eta ? (
         <Text style={[styles.tlTimeAct, { color: actColor }, textAlign]}>{eta}</Text>
       ) : null}
       {!hideActual && !timing.actual && !eta && timing.expected && timing.expected !== timing.scheduled ? (
