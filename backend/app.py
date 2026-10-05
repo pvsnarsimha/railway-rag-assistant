@@ -892,6 +892,12 @@ def _rail_timestamp_ist(value: Optional[str]) -> Optional[datetime]:
     return dt
 
 
+# A stop this far ahead of the train's live position can't already have a
+# real recorded arrival (see the RailRadar-actual guard in
+# _predict_delay_per_reporting_station).
+_RR_ACTUAL_MAX_AHEAD_KM = 150.0
+
+
 def _event_not_yet_possible(event: dict, slack_minutes: int = 90) -> bool:
     """True when THIS run can't possibly have reached this event yet: its
     own dated scheduled/expected time (RailKit's, for the run being
@@ -2161,6 +2167,23 @@ def _predict_delay_per_reporting_station(
             # yet is the previous run's record — ignore it (see
             # _event_not_yet_possible) and fall through to the prediction.
             if rr_actual and _event_not_yet_possible(event):
+                rr_actual = None
+            # BUGFIX (20834 destination "~1 hr late ... confirmed via RailRadar"
+            # while the train was still near Secunderabad and had arrived 11
+            # min EARLY the day before): RailRadar sometimes returns an
+            # undated HH:MM "actual" for a far-downstream stop that is really
+            # a projected time or the previous run's record, so the
+            # dated-schedule check above can't catch it. Accepting it
+            # printed a fake "confirmed" delay and — because a RailRadar
+            # confirmation also LOCKS the prediction — froze it for the rest
+            # of the journey. A genuinely recorded arrival can never be ahead
+            # of the clock, and a stop hundreds of km ahead of the train's
+            # live position can't have been reached, so ignore both.
+            if rr_actual and (
+                _clock_time_is_in_future_ist(rr_actual)
+                or (stop.get("distance_ahead_km") is not None
+                    and stop["distance_ahead_km"] > _RR_ACTUAL_MAX_AHEAD_KM)
+            ):
                 rr_actual = None
             if rr_actual:
                 event["actual"] = rr_actual

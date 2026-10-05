@@ -1,6 +1,10 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.3.2] - 2026-10-05
+### Fixed
+- **Live Tracking destination showed a false large delay** (20834 Visakhapatnam: "~1 hr late, confirmed via RailRadar" while the train was still near Secunderabad; the day before it had arrived 11 min early). RailRadar can return an undated "actual" for a far-ahead stop (a projection or the previous run's record), which was accepted as a real arrival and then locked in for the rest of the journey. It is now ignored when the time is ahead of the clock or the stop is more than 150 km ahead of the train. Regression test added.
+
 ## [1.3.1] - 2026-10-04
 ### Changed
 - **Seat Availability:** after a train number is entered, the From and To boxes list that train's reporting (halting) stations as soon as they are tapped, and filter while typing; other stations can still be searched. The date is picked from a calendar instead of typed.
