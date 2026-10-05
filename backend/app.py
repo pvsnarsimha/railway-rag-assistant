@@ -899,6 +899,18 @@ def _rail_timestamp_ist(value: Optional[str]) -> Optional[datetime]:
 _RR_ACTUAL_MAX_AHEAD_KM = 150.0
 
 
+def _real_destination_actual(destination_json: Optional[dict]) -> Optional[str]:
+    """The destination's REAL recorded arrival, or None. The timeline fills
+    `arrival.actual` with this app's own predicted ETA for stops not yet
+    reached (flagged `actual_is_predicted`); passing that on as the real
+    arrival made the app show "Trip complete" while the train was still
+    mid-route."""
+    arrival = (destination_json or {}).get("arrival") or {}
+    if arrival.get("actual_is_predicted"):
+        return None
+    return arrival.get("actual")
+
+
 def _event_not_yet_possible(event: dict, slack_minutes: int = 90) -> bool:
     """True when THIS run can't possibly have reached this event yet: its
     own dated scheduled/expected time (RailKit's, for the run being
@@ -8615,7 +8627,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     "destination_code": (destination_json or {}).get("code"),
                     "destination_scheduled_arrival": (destination_json or {}).get("arrival", {}).get("scheduled"),
                     "destination_expected_arrival": (destination_json or {}).get("arrival", {}).get("expected"),
-                    "destination_actual_arrival": (destination_json or {}).get("arrival", {}).get("actual"),
+                    "destination_actual_arrival": _real_destination_actual(destination_json),
                     # FEATURE: Dynamic Re-route Suggestions During Live
                     # Tracking — see reroute_suggestions.py. `triggered`
                     # tells the frontend/mobile whether to surface the
