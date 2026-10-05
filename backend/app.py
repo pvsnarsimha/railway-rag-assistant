@@ -2236,10 +2236,10 @@ def _predict_delay_per_reporting_station(
                     stop["predicted_delay_grounded_via"] = "RailRadar"
                     stop["predicted_eta"] = event["actual"]
                 continue
-            try:
-                extra = int(extra_minutes)
-            except (TypeError, ValueError):
-                extra = 0
+            # Halt may arrive as "5", "5.0" or "5 min" — take the leading
+            # number so departure = arrival + halt instead of silently +0.
+            _m = re.match(r"\s*(\d+(?:\.\d+)?)", str(extra_minutes or ""))
+            extra = int(round(float(_m.group(1)))) if _m else 0
             if extra:
                 eta_dt = datetime.strptime(stop["predicted_eta"], "%H:%M") + timedelta(minutes=extra)
                 event["actual"] = eta_dt.strftime("%H:%M")

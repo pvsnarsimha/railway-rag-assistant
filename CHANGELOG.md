@@ -1,6 +1,10 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.3.3] - 2026-10-05
+### Fixed
+- **ETD now follows the halt time:** for a stop the train hasn't left yet, ETD = ETA + halt (Vijayawada: ETA 19:00 + 5 min halt = ETD 19:05) on the Journey card and the running-status timeline. The server also parses halt values like "5 min" so predicted departure is no longer stuck equal to arrival.
+
 ## [1.3.2] - 2026-10-05
 ### Fixed
 - **Live Tracking destination showed a false large delay** (20834 Visakhapatnam: "~1 hr late, confirmed via RailRadar" while the train was still near Secunderabad; the day before it had arrived 11 min early). RailRadar can return an undated "actual" for a far-ahead stop (a projection or the previous run's record), which was accepted as a real arrival and then locked in for the rest of the journey. It is now ignored when the time is ahead of the clock or the stop is more than 150 km ahead of the train. Regression test added.
