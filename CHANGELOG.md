@@ -1,6 +1,10 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.4.0] - 2026-10-05
+### Added
+- **Live-tracking pipeline, step 4 (`backend/timeline_validation.py`):** provider "actual" times are now checked before anything treats them as real, with day-aware logic for long multi-day trains (e.g. 12295) where the same HH:MM occurs on day 1, 2 and 3. A reading is rejected only when provably impossible (ahead of the clock, a stop scheduled hours from now, or earlier than the previous stop's reading); RailRadar entries get the same checks. 8 new tests. The full workflow and remaining steps are in `docs/LIVE_TRACKING_PIPELINE.md`.
+
 ## [1.3.4] - 2026-10-05
 ### Fixed
 - **Day pill:** "Day 2" now starts only after a stop's scheduled time wraps past 23:59 (20834 Visakhapatnam, ETA 23:30, wrongly showed Day 2). Day numbers are worked out from the scheduled times along the route instead of the provider's per-stop day field.

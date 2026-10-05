@@ -45,6 +45,7 @@ _env_loaded = load_dotenv(dotenv_path=_ENV_PATH)
 
 import query_router
 import railway_agent
+import timeline_validation
 import railway_api
 import gps_tracking
 import railradar_fallback
@@ -1556,11 +1557,24 @@ def _predict_delay_per_reporting_station(
     # slightly). A RailRadar entry only counts as real confirmation when
     # its OWN status is "passed" (i.e. raw "departed") — an "upcoming"
     # RailRadar entry is just as unconfirmed as RailKit's.
+    # STEP 4 of the live-tracking pipeline (see timeline_validation.py):
+    # drop provider "actual" times that are provably impossible for this run
+    # BEFORE anything below treats them as real. Day-aware, so a long
+    # multi-day train (12295) can't mix its day-1/2/3 clock times up.
+    _now_ist = _now_ist_naive()
+    try:
+        timeline_validation.validate_actuals(timeline_json, _now_ist)
+    except Exception:  # noqa: BLE001 — validation must never break tracking
+        pass
     rr_by_code = {}
     for rr in (rr_stops or []):
         code = (getattr(rr, "code", None) or "").strip().upper()
         if code and getattr(rr, "status", None) == "passed":
             rr_by_code[code] = rr
+    try:
+        rr_by_code = timeline_validation.filter_railradar(rr_by_code, timeline_json, _now_ist)
+    except Exception:  # noqa: BLE001
+        pass
 
     def _stop_distance_km(stop):
         d = gps_tracking._distance_km_value(stop.get("distance_km"))
