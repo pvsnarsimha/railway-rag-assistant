@@ -1,6 +1,11 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.3.4] - 2026-10-05
+### Fixed
+- **Day pill:** "Day 2" now starts only after a stop's scheduled time wraps past 23:59 (20834 Visakhapatnam, ETA 23:30, wrongly showed Day 2). Day numbers are worked out from the scheduled times along the route instead of the provider's per-stop day field.
+- **Timeline ETD:** for stops not yet reached, the departure column shows ETA + halt (Samalkot ETA 21:43, halt 2 min → ETD 21:45). The provider's own predicted departure no longer overrides it.
+
 ## [1.3.3] - 2026-10-05
 ### Fixed
 - **ETD now follows the halt time:** for a stop the train hasn't left yet, ETD = ETA + halt (Vijayawada: ETA 19:00 + 5 min halt = ETD 19:05) on the Journey card and the running-status timeline. The server also parses halt values like "5 min" so predicted departure is no longer stuck equal to arrival.
