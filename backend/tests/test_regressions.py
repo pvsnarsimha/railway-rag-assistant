@@ -49,3 +49,35 @@ def test_no_stray_patch_files_in_repo_root():
     """Fixes ship as reviewed commits on main, never as loose .patch files."""
     root = os.path.dirname(_BACKEND)
     assert [f for f in os.listdir(root) if f.endswith((".patch", ".diff", ".orig", ".rej"))] == []
+
+
+def test_far_downstream_railradar_actual_is_not_treated_as_confirmed():
+    """20834 destination showed "~1 hr late ... confirmed via RailRadar" while
+    the train was still near Secunderabad (it had arrived 11 min EARLY the day
+    before). RailRadar can return an undated "actual" for a far-ahead stop
+    (a projection / the previous run's record). A stop hundreds of km ahead
+    cannot have a real recorded arrival, so it must stay a model prediction
+    and must not be locked in as RailRadar-confirmed."""
+    from types import SimpleNamespace as NS
+
+    def ev(t):
+        return {"scheduled": t, "expected": t, "actual": None, "delay_minutes": 0}
+
+    timeline = [
+        {"code": "SC", "name": "SECUNDERABAD", "kind": "station", "status": "current", "distance_km": 0,
+         "halt_minutes": 0, "arrival": ev("17:00"), "departure": ev("17:00")},
+        {"code": "BZA", "name": "VIJAYAWADA", "kind": "station", "status": "upcoming", "distance_km": 351,
+         "halt_minutes": 5, "arrival": ev("21:00"), "departure": ev("21:05")},
+        {"code": "VSKP", "name": "VISAKHAPATNAM", "kind": "station", "status": "upcoming", "distance_km": 700,
+         "halt_minutes": 0, "arrival": ev("23:35"), "departure": ev("23:35")},
+    ]
+    rr = NS(code="VSKP", status="passed",
+            arrival=NS(actual="23:59", delay_minutes=61), departure=NS(actual="23:59", delay_minutes=61))
+    app_module._predict_delay_per_reporting_station(
+        timeline, 700, 8, 0.0, "t", 55.0, "b", "05-10-2026", "3A",
+        rr_stops=[rr], live_current_distance_km=5.0,
+    )
+    vskp = timeline[2]
+    assert vskp.get("distance_ahead_km", 0) > app_module._RR_ACTUAL_MAX_AHEAD_KM
+    assert vskp.get("predicted_delay_grounded_via") != "RailRadar"
+    assert vskp["arrival"].get("actual_source") != "railradar"
