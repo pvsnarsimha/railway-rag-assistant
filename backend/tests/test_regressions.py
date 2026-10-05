@@ -81,3 +81,15 @@ def test_far_downstream_railradar_actual_is_not_treated_as_confirmed():
     assert vskp.get("distance_ahead_km", 0) > app_module._RR_ACTUAL_MAX_AHEAD_KM
     assert vskp.get("predicted_delay_grounded_via") != "RailRadar"
     assert vskp["arrival"].get("actual_source") != "railradar"
+
+
+def test_predicted_destination_arrival_is_not_reported_as_real():
+    """Live Tracking showed "Trip complete" mid-journey because the
+    destination's PREDICTED arrival (arrival.actual with actual_is_predicted)
+    was sent as destination_actual_arrival."""
+    assert app_module._real_destination_actual(
+        {"arrival": {"actual": "03:04", "actual_is_predicted": True}}) is None
+    assert app_module._real_destination_actual(
+        {"arrival": {"actual": "03:04", "actual_is_predicted": False}}) == "03:04"
+    assert app_module._real_destination_actual({"arrival": {"actual": "03:04"}}) == "03:04"
+    assert app_module._real_destination_actual(None) is None

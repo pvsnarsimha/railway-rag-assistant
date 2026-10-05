@@ -181,12 +181,12 @@ export default function JourneyGlance({ timeline, complete, destCode, alarmCode,
           <View style={styles.body}>
             <Text style={styles.name} numberOfLines={1}>{titleCase(dest.name || dest.code)}</Text>
             <Text style={styles.sub}>{`${dest.code}${dest.distance_km != null ? ` · ${dest.distance_km} km` : ""}${destDelay ? ` · ${destDelay > 0 ? "+" : ""}${destDelay} min` : ""}`}</Text>
+            <Text style={styles.endTag}>{complete ? "Arrived" : "Your stop"}</Text>
           </View>
           <View style={styles.timeColRight}>
             <Text style={[styles.schedT, styles.right]}>{`Sch ${destT.schedDep || destT.schedArr || "—"}`}</Text>
             <Text style={[styles.time, styles.right, { color: "#B45309" }]}>{`ETD ${destT.etd || "—"}`}</Text>
           </View>
-          <Text style={styles.endTag}>{complete ? "Arrived" : "Your stop"}</Text>
         </View>
         {!complete ? (
           <View style={styles.chipRow}>
@@ -241,7 +241,7 @@ const styles = StyleSheet.create({
   nowWord: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 1, marginLeft: 6 },
   dest: { backgroundColor: "#FFF4E5", borderWidth: 1, borderColor: "#F8CE95", borderRadius: 14, padding: 10, marginTop: 6 },
   destTop: { flexDirection: "row", alignItems: "center" },
-  endTag: { fontSize: 11, fontWeight: "800", color: "#B45309" },
+  endTag: { fontSize: 11, fontWeight: "800", color: "#B45309", marginTop: 1 },
   chipRow: { flexDirection: "row", gap: 8, marginTop: 10, paddingLeft: 70 },
   chip: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#fff", borderWidth: 1, borderColor: "#F2B968", borderRadius: 16, paddingHorizontal: 12, paddingVertical: 7 },
   chipOn: { backgroundColor: "#2E7D32", borderColor: "#2E7D32" },

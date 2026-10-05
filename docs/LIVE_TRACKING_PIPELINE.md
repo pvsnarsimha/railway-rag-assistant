@@ -14,7 +14,7 @@ User opens a train
   [4] Validate every reading                             timeline_validation.py (DONE, this change)
   [5] Fuse into one position + delay                     crowd_position_tracking.py (exists)
   [6] Predict ahead (ETA/ETD = ETA + halt, delay model)  app.py / delay_prediction.py (exists)
-  [7] Respond + log to own history                       delay_accuracy_store.py (partly)
+  [7] Respond + log to own history                       delay_accuracy_store.py (exists)
 ```
 
 ## Step 4 rules (timeline_validation.py)
@@ -37,6 +37,8 @@ Rejected readings keep `actual_rejected: <reason>` on the event for debugging.
 ## Still to build
 - Step 3: one normalized provider format + automatic ranking/failover.
 - Step 2: parallel collection with per-source timeouts and health tracking.
-- Step 7: a table logging every live reading (own history, less provider reliance).
+- Step 7 is already covered for predicted-vs-actual per station (`delay_accuracy_store.py`
+  writes one row per train/date/station when a real actual is known). A table of *every*
+  raw live reading (all sources, with timestamps) would go further and is not built.
 - Validate provider data for stops marked `passed` (needs real long-train
   samples; none were available when this was written).

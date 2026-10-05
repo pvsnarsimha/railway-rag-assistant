@@ -1,6 +1,14 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.4.1] - 2026-10-05
+### Fixed
+- **"Trip complete" shown mid-journey:** the server sent the destination's PREDICTED arrival as the real `destination_actual_arrival`, so the end-of-trip card appeared while the train was still running. Only a real recorded arrival is sent now. Regression test added.
+- **Journey card destination row:** the "Your stop" tag overlapped the scheduled departure time on narrow screens; it now sits under the station name.
+### Docs
+- `docs/LIVE_TRACKING_PIPELINE.md`: step 7 already exists (`delay_accuracy_store.py`).
+- Both bugs were found by running the real app locally against synthetic provider data (not live data).
+
 ## [1.4.0] - 2026-10-05
 ### Added
 - **Live-tracking pipeline, step 4 (`backend/timeline_validation.py`):** provider "actual" times are now checked before anything treats them as real, with day-aware logic for long multi-day trains (e.g. 12295) where the same HH:MM occurs on day 1, 2 and 3. A reading is rejected only when provably impossible (ahead of the clock, a stop scheduled hours from now, or earlier than the previous stop's reading); RailRadar entries get the same checks. 8 new tests. The full workflow and remaining steps are in `docs/LIVE_TRACKING_PIPELINE.md`.
