@@ -26,7 +26,7 @@ import RideSheet from "../components/RideSheet";
 import TrainNumberField from "../components/TrainNumberField";
 import SmartAlarmSheet from "../components/SmartAlarmSheet";
 import JourneyGlance, { stopEtaClock, minusMinutes, stopTimes } from "../components/JourneyGlance";
-import { applyGpsOverlay, checkGpsOnTrain } from "../utils/gpsOverlay";
+import { applyGpsOverlay, checkGpsOnTrain, notOnTrainMessage } from "../utils/gpsOverlay";
 import { isSpeechSupported, loadReadAloud, loadReadAloudAsync, saveReadAloud, speak, stopSpeaking, onTrainPush, shouldSpeakPush } from "../utils/speakNotifications";
 import { getLanguage, hasChosenLanguage, languageInfo, loadLanguage, SAMPLE } from "../utils/notifyLanguage";
 import LanguagePickerModal from "../components/LanguagePickerModal";
@@ -659,7 +659,7 @@ export default function LiveTrackingScreen({ navigation }) {
   // match where the live feed says the train is; until it does, the screen
   // keeps showing the live (internet) data, never the phone's position.
   const gpsVerdict = useMemo(
-    () => (gpsOn && gpsResult && !gpsResult.error ? checkGpsOnTrain(rawPayload, gpsResult) : null),
+    () => (gpsOn && gpsResult && !gpsResult.error ? checkGpsOnTrain(rawPayload, gpsResult, new Date(), gpsHistoryRef.current) : null),
     [gpsOn, gpsResult, rawPayload],
   );
   const payload = useMemo(
@@ -667,6 +667,7 @@ export default function LiveTrackingScreen({ navigation }) {
     [gpsVerdict, gpsResult, gpsSpeedKmph, rawPayload],
   );
   const gpsNotOnTrainCountRef = useRef(0);
+  const gpsVerifiedRef = useRef(false); // has this GPS session passed the on-train check yet?
 
   // REDESIGN (RailYatri-style live position marker): a real countdown to
   // the next WebSocket message — the backend sends a message every 5s
@@ -2025,6 +2026,8 @@ export default function LiveTrackingScreen({ navigation }) {
     setGpsAsk(null);
     if (yes) {
       gpsHistoryRef.current = [];
+      gpsVerifiedRef.current = false;
+      gpsNotOnTrainCountRef.current = 0;
       setModeNotice(null);
       setGpsOn(true);
     } else {
@@ -2038,26 +2041,27 @@ export default function LiveTrackingScreen({ navigation }) {
     const km = r && r.offRouteKm != null ? Math.round(r.offRouteKm) : null;
     setGpsOn(false);
     setApproachNotice(null);
-    setModeNotice(`You don't seem to be on train ${activeTrack ? activeTrack.trainNumber : ""}${km != null ? ` (${km} km away from its route)` : ""}. Use internet when you are not on the train — switching back to internet.`);
+    setModeNotice(`You are not inside train ${activeTrack ? activeTrack.trainNumber : ""}. GPS mode works only for the train you are travelling in — please switch to Internet.${km != null ? ` (You are ${km} km away from its route.)` : ""}`);
     if (activeParamsRef.current && !manualStopRef.current) refreshNow();
   }, [activeTrack, refreshNow]);
   const stopGps = useCallback(() => { setGpsOn(false); setApproachNotice(null); refreshNow(); }, [refreshNow]);
 
-  // Two GPS readings in a row that disagree with the live train position
-  // → the user is not on this train: say so and switch back to internet.
+  // GPS mode is allowed ONLY while the phone is really on this train. The
+  // very first reading after switching to GPS must pass the check, otherwise
+  // GPS is refused at once; once it has passed, two failing readings in a
+  // row (a brief glitch shouldn't kick a real passenger out) switch it off.
+  // Either way the user gets a clear "not inside the train — switch to
+  // Internet" message and the screen goes back to the internet feed.
   useEffect(() => {
     if (!gpsOn || !gpsVerdict || gpsVerdict.unknown) return;
-    if (gpsVerdict.ok) { gpsNotOnTrainCountRef.current = 0; return; }
+    if (gpsVerdict.ok) { gpsNotOnTrainCountRef.current = 0; gpsVerifiedRef.current = true; return; }
     gpsNotOnTrainCountRef.current += 1;
-    if (gpsNotOnTrainCountRef.current < 2) return;
+    if (gpsVerifiedRef.current && gpsNotOnTrainCountRef.current < 2) return;
     gpsNotOnTrainCountRef.current = 0;
-    const num = activeTrack ? activeTrack.trainNumber : "";
-    const km = Math.round(gpsVerdict.gapKm);
+    gpsVerifiedRef.current = false;
     setGpsOn(false);
     setApproachNotice(null);
-    setModeNotice(gpsVerdict.notStarted
-      ? `Train ${num} hasn't started yet, so you can't be on it. Use internet when you are not on the train — switching back to internet.`
-      : `You're about ${km} km ${gpsVerdict.ahead ? "ahead of" : "behind"} train ${num}, so you don't seem to be on it. Use internet when you are not on the train — switching back to internet.`);
+    setModeNotice(notOnTrainMessage(gpsVerdict, activeTrack ? activeTrack.trainNumber : ""));
     if (activeParamsRef.current && !manualStopRef.current) refreshNow();
   }, [gpsVerdict]); // eslint-disable-line react-hooks/exhaustive-deps
 
