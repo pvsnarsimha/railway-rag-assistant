@@ -1,6 +1,11 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.4.2] - 2026-10-06
+### Changed
+- **GPS mode only when you are on the train.** The first GPS reading after switching to GPS must pass the on-train check, otherwise GPS is refused at once with "You are not inside train N. GPS mode works only for the train you are travelling in — please switch to Internet." and the screen goes back to the internet feed. Two tests now: position (the phone must be within ~10 km of where the live feed puts the train, widening only as the feed gets old — was 20 km) and movement (a phone that is not moving while the train is running at 40+ km/h, e.g. someone on a platform or at home, is rejected). Once verified, two failing readings in a row switch GPS off. When there is no live feed to compare with (offline), GPS is still allowed since it cannot be checked.
+- Checks for the verdict logic: `mobile-app/tests/gps-verdict.test.cjs`.
+
 ## [1.4.1] - 2026-10-05
 ### Fixed
 - **"Trip complete" shown mid-journey:** the server sent the destination's PREDICTED arrival as the real `destination_actual_arrival`, so the end-of-trip card appeared while the train was still running. Only a real recorded arrival is sent now. Regression test added.

@@ -70,20 +70,58 @@ export function liveTrainPosition(raw, now = new Date()) {
   const moved = notStarted ? 0 : Math.min(ageMin, 180) / 60 * Math.min(Math.max(v, 20), 110);
   const lastKm = num(tl[tl.length - 1].distance_km);
   const est = lastKm != null ? Math.min(km + moved, lastKm) : km + moved;
-  // Allowed disagreement: 20 km baseline, widening with how stale the
-  // reading is (the train may have sped up or been held).
-  const tolKm = 20 + (notStarted ? 0 : Math.min(ageMin, 180) / 60 * 40);
+  // Allowed disagreement: 10 km baseline (a phone on a platform waiting for
+  // the train, or on another train, must not pass), widening with how stale
+  // the reading is (the train may have sped up or been held).
+  const tolKm = 10 + (notStarted ? 0 : Math.min(ageMin, 180) / 60 * 40);
   return { km: est, ageMin, tolKm, notStarted };
 }
 
-/** Is the phone plausibly ON this train? { ok, gapKm, trainKm, ahead } */
-export function checkGpsOnTrain(raw, gps, now = new Date()) {
+/** Phone speed in km/h from the GPS reading itself, else from recent
+ *  route positions ([{ km, t }]); null when it can't be told yet. */
+function phoneSpeedKmph(gps, history) {
+  if (gps && gps.speedKmph != null && Number.isFinite(Number(gps.speedKmph))) return Number(gps.speedKmph);
+  const h = Array.isArray(history) ? history : [];
+  if (h.length >= 2) {
+    const a = h[0], b = h[h.length - 1];
+    const dtH = (b.t - a.t) / 3600000;
+    if (dtH > 45 / 3600) return Math.abs(b.km - a.km) / dtH;
+  }
+  return null;
+}
+
+/** Is the phone really ON this train? GPS mode is only allowed when it is.
+ *  Returns { ok, reason, gapKm, trainKm, ahead, notStarted, unknown }.
+ *  reason: "not_started" | "far" | "stationary" when ok is false.
+ *  Two independent tests:
+ *   1. position — the phone's place along the route must match where the
+ *      live feed says the train is;
+ *   2. movement — while the train is clearly running, a phone that is not
+ *      moving (at home, on a platform) is not on it. */
+export function checkGpsOnTrain(raw, gps, now = new Date(), history = null) {
   if (!gps || gps.error || gps.currentKm == null) return { ok: false, unknown: true };
   const live = liveTrainPosition(raw, now);
   if (!live) return { ok: true, unknown: true }; // nothing to compare against
   const gap = gps.currentKm - live.km;
   const acc = gps.accuracyM ? gps.accuracyM / 1000 : 0;
-  return { ok: Math.abs(gap) <= live.tolKm + acc, gapKm: Math.abs(gap), ahead: gap > 0, trainKm: live.km, notStarted: live.notStarted };
+  const base = { gapKm: Math.abs(gap), ahead: gap > 0, trainKm: live.km, notStarted: live.notStarted };
+  if (live.notStarted) return { ...base, ok: false, reason: "not_started" };
+  if (Math.abs(gap) > live.tolKm + acc) return { ...base, ok: false, reason: "far" };
+  const trainSpeed = Number(raw && (raw.display_speed_kmph || raw.avg_speed_kmph)) || 0;
+  const phoneSpeed = phoneSpeedKmph(gps, history);
+  if (trainSpeed >= 40 && phoneSpeed != null && phoneSpeed < 5) return { ...base, ok: false, reason: "stationary", phoneSpeed };
+  return { ...base, ok: true };
+}
+
+/** One user-facing sentence for a failed check (never shown when ok). */
+export function notOnTrainMessage(verdict, trainNumber) {
+  const num = trainNumber ? ` ${trainNumber}` : "";
+  const head = `You are not inside train${num}. GPS mode works only for the train you are travelling in — please switch to Internet.`;
+  if (!verdict || verdict.ok) return head;
+  if (verdict.reason === "not_started") return `${head} (This train hasn't started yet.)`;
+  if (verdict.reason === "stationary") return `${head} (Your phone isn't moving while the train is.)`;
+  if (verdict.gapKm != null) return `${head} (You are about ${Math.round(verdict.gapKm)} km ${verdict.ahead ? "ahead of" : "behind"} it.)`;
+  return head;
 }
 
 export function applyGpsOverlay(raw, gps, speedKmph, now = new Date()) {
