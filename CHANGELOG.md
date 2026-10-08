@@ -1,6 +1,14 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.5.0] - 2026-10-08
+### Added
+- **Hands-free mode (mobile app).** Settings -> Hands-free mode: each screen asks for its fields out loud, listens, fills them and carries on. Live Tracking asks the train number, the date and (optionally) where you get off, then starts tracking by itself. The same flow is on Train Search (from, to, date), Live Status, Fare, Seat Availability, Time Table, PNR, Station Search and the Assistant chat; the Home screen opens any section when you say its name ("live tracking", "PNR status" ...). Say "skip", "repeat" or "stop" at any prompt. With the setting off, a "Hands-free" chip on each screen starts the same flow on demand.
+- **Mic on every field.** Train number, station, date, PNR, time and number boxes all have a mic; the answer is understood, not just pasted: "one two six five one" or "twelve six five one" -> 12651; "28th aug 2025" -> 28-08-2025; "27th aug" (no year) -> 27-08-<this year>; "today / tomorrow / yesterday / day after tomorrow", "twenty eighth of august twenty twenty five" and "28/08" also work. A spoken station like "s c" becomes SC; a name goes through the normal station suggestions.
+- Checks for the spoken-input parser: `mobile-app/tests/voice-parse.test.cjs`.
+### Notes
+- On the phone, speech recognition needs the `expo-speech-recognition` native module (added to `package.json`/`app.json`), so build a new dev/installed app (`eas build`); Expo Go cannot do it. On the web build it uses the browser's own speech recognition (Chrome/Edge).
+
 ## [1.4.2] - 2026-10-06
 ### Changed
 - **GPS mode only when you are on the train.** The first GPS reading after switching to GPS must pass the on-train check, otherwise GPS is refused at once with "You are not inside train N. GPS mode works only for the train you are travelling in — please switch to Internet." and the screen goes back to the internet feed. Two tests now: position (the phone must be within ~10 km of where the live feed puts the train, widening only as the feed gets old — was 20 km) and movement (a phone that is not moving while the train is running at 40+ km/h, e.g. someone on a platform or at home, is rejected). Once verified, two failing readings in a row switch GPS off. When there is no live feed to compare with (offline), GPS is still allowed since it cannot be checked.

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { View, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
+import { View, StyleSheet, ScrollView, TouchableOpacity, Switch } from "react-native";
 import { Text } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing } from "../theme/colors";
@@ -13,6 +13,7 @@ import { describeApiError } from "../api/client";
 import LanguagePickerModal from "../components/LanguagePickerModal";
 import { getLanguage, languageInfo, loadLanguage } from "../utils/notifyLanguage";
 import { useT } from "../context/LanguageContext";
+import { isListeningSupported, unsupportedReason } from "../services/voiceInput";
 import { Platform } from "react-native";
 import { registerNotificationActions, replaceNotification, ensureLocalNotificationPermission, STATUS_ON_COLOR, getNativePushToken } from "../services/pushNotifications";
 
@@ -20,7 +21,7 @@ import { registerNotificationActions, replaceNotification, ensureLocalNotificati
 export const NOTIFY_BUTTONS_VERSION = "notification buttons v6";
 
 export default function SettingsScreen() {
-  const { apiBaseUrl, setApiBaseUrl, wsBaseUrl } = useSettings();
+  const { apiBaseUrl, setApiBaseUrl, wsBaseUrl, handsFree, setHandsFree } = useSettings();
   const [draftUrl, setDraftUrl] = useState(apiBaseUrl);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null); // { ok, detail }
@@ -136,6 +137,22 @@ export default function SettingsScreen() {
           <Text style={styles.currentValue}>{apiBaseUrl}</Text>
           <Text style={styles.currentValue}>{wsBaseUrl} (WebSocket, for Live Tracking)</Text>
         </View>
+      </SectionCard>
+
+      <SectionCard title="Hands-free mode" subtitle="The app asks for the train number, stations and date out loud, listens, and fills the fields for you.">
+        <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 4 }}>
+          <Ionicons name="mic-circle-outline" size={22} color={colors.primary} style={{ marginRight: 10 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontWeight: "700", color: colors.text }}>Ask by voice on every screen</Text>
+            <Text style={{ fontSize: 12, color: colors.textMuted, marginTop: 2 }}>
+              Say “one two six five one”, “28th aug 2025” or just “tomorrow”. A date without a year means this year. Say “skip”, “repeat” or “stop” any time.
+            </Text>
+          </View>
+          <Switch value={!!handsFree} onValueChange={setHandsFree} accessibilityLabel="Hands-free mode" />
+        </View>
+        {!isListeningSupported() ? (
+          <Text style={{ fontSize: 12, color: colors.danger, marginTop: 6 }}>{unsupportedReason()}</Text>
+        ) : null}
       </SectionCard>
 
       <SectionCard title="App language" subtitle="Screens, station names, notifications and read-aloud use this language.">

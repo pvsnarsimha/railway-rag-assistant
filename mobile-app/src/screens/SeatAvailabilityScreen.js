@@ -14,6 +14,10 @@ import { checkSeatAvailability, getTrainSchedule } from "../api/railwayApi";
 import StationField from "../components/StationField";
 import MonthCalendarModal from "../components/MonthCalendarModal";
 import { describeApiError } from "../api/client";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
+import MicButton from "../components/MicButton";
+import { resolveSpokenStation } from "../utils/voiceResolve";
 
 const CLASS_OPTIONS = ["1A", "2A", "3A", "3E", "CC", "EC", "SL", "2S"];
 
@@ -137,9 +141,22 @@ export default function SeatAvailabilityScreen() {
     setBookNote("Trip details copied — paste them into IRCTC's search.");
   }
 
+  // HANDS-FREE: train, from, to, date -> availability.
+  const resolveStation = (v) => resolveSpokenStation(apiBaseUrl, v);
+  const hf = useHandsFreeForm({
+    steps: [
+      { key: "train", ask: "Which train number?", kind: "train", apply: (n) => { setTrainNumber(n); setSource(""); setDest(""); setFromName(""); setToName(""); }, confirm: (n) => `Train ${n}` },
+      { key: "from", ask: "Boarding station?", kind: "station", resolve: resolveStation, apply: (st) => { setSource(st.code); setFromName(st.name || ""); }, confirm: (st) => `From ${st.name || st.code}` },
+      { key: "to", ask: "Destination station?", kind: "station", resolve: resolveStation, apply: (st) => { setDest(st.code); setToName(st.name || ""); }, confirm: (st) => `To ${st.name || st.code}` },
+      { key: "date", ask: "Journey date?", kind: "date", apply: setDate, confirm: (d) => `Checking seats for ${d}` },
+    ],
+    onDone: check,
+  });
+
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
       <SectionCard title="Seat Availability" subtitle="Real-time berth availability for a specific train, route, date and class.">
+        <HandsFreeBar hf={hf} />
         <TrainNumberField
           label="Train Number" placeholder="Type a number, e.g. 1, 17, 12201" value={trainNumber} onChangeText={setTrainNumber} apiBaseUrl={apiBaseUrl}
           onSelectTrain={(m) => { setPickedName(m.name || ""); setSource(""); setDest(""); setFromName(""); setToName(""); }}
@@ -157,10 +174,13 @@ export default function SeatAvailabilityScreen() {
           apiBaseUrl={apiBaseUrl} defaultOptions={routeStops}
         />
         <Text style={styles.chipLabel}>Date</Text>
-        <TouchableOpacity onPress={() => setCalendarVisible(true)} activeOpacity={0.8} style={styles.dateBtn}>
-          <Ionicons name="calendar-outline" size={18} color={colors.primary} />
-          <Text style={[styles.dateBtnText, !date && { color: colors.textMuted }]}>{date || "Select travel date"}</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <TouchableOpacity onPress={() => setCalendarVisible(true)} activeOpacity={0.8} style={[styles.dateBtn, { flex: 1 }]}>
+            <Ionicons name="calendar-outline" size={18} color={colors.primary} />
+            <Text style={[styles.dateBtnText, !date && { color: colors.textMuted }]}>{date || "Select travel date"}</Text>
+          </TouchableOpacity>
+          <MicButton kind="date" onValue={setDate} style={{ marginLeft: 4 }} />
+        </View>
         <Text style={styles.chipLabel}>Class</Text>
         <ChipRow options={CLASS_OPTIONS} value={travelClass} onSelect={setTravelClass} getKey={(c) => c} getLabel={(c) => c} />
         <Text style={styles.chipLabel}>Quota</Text>

@@ -8,6 +8,8 @@ import PrimaryButton from "../components/PrimaryButton";
 import { useSettings } from "../context/SettingsContext";
 import { getTrainLiveStatus } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
 
 /**
  * RailYatri-style plain running-status list (station, sch/exp/act,
@@ -57,6 +59,15 @@ export default function LiveTrainStatusScreen() {
     }
   }
 
+  // HANDS-FREE: asks the train number and date, then checks the status.
+  const hf = useHandsFreeForm({
+    steps: [
+      { key: "train", ask: "Which train number?", kind: "train", apply: setTrainNumber, confirm: (n) => `Train ${n}` },
+      { key: "date", ask: "Which date? Say skip for today.", kind: "date", optional: true, apply: setDate, confirm: (d) => `Checking status for ${d}` },
+    ],
+    onDone: lookup,
+  });
+
   return (
     <FlatList
       style={styles.flex}
@@ -66,6 +77,7 @@ export default function LiveTrainStatusScreen() {
       ListHeaderComponent={
         <View style={styles.content}>
           <SectionCard title="Live Train Status" subtitle="Real-time station-by-station running status (RailKit).">
+            <HandsFreeBar hf={hf} />
             <LabeledInput label="Train Number" placeholder="e.g. 12841" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" maxLength={5} />
             <LabeledInput label="Date (dd-mm-yyyy, optional — defaults to today)" placeholder="12-09-2026" value={date} onChangeText={setDate} autoCapitalize="none" />
             <PrimaryButton title="Check Status" onPress={lookup} loading={loading} />

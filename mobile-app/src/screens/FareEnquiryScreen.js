@@ -10,6 +10,9 @@ import ChipRow from "../components/ChipRow";
 import { useSettings } from "../context/SettingsContext";
 import { getTrainFare } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
+import { resolveSpokenStation } from "../utils/voiceResolve";
 
 const CLASS_OPTIONS = ["1A", "2A", "3A", "3E", "CC", "EC", "SL", "2S"];
 const QUOTA_OPTIONS = [
@@ -68,9 +71,22 @@ export default function FareEnquiryScreen() {
     }
   }
 
+  // HANDS-FREE: train, from, to, date -> fare.
+  const resolveStation = (v) => resolveSpokenStation(apiBaseUrl, v);
+  const hf = useHandsFreeForm({
+    steps: [
+      { key: "train", ask: "Which train number?", kind: "train", apply: setTrainNumber, confirm: (n) => `Train ${n}` },
+      { key: "from", ask: "Boarding station?", kind: "station", resolve: resolveStation, apply: (st) => setSource(st.code), confirm: (st) => `From ${st.name || st.code}` },
+      { key: "to", ask: "Destination station?", kind: "station", resolve: resolveStation, apply: (st) => setDest(st.code), confirm: (st) => `To ${st.name || st.code}` },
+      { key: "date", ask: "Journey date?", kind: "date", apply: setDate, confirm: (d) => `Calculating fare for ${d}` },
+    ],
+    onDone: calculate,
+  });
+
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
       <SectionCard title="Fare Calculator" subtitle="Real fare breakdown for a journey — not an estimate.">
+        <HandsFreeBar hf={hf} />
         <LabeledInput label="Train Number" placeholder="e.g. 12201" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" maxLength={5} />
         <View style={styles.row}>
           <LabeledInput label="From" placeholder="e.g. LTT or Mumbai" value={source} onChangeText={setSource} style={styles.half} />

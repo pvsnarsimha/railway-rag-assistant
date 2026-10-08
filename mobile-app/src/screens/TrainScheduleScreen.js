@@ -8,6 +8,8 @@ import PrimaryButton from "../components/PrimaryButton";
 import { useSettings } from "../context/SettingsContext";
 import { getTrainSchedule } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
 
 /**
  * RailYatri-style "Time Table" tile — the STATIC scheduled timetable
@@ -57,6 +59,13 @@ export default function TrainScheduleScreen({ route }) {
     }
   }
 
+  // HANDS-FREE: asks the train number, then shows the time table.
+  const hf = useHandsFreeForm({
+    autoStart: !prefillTrainNumber,
+    steps: [{ key: "train", ask: "Which train number?", kind: "train", apply: setTrainNumber, confirm: (n) => `Showing the time table for train ${n}` }],
+    onDone: () => lookup(),
+  });
+
   function lookup() {
     runLookup(trainNumber.trim());
   }
@@ -82,6 +91,7 @@ export default function TrainScheduleScreen({ route }) {
       ListHeaderComponent={
         <View style={styles.content}>
           <SectionCard title="Time Table" subtitle="Scheduled arrival, departure, halt and day for every station on the route.">
+            <HandsFreeBar hf={hf} />
             <LabeledInput label="Train Number" placeholder="e.g. 12841" value={trainNumber} onChangeText={setTrainNumber} keyboardType="number-pad" maxLength={5} />
             <PrimaryButton title="Get Schedule" onPress={lookup} loading={loading} />
             {error ? <Text style={styles.error}>{error}</Text> : null}

@@ -31,6 +31,10 @@ import { isSpeechSupported, loadReadAloud, loadReadAloudAsync, saveReadAloud, sp
 import { getLanguage, hasChosenLanguage, languageInfo, loadLanguage, SAMPLE } from "../utils/notifyLanguage";
 import LanguagePickerModal from "../components/LanguagePickerModal";
 import ScreenLanguageBar from "../components/ScreenLanguageBar";
+import MicButton from "../components/MicButton";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
+import { resolveSpokenStation } from "../utils/voiceResolve";
 import { useT } from "../context/LanguageContext";
 import {
   saveActiveTrack, loadActiveTrack, clearActiveTrack, enableBackgroundTracking, disableBackgroundTracking,
@@ -2097,6 +2101,20 @@ export default function LiveTrackingScreen({ navigation }) {
   // "Change") shows ONLY the form: no leftover Next bar, banners, tiles,
   // GPS card or timeline from a train that is no longer on screen.
   const onFormPage = !activeTrack || formOpen;
+
+  // HANDS-FREE: the train number and date are asked and filled by voice —
+  // "one two six five one", "28th aug 2025" (no year = this year), "tomorrow"
+  // — then tracking starts by itself. Say "skip" for today / no destination.
+  const hf = useHandsFreeForm({
+    autoStart: onFormPage,
+    steps: [
+      { key: "train", ask: "Which train number do you want to track?", kind: "train", apply: setTrainNumber, confirm: (n) => `Train ${n}` },
+      { key: "date", ask: "Which date? Say skip for today.", kind: "date", optional: true, apply: setTrackDate, confirm: (d) => `Date ${d}` },
+      { key: "dest", ask: "Where are you getting off? Say skip to start tracking now.", kind: "station", optional: true,
+        resolve: (v) => resolveSpokenStation(apiBaseUrl, v), apply: (st) => setDest(st.code), confirm: (st) => `Getting off at ${st.name || st.code}. Starting live tracking` },
+    ],
+    onDone: connect,
+  });
   const showBottomBar = !onFormPage && !!payload && !ltJourneyLikelyComplete && !!payload.next_station;
 
   // Leaflet can't measure itself inside a display:none parent; tell it to
@@ -2285,6 +2303,7 @@ export default function LiveTrackingScreen({ navigation }) {
         </View>
         <View style={styles.pxFormCard}>
           <Text style={styles.pxFormTitle}>{t("Track a train")}</Text>
+          <HandsFreeBar hf={hf} />
           <TrainNumberField label="Train number" placeholder="Type a number, e.g. 1, 17, 12709" value={trainNumber} onChangeText={setTrainNumber} apiBaseUrl={apiBaseUrl} />
           <Text style={styles.fieldLabel}>{t("Journey date")}</Text>
           <View style={styles.dateChipRow}>
@@ -2304,9 +2323,11 @@ export default function LiveTrackingScreen({ navigation }) {
                 {["Yesterday", "Today", "Tomorrow"].includes(trackDateLabel(trackDate)) ? t("Pick\u2026") : trackDateLabel(trackDate)}
               </Text>
             </TouchableOpacity>
+            {/* Say the date: "28th aug 2025", "27th aug" (this year), "tomorrow". */}
+            <MicButton kind="date" onValue={(d) => setTrackDate(d)} />
           </View>
           <View style={{ marginTop: spacing.md }}>
-            <LabeledInput label="Getting off at (optional)" placeholder="Destination station, e.g. VSKP" value={dest} onChangeText={setDest} autoCapitalize="characters" />
+            <LabeledInput label="Getting off at (optional)" placeholder="Destination station, e.g. VSKP" value={dest} onChangeText={setDest} autoCapitalize="characters" voice="station" onVoiceValue={async (v) => { const st = await resolveSpokenStation(apiBaseUrl, v); if (st) setDest(st.code); }} />
           </View>
           {dest.trim() ? (
             <TouchableOpacity style={styles.alarmOnStartRow} onPress={() => setAlarmOnStart((v) => !v)} activeOpacity={0.8}>
