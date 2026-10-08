@@ -1,6 +1,10 @@
 # Changelog
 Format: [Keep a Changelog](https://keepachangelog.com). Versioning: [SemVer](https://semver.org).
 
+## [1.5.1] - 2026-10-08
+### Fixed
+- Rebuilt `mobile_web/` (served at `/mobile-app`) so the deployed website actually includes Hands-free mode; 1.5.0 changed the app source but the committed web build was still the old one.
+
 ## [1.5.0] - 2026-10-08
 ### Added
 - **Hands-free mode (mobile app).** Settings -> Hands-free mode: each screen asks for its fields out loud, listens, fills them and carries on. Live Tracking asks the train number, the date and (optionally) where you get off, then starts tracking by itself. The same flow is on Train Search (from, to, date), Live Status, Fare, Seat Availability, Time Table, PNR, Station Search and the Assistant chat; the Home screen opens any section when you say its name ("live tracking", "PNR status" ...). Say "skip", "repeat" or "stop" at any prompt. With the setting off, a "Hands-free" chip on each screen starts the same flow on demand.
