@@ -8,6 +8,8 @@ import PrimaryButton from "../components/PrimaryButton";
 import { useSettings } from "../context/SettingsContext";
 import { searchStations } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
 
 export default function StationSearchScreen() {
   const { apiBaseUrl } = useSettings();
@@ -33,6 +35,12 @@ export default function StationSearchScreen() {
     }
   }
 
+  // HANDS-FREE: say a station name, then it searches.
+  const hf = useHandsFreeForm({
+    steps: [{ key: "q", ask: "Which station are you looking for?", kind: "text", apply: setQuery, confirm: (q) => `Searching for ${q}` }],
+    onDone: runSearch,
+  });
+
   return (
     <FlatList
       style={styles.flex}
@@ -47,12 +55,14 @@ export default function StationSearchScreen() {
       ListHeaderComponent={
         <View style={styles.content}>
           <SectionCard title="Station search" subtitle="Find a station by name, city, or fuzzy spelling.">
+            <HandsFreeBar hf={hf} />
             <LabeledInput
               label="Search"
               placeholder="e.g. Vijayawada, or 'vijaywada' misspelled"
               value={query}
               onChangeText={setQuery}
               autoCapitalize="none"
+              voice="text"
             />
             <PrimaryButton title="Search" onPress={runSearch} loading={loading} />
             {error ? <Text style={styles.error}>{error}</Text> : null}

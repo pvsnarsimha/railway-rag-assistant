@@ -8,6 +8,9 @@ import PrimaryButton from "../components/PrimaryButton";
 import StationField from "../components/StationField";
 import OptionSheetModal from "../components/OptionSheetModal";
 import DateStrip from "../components/DateStrip";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
+import { resolveSpokenStation } from "../utils/voiceResolve";
 import MonthCalendarModal from "../components/MonthCalendarModal";
 import FilterSheetModal from "../components/FilterSheetModal";
 import RunningDaysRow from "../components/RunningDaysRow";
@@ -205,6 +208,21 @@ export default function TrainSearchScreen({ route }) {
     if (formCollapsed) runSearch(1, { date: ddmmyyyy });
   }
 
+  // HANDS-FREE: asks From, To and the date by voice, then searches.
+  // (A date without a year means this year — see utils/voiceParse.js.)
+  const hf = useHandsFreeForm({
+    autoStart: !formCollapsed,
+    steps: [
+      { key: "from", ask: "Which station are you travelling from?", kind: "station", resolve: (v) => resolveSpokenStation(apiBaseUrl, v),
+        apply: (st) => { setSource(st.code); setSourceName(st.name); }, confirm: (st) => `From ${st.name || st.code}` },
+      { key: "to", ask: "And where to?", kind: "station", resolve: (v) => resolveSpokenStation(apiBaseUrl, v),
+        apply: (st) => { setDest(st.code); setDestName(st.name); }, confirm: (st) => `To ${st.name || st.code}` },
+      { key: "date", ask: "Which date? Say skip for any date.", kind: "date", optional: true,
+        apply: (d) => setDate(d), confirm: (d) => `Searching trains on ${d}` },
+    ],
+    onDone: () => runSearch(1),
+  });
+
   function applyFilters(next) {
     setFilters(next);
     if (formCollapsed) runSearch(1, { filters: next });
@@ -286,6 +304,7 @@ export default function TrainSearchScreen({ route }) {
           <View style={styles.content}>
             {!formCollapsed ? (
               <>
+                <HandsFreeBar hf={hf} />
                 {/* From / To — stacked in one card with a round swap button,
                     same StationField auto-suggest as before. */}
                 <View style={[styles.formCard, styles.stationCard]}>

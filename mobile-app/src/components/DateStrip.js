@@ -2,6 +2,7 @@ import React from "react";
 import { View, ScrollView, TouchableOpacity, StyleSheet } from "react-native";
 import { Text } from "../i18n/Localized";
 import { colors, spacing, radius } from "../theme/colors";
+import MicButton from "./MicButton";
 import { toDdMmYyyy, addDays, startOfToday, isSameDay, relativeDayLabel, monthShort } from "../utils/dateFormat";
 
 const DAYS_SHOWN = 8; // today + next 7 — matches the IRCTC quick-pick strip's width
@@ -18,9 +19,16 @@ const DAYS_SHOWN = 8; // today + next 7 — matches the IRCTC quick-pick strip's
 export default function DateStrip({ selected, onSelect }) {
   const today = startOfToday();
   const days = Array.from({ length: DAYS_SHOWN }, (_, i) => addDays(today, i));
+  // A spoken date can be outside the 8-day strip — then the mic pill shows it.
+  const outsideStrip = !!selected && !days.some((d) => toDdMmYyyy(d) === selected);
 
   return (
     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.scroll} contentContainerStyle={styles.content}>
+      {/* "28th aug" / "tomorrow" / "27th aug 2025" — no year means this year. */}
+      <View style={[styles.micPill, outsideStrip && styles.micPillActive]}>
+        <MicButton kind="date" onValue={(ddmmyyyy) => onSelect(ddmmyyyy)} size={20} />
+        <Text style={[styles.micLabel, outsideStrip && { color: colors.orange }]} noTranslate={outsideStrip}>{outsideStrip ? selected : "Say date"}</Text>
+      </View>
       {days.map((d) => {
         const ddmmyyyy = toDdMmYyyy(d);
         const active = selected === ddmmyyyy || (!selected && isSameDay(d, today));
@@ -42,6 +50,9 @@ export default function DateStrip({ selected, onSelect }) {
 }
 
 const styles = StyleSheet.create({
+  micPill: { minWidth: 64, alignItems: "center", justifyContent: "center", borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 6 },
+  micPillActive: { borderColor: colors.orange, backgroundColor: colors.orangeLight },
+  micLabel: { fontSize: 10.5, fontWeight: "700", color: colors.textMuted, marginTop: -4, marginBottom: 4 },
   scroll: { marginTop: spacing.xs, marginBottom: spacing.xs },
   content: { gap: 8, paddingVertical: 4, paddingRight: spacing.sm },
   pill: {

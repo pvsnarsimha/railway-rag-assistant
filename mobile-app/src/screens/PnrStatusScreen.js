@@ -8,6 +8,8 @@ import PrimaryButton from "../components/PrimaryButton";
 import { useSettings } from "../context/SettingsContext";
 import { getPnrStatus } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
 
 /**
  * RailYatri-style PNR Status tile. Reuses the EXISTING GET
@@ -46,9 +48,16 @@ export default function PnrStatusScreen() {
     }
   }
 
+  // HANDS-FREE: say the 10 digits ("four one two ..."), then it checks.
+  const hf = useHandsFreeForm({
+    steps: [{ key: "pnr", ask: "Please say your ten digit PNR number.", kind: "pnr", apply: setPnr, confirm: () => "Checking your PNR" }],
+    onDone: lookup,
+  });
+
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
       <SectionCard title="PNR Status" subtitle="Real-time booking status for a 10-digit PNR number.">
+        <HandsFreeBar hf={hf} />
         <LabeledInput
           label="PNR Number"
           placeholder="e.g. 2451234567"

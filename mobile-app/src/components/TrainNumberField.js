@@ -3,6 +3,7 @@ import { View, TouchableOpacity, ActivityIndicator, StyleSheet, Platform } from 
 import { Text, TextInput } from "../i18n/Localized";
 import { colors, spacing, radius } from "../theme/colors";
 import { suggestTrains } from "../api/railwayApi";
+import MicButton from "./MicButton";
 
 /**
  * Train-number box with a live dropdown, like a search engine's suggestions:
@@ -56,8 +57,9 @@ export default function TrainNumberField({ label, placeholder, value, onChangeTe
   return (
     <View style={[styles.wrap, style]}>
       {label ? <Text style={styles.label}>{label}</Text> : null}
+      <View style={styles.inputRow}>
       <TextInput
-        style={[styles.input, focused && styles.inputFocused]}
+        style={[styles.input, styles.inputFlex, focused && styles.inputFocused]}
         value={value}
         onChangeText={(v) => onChangeText(String(v).replace(/\D/g, "").slice(0, 5))}
         onFocus={() => { clearTimeout(blurRef.current); setFocused(true); }}
@@ -68,6 +70,9 @@ export default function TrainNumberField({ label, placeholder, value, onChangeTe
         maxLength={5}
         autoCorrect={false}
       />
+      {/* Say the number ("one two six five one") instead of typing it. */}
+      <MicButton kind="train" onValue={(digits) => { setFocused(true); onChangeText(digits); }} style={styles.mic} />
+      </View>
       {show ? (
         <View style={styles.dropdown}>
           {loading && !matches.length ? (
@@ -106,6 +111,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md, paddingVertical: spacing.sm + 2, fontSize: 15, color: colors.text, backgroundColor: colors.bg,
   },
   inputFocused: { borderColor: colors.primary },
+  inputRow: { flexDirection: "row", alignItems: "center" },
+  inputFlex: { flex: 1 },
+  mic: { marginLeft: 4 },
   dropdown: {
     marginTop: spacing.xs, backgroundColor: colors.card, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
     overflow: "hidden", shadowColor: "#1A2233", shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 3,

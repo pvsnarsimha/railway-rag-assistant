@@ -41,6 +41,8 @@ export const DEFAULT_WS_BASE_URL = DEFAULT_API_BASE_URL.replace(/^http/, "ws");
 export const STORAGE_KEYS = {
   API_BASE_URL: "@railway_rag/api_base_url",
   LANGUAGE: "@railway_rag/language",
+  // Hands-free (voice) mode on/off.
+  HANDS_FREE: "@railway_rag/hands_free",
   // Crowd-Sourced Train Position Reports: anonymous per-device id, see
   // src/utils/reporterId.js.
   REPORTER_ID: "@railway_rag/reporter_id",

@@ -4,6 +4,7 @@ import { Text, TextInput } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, spacing, radius } from "../theme/colors";
 import { searchStations, suggestStations } from "../api/railwayApi";
+import MicButton from "./MicButton";
 
 const MIN_QUERY_LEN = 2;
 const DEBOUNCE_MS = 300;
@@ -125,6 +126,8 @@ export default function StationField({
             <Text numberOfLines={1} style={styles.nameLine}>{resolvedName}</Text>
           ) : null}
         </View>
+        {/* Say the station ("vijayawada" or "v s k p"); the dropdown then offers the real matches. */}
+        <MicButton kind="station" onValue={(text) => { setFocused(true); onChangeText(text); }} size={18} style={{ padding: 4 }} />
         {value ? (
           <TouchableOpacity
             onPress={() => { onChangeText(""); }}

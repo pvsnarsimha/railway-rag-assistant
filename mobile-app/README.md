@@ -51,6 +51,30 @@ which web sources it used, if any.
 
   Typing always works as a fallback either way.
 
+## Hands-free mode (voice instead of typing)
+
+Turn it on in **Settings → Hands-free mode**. Every screen then asks for its
+fields aloud, listens, fills them in and runs the action:
+
+| Screen | It asks for | Then |
+|---|---|---|
+| Live Tracking | train number, date, getting-off station | starts tracking |
+| Trains between stations | from, to, date | searches |
+| Live Status / Fare / Seat availability / Time table / PNR / Station search | their fields | looks it up |
+| Assistant | your question | sends it |
+| Home | which section | opens it |
+
+How speech is understood (`src/utils/voiceParse.js`): digits can be said one
+by one ("one two six five one"), as teens ("twelve six five one") or as
+"double five"; dates accept "28th aug 2025", "twenty eighth of august twenty
+twenty five", "28/08", "today", "tomorrow"; **a date with no year uses the
+current year**. Say "skip", "repeat" or "stop" at any prompt. Every field also
+has its own mic button, so it works without turning the mode on.
+
+On a phone this needs `expo-speech-recognition` in a dev/installed build
+(`eas build`), not Expo Go. On web it uses Chrome/Edge's speech recognition.
+Parser checks: `npx esbuild src/utils/voiceParse.js --bundle --platform=node --format=cjs --outfile=/tmp/voiceParse.cjs && node tests/voice-parse.test.cjs`.
+
 ## Prerequisites
 
 - Node.js 18+

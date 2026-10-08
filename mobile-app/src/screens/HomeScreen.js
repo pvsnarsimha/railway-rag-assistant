@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { View, ScrollView, TouchableOpacity, StyleSheet } from "react-native";
 import { Text } from "../i18n/Localized";
 import { Ionicons } from "@expo/vector-icons";
@@ -7,6 +7,8 @@ import { useT } from "../context/LanguageContext";
 import ScreenLanguageBar from "../components/ScreenLanguageBar";
 import StationField from "../components/StationField";
 import { useSettings } from "../context/SettingsContext";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
 
 /**
  * RailYatri-style "Train Enquiry Center" home screen. REDESIGN NOTE (per
@@ -56,6 +58,28 @@ const QUICK_LAUNCH = [
   { key: "Settings", label: "Settings", icon: "settings-outline" },
 ];
 
+// HANDS-FREE menu: what the user says -> which screen opens.
+const VOICE_DESTINATIONS = [
+  [/pnr/, "PnrStatus"],
+  [/live (train )?status|running status|where is my train status/, "LiveTrainStatus"],
+  [/track|gps|where is/, "LiveTracking"],
+  [/seat|availability|berth/, "SeatAvailability"],
+  [/fare|price|cost|calculator/, "FareEnquiry"],
+  [/time ?table|schedule/, "TrainSchedule"],
+  [/station/, "StationSearch"],
+  [/search|between|find (a )?train|trains/, "TrainsBetween"],
+  [/chat|assistant|ask|help/, "Chat"],
+  [/more|tools/, "More"],
+  [/setting/, "Settings"],
+];
+function parseSpokenDestination(text) {
+  const s = String(text || "").toLowerCase();
+  const hit = VOICE_DESTINATIONS.find(([re]) => re.test(s));
+  return hit ? hit[1] : null;
+}
+const VOICE_NAMES = { PnrStatus: "PNR status", LiveTrainStatus: "live train status", LiveTracking: "live tracking", SeatAvailability: "seat availability",
+  FareEnquiry: "fare calculator", TrainSchedule: "time table", StationSearch: "station search", TrainsBetween: "train search", Chat: "the assistant", More: "more tools", Settings: "settings" };
+
 export default function HomeScreen({ navigation }) {
   const { t } = useT();
   const label = (l) => t(l.replace(/\n/g, " "));
@@ -88,6 +112,19 @@ export default function HomeScreen({ navigation }) {
     navigation.getParent()?.navigate(key);
   }
 
+  // HANDS-FREE: "live tracking", "PNR status", "fare" … opens that screen.
+  const voiceDestRef = useRef(null);
+  const hf = useHandsFreeForm({
+    steps: [
+      { key: "menu", ask: "What would you like to do? You can say live tracking, PNR status, train search, seat availability, fare, time table, station search, or live status.",
+        kind: parseSpokenDestination, apply: (dest) => { voiceDestRef.current = dest; }, confirm: (dest) => `Opening ${VOICE_NAMES[dest] || dest}` },
+    ],
+    onDone: () => {
+      const dest = voiceDestRef.current;
+      if (dest === "Chat" || dest === "Settings") openQuickLaunch(dest); else if (dest) openTile(dest);
+    },
+  });
+
   // Greeting follows the phone's own clock — display only.
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -119,6 +156,7 @@ export default function HomeScreen({ navigation }) {
           Trains" opens Trains Between Stations with both already filled in
           and the search already running. */}
       <View style={styles.searchCard}>
+        <HandsFreeBar hf={hf} />
         <StationField
           label={t("From")}
           placeholder={t("Station name or code")}

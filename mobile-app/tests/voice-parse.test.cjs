@@ -1,0 +1,43 @@
+// Checks for hands-free spoken-input parsing (utils/voiceParse.js).
+// Run:  cd mobile-app && npx esbuild src/utils/voiceParse.js --bundle --platform=node --format=cjs --outfile=/tmp/voiceParse.cjs && node tests/voice-parse.test.cjs
+const v = require('/tmp/voiceParse.cjs');
+const ok = (n, c) => { console.log((c ? 'PASS' : 'FAIL'), n); if (!c) process.exitCode = 1; };
+const now = new Date(2026, 9, 8); // 8 Oct 2026
+const d = (t) => v.parseSpokenDateString(t, now);
+ok('train digits', v.parseSpokenTrainNumber('12651') === '12651');
+ok('train spaced digits', v.parseSpokenTrainNumber('1 2 6 5 1') === '12651');
+ok('train words', v.parseSpokenTrainNumber('one two six five one') === '12651');
+ok('train teen words', v.parseSpokenTrainNumber('twelve six five one') === '12651');
+ok('train double', v.parseSpokenTrainNumber('double one two double five') === '11255');
+ok('train oh', v.parseSpokenTrainNumber('one two seven oh one') === '12701');
+ok('train with filler', v.parseSpokenTrainNumber('train number one two seven zero six') === '12706');
+ok('train comma', v.parseSpokenTrainNumber('12,706') === '12706');
+ok('train too long', v.parseSpokenTrainNumber('1234567') === null);
+ok('train none', v.parseSpokenTrainNumber('hello') === null);
+ok('date 28th aug 2025', d('28th aug 2025') === '28-08-2025');
+ok('date 28th aug -> this year', d('28th aug') === '28-08-2026');
+ok('date 27th august', d('27th august') === '27-08-2026');
+ok('date august 27', d('august 27') === '27-08-2026');
+ok('date 28 August 2025', d('28 August 2025') === '28-08-2025');
+ok('date words', d('twenty eighth of august twenty twenty five') === '28-08-2025');
+ok('date words no year', d('twenty seventh august') === '27-08-2026');
+ok('date month first words', d('august twenty eight twenty twenty five') === '28-08-2025');
+ok('date two thousand', d('3 march two thousand twenty five') === '03-03-2025');
+ok('date today', d('today') === '08-10-2026');
+ok('date tomorrow', d('tomorrow') === '09-10-2026');
+ok('date yesterday', d('yesterday') === '07-10-2026');
+ok('date day after tomorrow', d('day after tomorrow') === '10-10-2026');
+ok('date numeric', d('28/08/2025') === '28-08-2025');
+ok('date numeric no year', d('28-08') === '28-08-2026');
+ok('date invalid 31 feb', d('31st february') === null);
+ok('date 1st sept', d('1st sept') === '01-09-2026');
+ok('date may', d('5th may 2027') === '05-05-2027');
+ok('date nothing', d('hello there') === null);
+ok('time 10:30', v.parseSpokenTime('10:30') === '10:30');
+ok('time words', v.parseSpokenTime('ten thirty') === '10:30');
+ok('time pm', v.parseSpokenTime('six pm') === '18:00');
+ok('station spelled', v.parseSpokenStation('s c') === 'SC');
+ok('station name', v.parseSpokenStation('from vijayawada junction') === 'vijayawada junction');
+ok('pnr', v.parseSpokenPnr('four one two three four five six seven eight nine') === '4123456789');
+ok('cmd stop', v.parseVoiceCommand('please stop') === 'stop');
+ok('cmd skip', v.parseVoiceCommand('skip') === 'skip');

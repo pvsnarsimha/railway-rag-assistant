@@ -17,6 +17,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { colors, spacing, radius } from "../theme/colors";
 import ChatBubble, { AssistantAvatar } from "../components/ChatBubble";
 import MicButton from "../components/MicButton";
+import HandsFreeBar from "../components/HandsFreeBar";
+import useHandsFreeForm from "../hooks/useHandsFreeForm";
 import { useSettings } from "../context/SettingsContext";
 import { sendChatMessage, getOfflineKnowledgeBase } from "../api/railwayApi";
 import { describeApiError } from "../api/client";
@@ -310,6 +312,11 @@ export default function ChatScreen({ navigation }) {
     }
   }
 
+  // HANDS-FREE: ask the question out loud and it is sent straight away.
+  const hf = useHandsFreeForm({
+    steps: [{ key: "q", ask: "What would you like to know?", kind: "text", apply: (text) => handleSend(text) }],
+  });
+
   const isEmpty = messages.length <= 1 && !sending;
   const canSend = !sending && (input.trim().length > 0 || !!pendingImage);
 
@@ -377,6 +384,7 @@ export default function ChatScreen({ navigation }) {
       {/* Floating composer: text on top, tools underneath, send on the right. */}
       <View style={styles.composerWrap}>
         <View style={styles.composer}>
+          <HandsFreeBar hf={hf} style={{ marginHorizontal: 12 }} />
           {pendingImage && (
             <View style={styles.previewRow}>
               <Image source={{ uri: pendingImage.uri }} style={styles.previewImage} />
