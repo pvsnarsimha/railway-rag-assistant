@@ -19,6 +19,8 @@ def _t(h, m):  # IST clock as the naive datetime the helper expects
 
 def test_arrival_stamped_immediately_and_departure_after_leaving():
     tl, seen = _tl(), {}
+    pa.infer_position_arrivals(tl, 340.0, seen, _t(10, 0))
+    assert tl[0]["status"] == "upcoming"
     pa.infer_position_arrivals(tl, 349.5, seen, _t(10, 12))
     a = tl[0]["arrival"]
     assert (a["actual"], a["actual_is_predicted"], a["actual_source"], a["delay_minutes"]) == ("10:12", False, "position", 12)
@@ -42,3 +44,11 @@ def test_no_position_no_change():
     tl = _tl()
     pa.infer_position_arrivals(tl, None, {}, _t(10, 12))
     assert tl[0]["status"] == "upcoming"
+
+
+def test_stop_already_behind_train_when_tracking_starts_is_not_stamped():
+    tl, seen = _tl(), {}
+    pa.infer_position_arrivals(tl, 400.0, seen, _t(15, 18))
+    assert tl[0]["arrival"]["actual_is_predicted"] is True and "actual_source" not in tl[0]["arrival"]
+    pa.infer_position_arrivals(tl, 405.0, seen, _t(15, 19))
+    assert tl[0]["arrival"]["actual"] == "10:00"

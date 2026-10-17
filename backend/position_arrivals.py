@@ -68,7 +68,9 @@ def infer_position_arrivals(timeline_json: list, current_km: Optional[float],
                             observed: dict, now: Optional[datetime] = None) -> None:
     """Mutates timeline_json in place. `observed` is a connection-scoped dict
     (code -> {"arr": "HH:MM", "dep": "HH:MM"|None}) so the times observed
-    first stay fixed on later polls."""
+    first stay fixed on later polls. Only stops seen AHEAD of the train on an
+    earlier poll are stamped; anything already behind it when tracking began
+    keeps the provider's own times."""
     if current_km is None or not timeline_json:
         return
     from gps_tracking import _distance_km_value  # local: avoid import cycle
@@ -86,8 +88,22 @@ def infer_position_arrivals(timeline_json: list, current_km: Optional[float],
             observed.pop(code, None)
             continue
         if current_km < stop_km - ARRIVE_WITHIN_KM:
+            # Still ahead: remember we saw it that way, so a later arrival is
+            # one we actually watched happen.
+            observed.setdefault(code, {"before": True})
             continue
-        rec = observed.setdefault(code, {"arr": clock, "dep": None})
+        rec = observed.get(code)
+        if rec is None:
+            # First seen with the train already at/past it (page opened
+            # mid-journey, or the origin): the real moment is unknown, so
+            # leave the provider's times alone rather than stamp "now".
+            observed[code] = {"skip": True}
+            continue
+        if rec.get("skip"):
+            continue
+        if rec.get("before"):
+            rec.pop("before")
+            rec.update(arr=clock, dep=None)
         _stamp(arrival, rec["arr"])
         beyond = current_km >= stop_km + DEPART_BEYOND_KM
         if beyond and rec["dep"] is None:
