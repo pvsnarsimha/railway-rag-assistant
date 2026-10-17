@@ -27,7 +27,9 @@ function heldStopIndex(timeline, nowMs) {
     const s = timeline[i];
     if (s.kind === "intermediate" || !s.code) continue;
     const arr = s.arrival;
-    if (!arr || !arr.actual || arr.actual_is_predicted !== false) return -1;
+    // The provider's own "current" pointer may already sit on a stop with
+    // no recorded arrival yet; look further back for the last real one.
+    if (!arr || !arr.actual || arr.actual_is_predicted !== false) continue;
     const since = minutesSinceClock(arr.actual, nowMs);
     return since != null && since <= DWELL_HOLD_MINUTES ? i : -1;
   }
