@@ -6865,7 +6865,9 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     # station starts unlocked and only locks once real evidence for this
     # specific run has actually been seen this session.
     locked_station_predictions = {}
-    position_observed_times = {}
+    # Shared per train+date (not per connection) so a reconnect or a second
+    # tab sees the SAME stamped arrival times instead of re-deciding them.
+    position_observed_times = position_arrivals.observed_for(train_number, requested_date_ddmmyyyy)
     # FEATURE: per-station "predicted vs. actual" snapshot for the delay
     # chart - see _snapshot_prediction_before_arrival. Same connection-
     # lifetime pattern as locked_station_predictions above.

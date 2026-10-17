@@ -23,6 +23,18 @@ DEPART_BEYOND_KM = 1.0
 SOURCE = "position"
 
 
+_OBSERVED: dict = {}
+_OBSERVED_MAX = 200
+
+
+def observed_for(train_number, date) -> dict:
+    """Process-wide observation store for one train run."""
+    key = (str(train_number).strip(), str(date or ""))
+    if key not in _OBSERVED and len(_OBSERVED) >= _OBSERVED_MAX:
+        _OBSERVED.pop(next(iter(_OBSERVED)))
+    return _OBSERVED.setdefault(key, {})
+
+
 def _ist_hhmm(now: Optional[datetime] = None) -> str:
     now = now or (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30))
     return now.strftime("%H:%M")
@@ -76,7 +88,8 @@ def infer_position_arrivals(timeline_json: list, current_km: Optional[float],
     from gps_tracking import _distance_km_value  # local: avoid import cycle
 
     clock = _ist_hhmm(now)
-    for stop in timeline_json:
+    last_idx = -1
+    for idx, stop in enumerate(timeline_json):
         if stop.get("kind") == "intermediate":
             continue
         code = (stop.get("code") or "").strip().upper()
@@ -109,5 +122,28 @@ def infer_position_arrivals(timeline_json: list, current_km: Optional[float],
         if beyond and rec["dep"] is None:
             rec["dep"] = clock
         stop["status"] = "passed" if beyond else "current"
+        last_idx = idx
         if beyond and isinstance(departure, dict) and not _provider_has_real(departure):
             _stamp(departure, rec["dep"])
+    if last_idx >= 0:
+        _fix_statuses(timeline_json, last_idx)
+
+
+def _fix_statuses(timeline_json: list, last_idx: int) -> None:
+    """Keep exactly one "current" stop. Everything before the last reached
+    halt is passed (the provider's own pointer may still sit behind it, which
+    drew two train icons), and when that halt is already left, the next stop
+    becomes current unless the provider already has one further on. A
+    timeline with NO current stop makes the app think the journey is over
+    ("Train has reached destination", every stop shown as Actual)."""
+    for i in range(last_idx):
+        if timeline_json[i].get("status") != "passed":
+            timeline_json[i]["status"] = "passed"
+    last = timeline_json[last_idx]
+    ahead_current = any(s.get("status") == "current" for s in timeline_json[last_idx + 1:])
+    if last.get("status") == "current":
+        for s in timeline_json[last_idx + 1:]:
+            if s.get("status") == "current":
+                s["status"] = "upcoming"
+    elif not ahead_current and last_idx + 1 < len(timeline_json):
+        timeline_json[last_idx + 1]["status"] = "current"

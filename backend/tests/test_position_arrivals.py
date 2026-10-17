@@ -52,3 +52,18 @@ def test_stop_already_behind_train_when_tracking_starts_is_not_stamped():
     assert tl[0]["arrival"]["actual_is_predicted"] is True and "actual_source" not in tl[0]["arrival"]
     pa.infer_position_arrivals(tl, 405.0, seen, _t(15, 19))
     assert tl[0]["arrival"]["actual"] == "10:00"
+
+
+def test_exactly_one_current_stop_and_never_none():
+    tl = [
+        {"code": "X", "kind": "intermediate", "status": "current", "distance_km": "240"},
+        {"code": "KMT", "kind": "stoppage", "status": "upcoming", "distance_km": "249.2",
+         "arrival": {"scheduled": "17:45"}, "departure": {"scheduled": "17:46"}},
+        {"code": "P", "kind": "intermediate", "status": "upcoming", "distance_km": "258"},
+    ]
+    seen = {}
+    pa.infer_position_arrivals(tl, 245.0, seen, _t(18, 3))
+    for km in (249.1, 250.5):
+        tl[0]["status"] = "current"  # provider's stale pointer
+        pa.infer_position_arrivals(tl, km, seen, _t(18, 5))
+        assert sum(s["status"] == "current" for s in tl) == 1
