@@ -90,6 +90,7 @@ import push_notifications
 import alert_scheduler
 import running_status
 import quick_live
+import position_arrivals
 import cell_tower_store
 import smart_features
 import version
@@ -6864,6 +6865,7 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
     # station starts unlocked and only locks once real evidence for this
     # specific run has actually been seen this session.
     locked_station_predictions = {}
+    position_observed_times = {}
     # FEATURE: per-station "predicted vs. actual" snapshot for the delay
     # chart - see _snapshot_prediction_before_arrival. Same connection-
     # lifetime pattern as locked_station_predictions above.
@@ -8154,6 +8156,15 @@ async def ws_track_train(websocket: WebSocket, train_number: str):
                     live_current_distance_km=current_position_distance_km,
                 )
                 _mirror_origin_destination_timing(timeline_json)
+                # Providers record a halt's real arrival/departure 20-30 min
+                # late; stamp it from the live position the moment the train
+                # gets there (provider actuals still win).
+                if live_source == "railradar":
+                    try:
+                        position_arrivals.infer_position_arrivals(
+                            timeline_json, current_position_distance_km, position_observed_times)
+                    except Exception:  # noqa: BLE001 - must never break a poll
+                        pass
                 _lock_grounded_station_predictions(timeline_json, locked_station_predictions)
                 _snapshot_prediction_before_arrival(timeline_json, final_predictions_by_station)
                 _sync_station_delay_history(timeline_json, final_predictions_by_station, train_number, date_ddmmyyyy, next_station_code_display)

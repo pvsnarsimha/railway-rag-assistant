@@ -27,7 +27,6 @@ import TrainNumberField from "../components/TrainNumberField";
 import SmartAlarmSheet from "../components/SmartAlarmSheet";
 import JourneyGlance, { stopEtaClock, minusMinutes, stopTimes } from "../components/JourneyGlance";
 import { applyGpsOverlay, checkGpsOnTrain, notOnTrainMessage } from "../utils/gpsOverlay";
-import { applyStationDwell } from "../utils/stationDwell";
 import { isSpeechSupported, loadReadAloud, loadReadAloudAsync, saveReadAloud, speak, stopSpeaking, onTrainPush, shouldSpeakPush } from "../utils/speakNotifications";
 import { getLanguage, hasChosenLanguage, languageInfo, loadLanguage, SAMPLE } from "../utils/notifyLanguage";
 import LanguagePickerModal from "../components/LanguagePickerModal";
@@ -668,11 +667,7 @@ export default function LiveTrackingScreen({ navigation }) {
     [gpsOn, gpsResult, rawPayload],
   );
   const payload = useMemo(
-    () => {
-      const base = gpsVerdict && gpsVerdict.ok ? applyGpsOverlay(rawPayload, gpsResult, gpsSpeedKmph) : rawPayload;
-      // Keep the train shown at a halt for 10 min after its real arrival.
-      return applyStationDwell(base);
-    },
+    () => (gpsVerdict && gpsVerdict.ok ? applyGpsOverlay(rawPayload, gpsResult, gpsSpeedKmph) : rawPayload),
     [gpsVerdict, gpsResult, gpsSpeedKmph, rawPayload],
   );
   const gpsNotOnTrainCountRef = useRef(0);
@@ -2171,7 +2166,7 @@ export default function LiveTrackingScreen({ navigation }) {
     if (gpsOn && payload.gps_headline) return { headline: payload.gps_headline, sub };
     const at = timeline[lastReached];
     const timing = (at.departure && at.departure.actual) || (at.arrival && at.arrival.actual);
-    const verb = at.status === "current" && at.kind !== "intermediate" && (at.dwell_hold || !(at.departure && at.departure.actual)) ? "At" : "Crossed";
+    const verb = at.status === "current" && at.kind !== "intermediate" && !(at.departure && at.departure.actual) ? "At" : "Crossed";
     const km = payload.distance_remaining_to_next_km;
     const nxt = timeline[lastReached + 1];
     const headline = `${verb} ${toDisplayCase(at.name)}${timing && verb === "Crossed" ? ` at ${String(timing).slice(0, 5)}` : ""}`
