@@ -6,6 +6,7 @@ import { getStationMap } from "../../api/railwayApi";
 import { describeApiError } from "../../api/client";
 import { st, useTrip, ToolHeader, TripForm, Pill, Note, formatIn } from "./stationShared";
 import { PlatformScene } from "./stationScenes";
+import PickupGuide from "./PickupGuide";
 
 const FACILITY = {
   booking: { icon: "🎫", label: "Booking" },
@@ -302,6 +303,11 @@ export default function StationNavigatorView({ apiBaseUrl, onBack, initialTarget
               {loading ? <ActivityIndicator color={st.blue} style={{ marginTop: 10 }} /> : null}
               {error ? <Text style={{ color: st.red, marginTop: 8 }}>{error}</Text> : null}
             </View>
+
+            <PickupGuide
+              apiBaseUrl={apiBaseUrl} station={data.station} stationName={data.station_name}
+              platform={target} stepFree={stepFree}
+            />
 
             {data.entrance_sides?.length ? (
               <View style={styles.infoCard}>
