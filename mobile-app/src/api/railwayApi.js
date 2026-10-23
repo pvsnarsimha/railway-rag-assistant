@@ -960,6 +960,13 @@ export async function locatePlatform(baseUrl, { trainNumber, station, date, coac
   return data;
 }
 
+/** Closest station to a GPS fix: { code, name, distance_km, at_station }. */
+export async function nearestStation(baseUrl, { lat, lng }) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.get("/api/station/nearest", { params: { lat, lng } });
+  return data;
+}
+
 /** Passenger report: "the train is really on platform N". */
 export async function reportPlatform(baseUrl, { trainNumber, station, platform, reporter }) {
   const client = makeClient(baseUrl);

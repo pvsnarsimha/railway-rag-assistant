@@ -98,7 +98,7 @@ function phoneSpeedKmph(gps, history) {
  *      live feed says the train is;
  *   2. movement — while the train is clearly running, a phone that is not
  *      moving (at home, on a platform) is not on it. */
-export function checkGpsOnTrain(raw, gps, now = new Date(), history = null) {
+export function checkGpsOnTrain(raw, gps, now = new Date(), history = null, verified = false) {
   if (!gps || gps.error || gps.currentKm == null) return { ok: false, unknown: true };
   const live = liveTrainPosition(raw, now);
   if (!live) return { ok: true, unknown: true }; // nothing to compare against
@@ -109,7 +109,11 @@ export function checkGpsOnTrain(raw, gps, now = new Date(), history = null) {
   if (Math.abs(gap) > live.tolKm + acc) return { ...base, ok: false, reason: "far" };
   const trainSpeed = Number(raw && (raw.display_speed_kmph || raw.avg_speed_kmph)) || 0;
   const phoneSpeed = phoneSpeedKmph(gps, history);
-  if (trainSpeed >= 40 && phoneSpeed != null && phoneSpeed < 5) return { ...base, ok: false, reason: "stationary", phoneSpeed };
+  // The "phone isn't moving" test only screens the FIRST check (a phone on a
+  // platform / at home). Once this session has been verified on the train, a
+  // stopped phone is just the train halting at a station or signal (the feed's
+  // speed is often still stale-high then), so it must never end GPS mode.
+  if (!verified && trainSpeed >= 40 && phoneSpeed != null && phoneSpeed < 5) return { ...base, ok: false, reason: "stationary", phoneSpeed };
   return { ...base, ok: true };
 }
 

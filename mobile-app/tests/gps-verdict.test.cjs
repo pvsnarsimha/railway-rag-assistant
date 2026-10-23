@@ -13,4 +13,6 @@ ok('stationary ok when train is halted', g.checkGpsOnTrain(raw({display_speed_km
 ok('not started rejected', g.checkGpsOnTrain({timeline:[{status:'upcoming',distance_km:0},{status:'upcoming',distance_km:100}], status_updated_at:new Date().toISOString()}, {currentKm:2, speedKmph:60}, now).reason === 'not_started');
 ok('no live feed -> cannot verify, allowed', g.checkGpsOnTrain(null, {currentKm:50}, now).unknown === true);
 ok('history-based stationary', g.checkGpsOnTrain(raw(), {currentKm:111}, now, [{km:111,t:now-120000},{km:111,t:+now}]).reason === 'stationary');
+ok('verified session: halt at a station (phone stopped, stale feed speed) stays on', g.checkGpsOnTrain(raw(), {currentKm:111, speedKmph:0}, now, null, true).ok === true);
+ok('verified session: phone far from train still fails', g.checkGpsOnTrain(raw(), {currentKm:150, speedKmph:0}, now, null, true).reason === 'far');
 console.log(g.notOnTrainMessage({ok:false, reason:'far', gapKm:40, ahead:false}, '20834'));
