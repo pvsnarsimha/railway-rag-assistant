@@ -658,20 +658,21 @@ export default function LiveTrackingScreen({ navigation }) {
     const avg = rawPayload && (rawPayload.avg_speed_kmph || rawPayload.display_speed_kmph);
     return avg && avg > 10 ? avg : 50;
   }, [gpsResult, rawPayload]);
+  const gpsNotOnTrainCountRef = useRef(0);
+  const gpsFailSinceRef = useRef(null); // when the current run of failed checks began
+  const gpsVerifiedRef = useRef(false); // has this GPS session passed the on-train check yet?
   // BUGFIX ("for GPS it is getting wrong data"): being NEAR the route isn't
   // being ON the train. The phone's position along the route must also
   // match where the live feed says the train is; until it does, the screen
   // keeps showing the live (internet) data, never the phone's position.
   const gpsVerdict = useMemo(
-    () => (gpsOn && gpsResult && !gpsResult.error ? checkGpsOnTrain(rawPayload, gpsResult, new Date(), gpsHistoryRef.current) : null),
+    () => (gpsOn && gpsResult && !gpsResult.error ? checkGpsOnTrain(rawPayload, gpsResult, new Date(), gpsHistoryRef.current, gpsVerifiedRef.current) : null),
     [gpsOn, gpsResult, rawPayload],
   );
   const payload = useMemo(
     () => (gpsVerdict && gpsVerdict.ok ? applyGpsOverlay(rawPayload, gpsResult, gpsSpeedKmph) : rawPayload),
     [gpsVerdict, gpsResult, gpsSpeedKmph, rawPayload],
   );
-  const gpsNotOnTrainCountRef = useRef(0);
-  const gpsVerifiedRef = useRef(false); // has this GPS session passed the on-train check yet?
 
   // REDESIGN (RailYatri-style live position marker): a real countdown to
   // the next WebSocket message — the backend sends a message every 5s
@@ -2032,6 +2033,7 @@ export default function LiveTrackingScreen({ navigation }) {
       gpsHistoryRef.current = [];
       gpsVerifiedRef.current = false;
       gpsNotOnTrainCountRef.current = 0;
+      gpsFailSinceRef.current = null;
       setModeNotice(null);
       setGpsOn(true);
     } else {
@@ -2058,10 +2060,19 @@ export default function LiveTrackingScreen({ navigation }) {
   // Internet" message and the screen goes back to the internet feed.
   useEffect(() => {
     if (!gpsOn || !gpsVerdict || gpsVerdict.unknown) return;
-    if (gpsVerdict.ok) { gpsNotOnTrainCountRef.current = 0; gpsVerifiedRef.current = true; return; }
-    gpsNotOnTrainCountRef.current += 1;
-    if (gpsVerifiedRef.current && gpsNotOnTrainCountRef.current < 2) return;
+    if (gpsVerdict.ok) { gpsNotOnTrainCountRef.current = 0; gpsFailSinceRef.current = null; gpsVerifiedRef.current = true; return; }
+    // Once verified, the passenger is only dropped when the phone has clearly
+    // LEFT the train: out of step with it for 3 readings in a row AND for at
+    // least 2 minutes. A halt at a station, a signal stop or a GPS glitch
+    // never disconnects. (An unverified first reading is still refused at once.)
+    if (gpsVerifiedRef.current) {
+      const nowMs = Date.now();
+      if (gpsFailSinceRef.current == null) gpsFailSinceRef.current = nowMs;
+      gpsNotOnTrainCountRef.current += 1;
+      if (gpsNotOnTrainCountRef.current < 3 || nowMs - gpsFailSinceRef.current < 2 * 60000) return;
+    }
     gpsNotOnTrainCountRef.current = 0;
+    gpsFailSinceRef.current = null;
     gpsVerifiedRef.current = false;
     setGpsOn(false);
     setApproachNotice(null);

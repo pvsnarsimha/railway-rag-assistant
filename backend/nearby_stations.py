@@ -109,6 +109,20 @@ def find_nearby_stations(anchor_code: Optional[str], radius_km: float = 150.0, l
     return result
 
 
+def nearest_station_to(lat: float, lng: float, at_station_km: float = 1.5) -> Optional[dict]:
+    """Closest station to a GPS fix (phone). `at_station` is True when the fix is
+    within `at_station_km` of it, i.e. the phone is at/in the station."""
+    best, best_d = None, None
+    for code, info in _STATION_COORDS.items():
+        d = haversine_km(lat, lng, info["lat"], info["lng"])
+        if best_d is None or d < best_d:
+            best, best_d = (code, info), d
+    if best is None:
+        return None
+    return {"code": best[0], "name": best[1]["name"], "distance_km": round(best_d, 2),
+            "at_station": best_d <= at_station_km}
+
+
 def format_nearby_stations(result: NearbyStationsResult) -> str:
     """Plain-text summary for grounding the LLM prompt / no-key fallback view."""
     if not result.anchor_known:

@@ -3,7 +3,7 @@ import { AppState, View, StyleSheet, TextInput, ScrollView, TouchableOpacity, Re
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import { Text } from "../../i18n/Localized";
-import { locatePlatform, reportPlatform } from "../../api/railwayApi";
+import { locatePlatform, nearestStation, reportPlatform } from "../../api/railwayApi";
 import { getReporterId } from "../../utils/reporterId";
 import { describeApiError } from "../../api/client";
 import { scheduleLocalAlarm, ensureLocalNotificationPermission } from "../../services/pushNotifications";
@@ -74,6 +74,31 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
   // the app doesn't also fire its own local notification (a duplicate).
   const serverWatchRef = useRef(false);
   alertRef.current = alertOn;
+
+  // GPS: fill the station from where the phone is (at the station, or the
+  // closest one while travelling) and look up the platform for it.
+  const [gpsBusy, setGpsBusy] = useState(false);
+  const [gpsNote, setGpsNote] = useState(null);
+  const [formKey, setFormKey] = useState(0);
+  async function useGps() {
+    setGpsBusy(true); setGpsNote(null);
+    try {
+      const Location = require("expo-location");
+      const perm = await Location.requestForegroundPermissionsAsync();
+      if (perm.status !== "granted") { setGpsNote("Location permission denied — allow it to use GPS."); return; }
+      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      const near = await nearestStation(apiBaseUrl, { lat: pos.coords.latitude, lng: pos.coords.longitude });
+      const patch = { ...tripRef.current, station: near.code, stationName: near.name };
+      setTrip({ station: near.code, stationName: near.name });
+      setFormKey((k) => k + 1);
+      setGpsNote(near.at_station
+        ? `📍 GPS: you are at ${near.name} (${near.code}).`
+        : `📍 GPS: closest station is ${near.name} (${near.code}), ${near.distance_km} km away.`);
+      if (patch.trainNumber) run(patch);
+    } catch (e) {
+      setGpsNote("Couldn't read your GPS location right now.");
+    } finally { setGpsBusy(false); }
+  }
 
   const run = useCallback(async (t, { quiet } = {}) => {
     if (!t?.trainNumber || !t?.station) return;
@@ -367,7 +392,14 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => run(trip, { quiet: true })} />}
       >
         {showForm && (
+          <TouchableOpacity onPress={useGps} disabled={gpsBusy} style={{ alignSelf: "flex-start", paddingVertical: 6 }}>
+            <Text style={{ color: st.blue, fontWeight: "600" }}>{gpsBusy ? "Finding your station…" : "📍 Use my GPS to find the station"}</Text>
+          </TouchableOpacity>
+        )}
+        {showForm && gpsNote ? <Text style={{ color: st.muted || "#64748B", marginBottom: 6 }}>{gpsNote}</Text> : null}
+        {showForm && (
           <TripForm
+            key={formKey}
             apiBaseUrl={apiBaseUrl} trip={trip} setTrip={setTrip}
             fields={["train", "station", "coach", "berth"]}
             submitLabel={isCoach ? "Find my coach" : "Find platform"}

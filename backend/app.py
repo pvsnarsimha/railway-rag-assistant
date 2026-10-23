@@ -4854,6 +4854,17 @@ def api_station_live_board(station_code: str, mode: str = "departures", hours: i
     return station_tools.live_board(code, mode, hours)
 
 
+@app.get("/api/station/nearest")
+def api_station_nearest(lat: float, lng: float):
+    """Platform Locator + GPS: which station is the phone at / closest to."""
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        raise HTTPException(status_code=400, detail="Invalid coordinates.")
+    res = nearby_stations.nearest_station_to(lat, lng)
+    if not res:
+        raise HTTPException(status_code=404, detail="No station data available.")
+    return res
+
+
 @app.get("/api/station/platform-locate")
 def api_station_platform_locate(
     train_number: str, station: str, date: Optional[str] = None,
