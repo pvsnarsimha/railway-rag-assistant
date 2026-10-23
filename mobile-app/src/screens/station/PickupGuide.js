@@ -96,7 +96,9 @@ export default function PickupGuide({ apiBaseUrl, station, stationName, platform
           {route.steps.map((s, i) => (
             <View key={i} style={[styles.step, step === i && styles.stepOn]}>
               <View style={[styles.num, (step === i || (step != null && i < step)) && { backgroundColor: st.blue }]}>
-                <Text style={[styles.numText, step === i && { color: "#fff" }]}>{i + 1}</Text>
+                {step != null && i < step
+                  ? <Ionicons name="checkmark" size={14} color="#fff" />
+                  : <Text style={[styles.numText, step === i && { color: "#fff" }]}>{i + 1}</Text>}
               </View>
               <Ionicons name={STEP_ICON[s.icon] || "walk-outline"} size={16} color={st.muted} style={{ marginRight: 6 }} />
               <Text style={styles.stepText}>{s.text}{s.meters ? ` · ${s.meters} m` : ""}</Text>
