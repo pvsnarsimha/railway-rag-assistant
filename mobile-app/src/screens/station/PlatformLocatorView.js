@@ -391,12 +391,12 @@ export default function PlatformLocatorView({ apiBaseUrl, onBack, onNavigate, mo
         keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => run(trip, { quiet: true })} />}
       >
-        {showForm && (
+        {(
           <TouchableOpacity onPress={useGps} disabled={gpsBusy} style={{ alignSelf: "flex-start", paddingVertical: 6 }}>
             <Text style={{ color: st.blue, fontWeight: "600" }}>{gpsBusy ? "Finding your station…" : "📍 Use my GPS to find the station"}</Text>
           </TouchableOpacity>
         )}
-        {showForm && gpsNote ? <Text style={{ color: st.muted || "#64748B", marginBottom: 6 }}>{gpsNote}</Text> : null}
+        {gpsNote ? <Text style={{ color: st.muted || "#64748B", marginBottom: 6 }}>{gpsNote}</Text> : null}
         {showForm && (
           <TripForm
             key={formKey}
