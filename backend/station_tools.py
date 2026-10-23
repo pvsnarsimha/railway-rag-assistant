@@ -24,6 +24,8 @@ arrival{} objects), so every field is looked up through a list of known
 aliases. A field no provider sent stays None.
 """
 
+import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -635,4 +637,57 @@ def station_map(station_code: str, platform: Optional[int] = None, train_number:
             "through any API. It follows the usual layout (PF 1 by the main entrance, higher platforms "
             "via the foot over bridge). Distances and walking time are estimates."
         ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cab pickup points + walking route to them (Station Navigator)
+# ---------------------------------------------------------------------------
+_PICKUP_PATH = os.path.join(os.path.dirname(__file__), "data", "cab_pickup_points.json")
+try:
+    with open(_PICKUP_PATH, "r", encoding="utf-8") as _f:
+        _PICKUP_POINTS = json.load(_f)
+except (OSError, ValueError):
+    _PICKUP_POINTS = {}
+_GENERIC_PICKUP = [{"id": "main-entrance", "name": "Main Entrance", "hint": "Cabs and autos wait outside the main entrance",
+                    "lat": None, "lng": None, "verified": False}]
+
+
+def pickup_points(station_code: str) -> list:
+    code = (station_code or "").strip().upper()
+    return (_PICKUP_POINTS.get(code) or {}).get("points") or _GENERIC_PICKUP
+
+
+def pickup_route(station_code: str, platform: Optional[int], point_id: str, step_free: bool = False) -> dict:
+    """Walking steps from `platform` to the chosen cab pickup point: off the
+    platform, over the bridge/lift, through the concourse, out, then to the
+    point. Same schematic model as station_map - distances are estimates."""
+    code = (station_code or "").strip().upper()
+    points = pickup_points(code)
+    point = next((p for p in points if p["id"] == point_id), None)
+    if point is None:
+        raise ValueError(f"Unknown pickup point '{point_id}' for {code}.")
+    platform = max(1, int(platform or 1))
+    name = station_name(code) or code
+    steps = []
+    if platform > 1:
+        bridge_m = (platform - 1) * _PLATFORM_SPACING_M + 20
+        how = "Take the lift up to the foot over bridge, then the lift down" if step_free else "Climb the stairs to the foot over bridge (or take the lift)"
+        steps.append({"icon": "lift" if step_free else "stairs",
+                      "text": f"From PF {platform}, {how[0].lower()}{how[1:]} towards the main concourse", "meters": bridge_m})
+    else:
+        steps.append({"icon": "walk", "text": "PF 1 is beside the main entrance - walk along the platform to the exit", "meters": 30})
+    steps.append({"icon": "walk", "text": "Walk through the concourse past the booking office, following the Exit signs", "meters": 45})
+    steps.append({"icon": "enter", "text": "Leave the station building through the main exit", "meters": 20})
+    steps.append({"icon": "flag", "text": f"Walk to the {point['name']} pickup point. {point['hint']}. Look for the cab and auto stand or ask station staff",
+                  "meters": 0})
+    total_m = sum(s["meters"] for s in steps)
+    minutes = total_m / _WALK_M_PER_MIN + (_LIFT_EXTRA_MIN if step_free and platform > 1 else 0)
+    return {
+        "station": code, "station_name": name, "platform": platform, "point": point,
+        "steps": steps, "walk_meters": int(round(total_m / 5.0) * 5), "walk_minutes": max(1, int(round(minutes))),
+        "maps_query": f"{point['name']}, {name} Railway Station",
+        "disclaimer": ("Schematic route, not the station's real floor plan. The last leg to the pickup point is "
+                       "described by name only; coordinates are not verified yet." if not point.get("verified") or point.get("lat") is None
+                       else "Schematic route; distances are estimates."),
     }

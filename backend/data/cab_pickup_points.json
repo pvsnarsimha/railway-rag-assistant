@@ -1,0 +1,10 @@
+{
+  "_comment": "Cab/auto pickup points outside stations, used by Station Navigator. Only names that are widely-known public pickup spots are listed. lat/lng are null until verified on the ground - never guessed - and the app then opens the map by place name. `verified` is false for every entry added from general knowledge; the app labels such points accordingly. Add a station by adding a code key; stations without an entry fall back to a generic 'Main entrance' pickup.",
+  "BZA": {
+    "points": [
+      {"id": "clock-tower", "name": "Clock Tower", "hint": "Cab/auto stand near the station's clock tower", "lat": null, "lng": null, "verified": false},
+      {"id": "main-gate", "name": "Main Gate", "hint": "Cabs wait outside the main entrance gate", "lat": null, "lng": null, "verified": false},
+      {"id": "parcel-office", "name": "Parcel Office", "hint": "Pickup near the parcel office side exit", "lat": null, "lng": null, "verified": false}
+    ]
+  }
+}
