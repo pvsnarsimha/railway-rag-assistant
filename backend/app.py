@@ -4973,6 +4973,26 @@ def api_push_platform_watch_remove(req: PlatformWatchRequest):
     return {"ok": True, "removed": n}
 
 
+@app.get("/api/station/pickup-points/{station_code}")
+def api_station_pickup_points(station_code: str):
+    code = _resolve_station_code(station_code)
+    if not code:
+        raise HTTPException(status_code=400, detail=f"Unknown station '{station_code}'.")
+    return {"station": code, "station_name": station_tools.station_name(code) or code,
+            "points": station_tools.pickup_points(code)}
+
+
+@app.get("/api/station/pickup-route/{station_code}")
+def api_station_pickup_route(station_code: str, point: str, platform: Optional[int] = None, step_free: bool = False):
+    code = _resolve_station_code(station_code)
+    if not code:
+        raise HTTPException(status_code=400, detail=f"Unknown station '{station_code}'.")
+    try:
+        return station_tools.pickup_route(code, platform, point, step_free)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @app.get("/api/station/map/{station_code}")
 def api_station_map(
     station_code: str, platform: Optional[int] = None, train_number: Optional[str] = None,

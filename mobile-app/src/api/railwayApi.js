@@ -967,6 +967,22 @@ export async function nearestStation(baseUrl, { lat, lng }) {
   return data;
 }
 
+/** Cab pickup points outside a station: { points: [{id,name,hint,lat,lng,verified}] }. */
+export async function getPickupPoints(baseUrl, stationCode) {
+  const client = makeClient(baseUrl);
+  const { data } = await client.get(`/api/station/pickup-points/${encodeURIComponent(stationCode)}`);
+  return data;
+}
+
+/** Walking steps from a platform to a chosen pickup point. */
+export async function getPickupRoute(baseUrl, stationCode, { point, platform, stepFree }) {
+  const client = makeClient(baseUrl);
+  const params = { point, step_free: !!stepFree };
+  if (platform) params.platform = platform;
+  const { data } = await client.get(`/api/station/pickup-route/${encodeURIComponent(stationCode)}`, { params });
+  return data;
+}
+
 /** Passenger report: "the train is really on platform N". */
 export async function reportPlatform(baseUrl, { trainNumber, station, platform, reporter }) {
   const client = makeClient(baseUrl);
