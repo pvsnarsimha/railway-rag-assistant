@@ -974,6 +974,15 @@ export async function getPickupPoints(baseUrl, stationCode) {
   return data;
 }
 
+/** Live walking directions between two GPS points: { steps, geometry, distance_m, duration_min }. */
+export async function getWalkRoute(baseUrl, from, to) {
+  const client = makeClient(baseUrl, { timeoutMs: 20000 });
+  const { data } = await client.get("/api/station/walk-route", {
+    params: { from_lat: from.lat, from_lng: from.lng, to_lat: to.lat, to_lng: to.lng },
+  });
+  return data;
+}
+
 /** Walking steps from a platform to a chosen pickup point. */
 export async function getPickupRoute(baseUrl, stationCode, { point, platform, stepFree }) {
   const client = makeClient(baseUrl);

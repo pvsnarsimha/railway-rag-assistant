@@ -1,0 +1,183 @@
+"""
+pickup_nav.py
+-------------
+Cab pickup points for ANY station + live walking directions to one.
+
+Pickup points are discovered per station from OpenStreetMap (taxi stands, bus
+stands, station entrances, named gates/clock towers/parcel offices within
+~350 m of the station's real coordinates in data/station_coordinates.json),
+merged with the hand-curated names in data/cab_pickup_points.json, and cached.
+If OpenStreetMap can't be reached, the curated names plus a generic "Station
+building" point at the station's own coordinates are returned - never invented
+positions. Walking directions come from the public OSM foot router (OSRM) and
+are turned into short spoken-style instructions.
+"""
+
+import json
+import math
+import os
+import re
+from typing import List, Optional
+
+import requests
+
+from api_cache import cached
+
+_DIR = os.path.join(os.path.dirname(__file__), "data")
+with open(os.path.join(_DIR, "station_coordinates.json"), "r", encoding="utf-8") as _f:
+    _COORDS = json.load(_f)
+try:
+    with open(os.path.join(_DIR, "cab_pickup_points.json"), "r", encoding="utf-8") as _f:
+        _CURATED = json.load(_f)
+except (OSError, ValueError):
+    _CURATED = {}
+
+OVERPASS_URL = os.environ.get("OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+FOOT_ROUTER_URL = os.environ.get("FOOT_ROUTER_URL", "https://routing.openstreetmap.de/routed-foot/route/v1/foot")
+_HEADERS = {"User-Agent": "railway-rag-assistant/1.0 (station pickup guide)"}
+RADIUS_M = 350
+
+
+def haversine_m(lat1, lng1, lat2, lng2) -> float:
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lng2 - lng1) / 2) ** 2
+    return 6371000.0 * 2 * math.asin(math.sqrt(a))
+
+
+def _slug(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "point"
+
+
+def _kind_label(tags: dict) -> Optional[str]:
+    if tags.get("amenity") == "taxi":
+        return "Taxi stand"
+    if tags.get("amenity") == "bus_station":
+        return "Bus stand"
+    if tags.get("highway") == "bus_stop":
+        return "Bus stop"
+    if tags.get("railway") == "station_entrance" or tags.get("entrance"):
+        return "Station entrance"
+    if tags.get("amenity") == "parking":
+        return "Parking"
+    return None
+
+
+def parse_overpass(elements: list, lat: float, lng: float) -> List[dict]:
+    """Overpass elements -> pickup points, nearest first, de-duplicated."""
+    out, seen = [], set()
+    for e in elements or []:
+        tags = e.get("tags") or {}
+        c = e.get("center") or e
+        plat, plng = c.get("lat"), c.get("lon")
+        if plat is None or plng is None:
+            continue
+        kind = _kind_label(tags)
+        name = (tags.get("name") or "").strip()
+        if not name and not kind:
+            continue
+        label = f"{name} ({kind})" if name and kind and kind.lower() not in name.lower() else (name or kind)
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        d = haversine_m(lat, lng, plat, plng)
+        out.append({"id": _slug(label), "name": label, "hint": f"About {int(round(d, -1))} m from the station", "lat": plat, "lng": plng,
+                    "verified": True, "source": "osm", "_d": d})
+    out.sort(key=lambda p: p["_d"])
+    for p in out:
+        p.pop("_d", None)
+    return out[:8]
+
+
+@cached(ttl_seconds=7 * 24 * 3600, prefix="osm_pickup", skip_empty=True)
+def _osm_points(code: str) -> List[dict]:
+    st = _COORDS.get(code)
+    if not st:
+        return []
+    lat, lng = st["lat"], st["lng"]
+    a = f"(around:{RADIUS_M},{lat},{lng})"
+    q = ("[out:json][timeout:20];("
+         f"nwr{a}[amenity=taxi];nwr{a}[amenity=bus_station];node{a}[highway=bus_stop];"
+         f"node{a}[railway=station_entrance];node{a}[entrance][name];nwr{a}[amenity=parking][name];"
+         f'nwr{a}[name~"clock tower|parcel|main gate|auto stand|cab stand|taxi|pickup|pick-up",i];'
+         ");out center 80;")
+    try:
+        r = requests.post(OVERPASS_URL, data={"data": q}, headers=_HEADERS, timeout=25)
+        r.raise_for_status()
+        return parse_overpass(r.json().get("elements"), lat, lng)
+    except (requests.RequestException, ValueError):
+        return []
+
+
+def pickup_points(code: str) -> List[dict]:
+    """Curated + OSM-discovered pickup points; curated names get coordinates
+    from a matching OSM point when there is one. Always ends with the station
+    building itself (real station coordinates) so guidance always works."""
+    code = (code or "").strip().upper()
+    st = _COORDS.get(code)
+    osm = _osm_points(code) if st else []
+    pts: List[dict] = []
+    used = set()
+    for cp in (_CURATED.get(code) or {}).get("points") or []:
+        p = dict(cp)
+        if p.get("lat") is None:
+            n = p["name"].lower()
+            m = next((o for o in osm if n in o["name"].lower()), None)
+            if m:
+                p.update(lat=m["lat"], lng=m["lng"], verified=True)
+                used.add(m["id"])
+        pts.append(p)
+    pts += [o for o in osm if o["id"] not in used][: max(0, 8 - len(pts))]
+    if st:
+        pts.append({"id": "station-building", "name": "Station building", "hint": "Main station building (from station coordinates)",
+                    "lat": st["lat"], "lng": st["lng"], "verified": True, "source": "station"})
+    if not pts:
+        pts.append({"id": "main-entrance", "name": "Main Entrance", "hint": "Cabs and autos wait outside the main entrance",
+                    "lat": None, "lng": None, "verified": False})
+    return pts
+
+
+_MOD = {"left": "left", "right": "right", "slight left": "slight left", "slight right": "slight right",
+        "sharp left": "sharp left", "sharp right": "sharp right", "straight": "straight", "uturn": "back"}
+
+
+def instruction(step: dict) -> str:
+    m = step.get("maneuver") or {}
+    typ, mod, name = m.get("type"), m.get("modifier"), (step.get("name") or "").strip()
+    onto = f" onto {name}" if name else ""
+    if typ == "arrive":
+        return "You have arrived at your pickup point"
+    if typ == "depart":
+        return f"Start walking{' on ' + name if name else ''}"
+    if typ in ("roundabout", "rotary"):
+        return f"At the roundabout, take exit {m.get('exit', '')}".strip()
+    if mod == "uturn":
+        return "Turn around"
+    if mod and mod != "straight":
+        return f"Turn {_MOD.get(mod, mod)}{onto}"
+    return f"Continue straight{onto}"
+
+
+def walk_route(from_lat: float, from_lng: float, to_lat: float, to_lng: float) -> dict:
+    """Walking route + instructions. Falls back to a straight-line leg when the
+    router is unreachable (flagged `fallback: true`)."""
+    url = f"{FOOT_ROUTER_URL}/{from_lng},{from_lat};{to_lng},{to_lat}"
+    try:
+        r = requests.get(url, params={"steps": "true", "overview": "full", "geometries": "geojson"}, headers=_HEADERS, timeout=15)
+        r.raise_for_status()
+        route = r.json()["routes"][0]
+        steps = []
+        for s in route["legs"][0]["steps"]:
+            loc = (s.get("maneuver") or {}).get("location") or [None, None]
+            steps.append({"text": instruction(s), "meters": int(round(s.get("distance") or 0)), "lat": loc[1], "lng": loc[0]})
+        coords = route["geometry"]["coordinates"]
+        stride = max(1, len(coords) // 300)
+        geom = [[c[1], c[0]] for c in coords[::stride]] + [[coords[-1][1], coords[-1][0]]]
+        return {"distance_m": int(round(route["distance"])), "duration_min": max(1, int(round(route["duration"] / 60))),
+                "steps": steps, "geometry": geom, "fallback": False}
+    except (requests.RequestException, ValueError, KeyError, IndexError):
+        d = int(round(haversine_m(from_lat, from_lng, to_lat, to_lng)))
+        return {"distance_m": d, "duration_min": max(1, int(round(d / 72))), "fallback": True,
+                "steps": [{"text": "Head towards the pickup point", "meters": d, "lat": from_lat, "lng": from_lng},
+                          {"text": "You have arrived at your pickup point", "meters": 0, "lat": to_lat, "lng": to_lng}],
+                "geometry": [[from_lat, from_lng], [to_lat, to_lng]]}

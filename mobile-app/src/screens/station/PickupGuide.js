@@ -2,11 +2,12 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { View, StyleSheet, TouchableOpacity, Linking, Platform, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { Text } from "../../i18n/Localized";
-import { getPickupPoints, getPickupRoute } from "../../api/railwayApi";
+import { getPickupPoints, getPickupRoute, getWalkRoute } from "../../api/railwayApi";
 import { describeApiError } from "../../api/client";
 import { openRide } from "../../components/BookRideCard";
 import { speak, stopSpeaking, isSpeechSupported } from "../../utils/speakNotifications";
 import { st } from "./stationShared";
+import { guideTick, newGuideState } from "../../utils/walkGuide";
 
 const STEP_ICON = { walk: "walk-outline", stairs: "trending-up-outline", lift: "swap-vertical-outline", enter: "enter-outline", flag: "flag-outline" };
 
@@ -40,6 +41,17 @@ export default function PickupGuide({ apiBaseUrl, station, stationName, platform
   const voiceRef = useRef(true);
   voiceRef.current = voice;
 
+  // Live GPS guidance (Google-Maps style): follows the phone and speaks turns.
+  const [live, setLive] = useState(null); // { info, note } while guiding
+  const subRef = useRef(null);
+  const liveRef = useRef({ route: null, state: null, fetching: false, lastFetch: 0 });
+  const stopLive = useCallback(() => {
+    if (subRef.current) { try { subRef.current.remove(); } catch (e) { /* ignore */ } subRef.current = null; }
+    liveRef.current = { route: null, state: null, fetching: false, lastFetch: 0 };
+    setLive(null);
+  }, []);
+  useEffect(() => stopLive, [stopLive]);
+
   useEffect(() => {
     let alive = true;
     setPoints([]); setPointId(null); setRoute(null); setStep(null); setError(null);
@@ -50,11 +62,55 @@ export default function PickupGuide({ apiBaseUrl, station, stationName, platform
 
   const choose = useCallback(async (id) => {
     setPointId(id); setStep(null); setRoute(null); setError(null); setLoading(true);
-    stopSpeaking();
+    stopSpeaking(); stopLive();
     try { setRoute(await getPickupRoute(apiBaseUrl, station, { point: id, platform, stepFree })); }
     catch (e) { setError(describeApiError(e)); }
     finally { setLoading(false); }
-  }, [apiBaseUrl, station, platform, stepFree]);
+  }, [apiBaseUrl, station, platform, stepFree, stopLive]);
+
+  async function startLive(point) {
+    if (point.lat == null || point.lng == null) {
+      setError("This pickup point has no map position yet — use the Google Maps button.");
+      return;
+    }
+    setError(null);
+    try {
+      const Location = require("expo-location");
+      const perm = await Location.requestForegroundPermissionsAsync();
+      if (perm.status !== "granted") { setError("Location permission denied — allow it to get live guidance."); return; }
+      const dest = { lat: point.lat, lng: point.lng };
+      liveRef.current = { route: null, state: newGuideState(), fetching: false, lastFetch: 0 };
+      setLive({ info: null, note: "Finding your position…" });
+      const onFix = async (loc) => {
+        const L = liveRef.current;
+        const pos = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+        const needRoute = !L.route || L.needReroute;
+        if (needRoute && !L.fetching && Date.now() - L.lastFetch > 15000) {
+          L.fetching = true; L.lastFetch = Date.now();
+          try {
+            L.route = await getWalkRoute(apiBaseUrl, pos, dest);
+            L.state = newGuideState(); L.needReroute = false;
+            if (voiceRef.current && L.route.fallback) speak("Walking map is unavailable, so I will only give the direction and distance.", { force: true });
+          } catch (e) { setLive({ info: null, note: "Couldn't get walking directions right now. Retrying…" }); }
+          L.fetching = false;
+        }
+        if (!L.route) return;
+        const r = guideTick(L.state, pos, L.route, dest);
+        L.state = r.state;
+        if (r.offRoute) { L.needReroute = true; if (voiceRef.current && !L.offSaid) { L.offSaid = true; speak("You are off the route. Recalculating.", { force: true }); } return; }
+        L.offSaid = false;
+        r.say.forEach((t) => { if (voiceRef.current) speak(t, { force: true }); });
+        setLive({ info: { remainingM: r.remainingM, nextText: r.nextText, nextDistM: r.nextDistM, arrived: r.arrived }, note: null });
+        if (r.arrived) stopLive();
+      };
+      subRef.current = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, timeInterval: 2000, distanceInterval: 4 }, onFix,
+      );
+    } catch (e) {
+      setError("Couldn't read your GPS location right now.");
+      stopLive();
+    }
+  }
 
   // Re-plan when the platform / step-free choice changes under a chosen point.
   useEffect(() => { if (pointId) choose(pointId); }, [platform, stepFree]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -79,7 +135,7 @@ export default function PickupGuide({ apiBaseUrl, station, stationName, platform
   return (
     <View style={styles.card}>
       <Text style={styles.title}>🚕 Cab pickup points</Text>
-      <Text style={styles.sub}>Pick where you want your cab to meet you at {stationName || station} — we'll guide you there.</Text>
+      <Text style={styles.sub}>Pick where you want your cab to meet you at {stationName || station}. Tap “Guide me with GPS” and we'll direct you there, turn by turn, by voice.</Text>
       <View style={styles.chips}>
         {points.map((p) => (
           <TouchableOpacity key={p.id} onPress={() => choose(p.id)} style={[styles.chip, p.id === pointId && styles.chipOn]}>
@@ -122,6 +178,29 @@ export default function PickupGuide({ apiBaseUrl, station, stationName, platform
             ) : null}
           </View>
           <View style={styles.row}>
+            {live ? (
+              <TouchableOpacity style={[styles.primary, { backgroundColor: st.red }]} onPress={() => { stopLive(); stopSpeaking(); }}>
+                <Text style={styles.primaryText}>■ Stop live guidance</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity style={styles.primary} onPress={() => startLive(chosen)}>
+                <Text style={styles.primaryText}>📍 Guide me with GPS</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          {live ? (
+            <View style={styles.liveBox}>
+              {live.info ? (
+                <>
+                  <Text style={styles.liveNext}>{live.info.nextText}</Text>
+                  <Text style={styles.liveMeta}>
+                    {live.info.nextDistM != null ? `in ${live.info.nextDistM} m · ` : ""}{live.info.remainingM} m to {route.point.name}
+                  </Text>
+                </>
+              ) : <Text style={styles.liveMeta}>{live.note}</Text>}
+            </View>
+          ) : null}
+          <View style={styles.row}>
             <TouchableOpacity style={styles.secondary} onPress={() => openUrl(mapsUrl(route))}><Text style={styles.secondaryText}>🗺️ Google Maps (walk)</Text></TouchableOpacity>
             <TouchableOpacity style={styles.secondary} onPress={() => openRide("uber", { name: stationName || station, code: station, lat: chosen.lat, lng: chosen.lng })}><Text style={styles.secondaryText}>Uber</Text></TouchableOpacity>
             <TouchableOpacity style={styles.secondary} onPress={() => openRide("ola", { name: stationName || station, code: station, lat: chosen.lat, lng: chosen.lng })}><Text style={styles.secondaryText}>Ola</Text></TouchableOpacity>
@@ -152,5 +231,8 @@ const styles = StyleSheet.create({
   primaryText: { color: "#fff", fontWeight: "800", fontSize: 14 },
   secondary: { backgroundColor: "#EEF2F7", borderRadius: 999, paddingVertical: 12, paddingHorizontal: 14, alignItems: "center" },
   secondaryText: { color: st.ink, fontWeight: "700", fontSize: 13 },
+  liveBox: { backgroundColor: st.blueSoft, borderRadius: 14, padding: 12, marginTop: 10 },
+  liveNext: { fontSize: 16, fontWeight: "800", color: st.ink },
+  liveMeta: { fontSize: 13, color: st.muted, marginTop: 2 },
   note: { fontSize: 11.5, color: st.muted, marginTop: 10 },
 });

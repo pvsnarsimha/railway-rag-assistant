@@ -643,19 +643,9 @@ def station_map(station_code: str, platform: Optional[int] = None, train_number:
 # ---------------------------------------------------------------------------
 # Cab pickup points + walking route to them (Station Navigator)
 # ---------------------------------------------------------------------------
-_PICKUP_PATH = os.path.join(os.path.dirname(__file__), "data", "cab_pickup_points.json")
-try:
-    with open(_PICKUP_PATH, "r", encoding="utf-8") as _f:
-        _PICKUP_POINTS = json.load(_f)
-except (OSError, ValueError):
-    _PICKUP_POINTS = {}
-_GENERIC_PICKUP = [{"id": "main-entrance", "name": "Main Entrance", "hint": "Cabs and autos wait outside the main entrance",
-                    "lat": None, "lng": None, "verified": False}]
-
-
 def pickup_points(station_code: str) -> list:
-    code = (station_code or "").strip().upper()
-    return (_PICKUP_POINTS.get(code) or {}).get("points") or _GENERIC_PICKUP
+    import pickup_nav
+    return pickup_nav.pickup_points(station_code)
 
 
 def pickup_route(station_code: str, platform: Optional[int], point_id: str, step_free: bool = False) -> dict:

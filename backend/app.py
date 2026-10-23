@@ -4982,6 +4982,16 @@ def api_station_pickup_points(station_code: str):
             "points": station_tools.pickup_points(code)}
 
 
+@app.get("/api/station/walk-route")
+def api_station_walk_route(from_lat: float, from_lng: float, to_lat: float, to_lng: float):
+    """Live walking directions (from the phone's GPS fix) to a pickup point."""
+    for v, lo, hi in ((from_lat, -90, 90), (to_lat, -90, 90), (from_lng, -180, 180), (to_lng, -180, 180)):
+        if not lo <= v <= hi:
+            raise HTTPException(status_code=400, detail="Invalid coordinates.")
+    import pickup_nav
+    return pickup_nav.walk_route(from_lat, from_lng, to_lat, to_lng)
+
+
 @app.get("/api/station/pickup-route/{station_code}")
 def api_station_pickup_route(station_code: str, point: str, platform: Optional[int] = None, step_free: bool = False):
     code = _resolve_station_code(station_code)
